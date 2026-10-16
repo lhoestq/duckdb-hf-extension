@@ -208,3 +208,32 @@ Then continue with the first unchecked box in `PLAN.md`. Do not restart the env 
 * `15:18` — `git init` + first commit pushed to the **private repo `github.com/lhoestq/duckdb-hf-extension`**
   (`gh` is authenticated as `lhoestq`; `.gitignore` keeps `.venv/`, `build/`, `dist/` and scratch out).
   Remember: commit + push after every milestone from now on.
+* `16:05` — repo-type coverage verified live: datasets (smoke_write), models (`scripts/smoke_models.sql`,
+  incl. git-tracked vs LFS files compared byte-for-byte with `md5(read_blob(..))` on both sides), spaces +
+  kernels (`hf_ls`, `read_text`), buckets (`scripts/smoke_buckets.sh`: seed with `hf buckets cp`, then
+  read/glob/ls/meta/delete through `hf://buckets/...`). Read suite now also covers
+  `hf://models/google-bert/bert-base-uncased/config.json` and `hf://kernels/kernels-community/flash-attn3`.
+* `16:10` — **bucket writes stay refused**, and the reason is now confirmed rather than assumed: the bucket
+  `batch` endpoint only accepts `addFile` with a `xetHash`, and there is no bucket commit/credentials route
+  (`/api/buckets/{id}/{credentials,storage-endpoint,s3,endpoint,upload}` all 404, `POST
+  /api/buckets/{id}/commits` does not exist), so nothing short of `hf_xet` can write one. Refusal moved into
+  `HFRefuseBucketWrite()` so `COPY TO` and `hf_upload` say the same thing.
+* `16:15` — `hf_upload(a, b)` was a binder error ("No function matches ... hf_upload(VARCHAR, VARCHAR)"):
+  in DuckDB 2.0 a **keyword-only parameter without a default is mandatory**. `message` now defaults to ""
+  meaning "derive it" (explicit message → `hf_commit_message` → `Upload <path>`). Rule of thumb for this
+  code base: every `AddKeywordOnly` needs a default value.
+* `16:25` — Phase 4 table functions added: `hf_list_revisions` (`GET /api/{t}/{repo}/commits/{rev}?limit=`),
+  `hf_list_refs` (`.../refs` → branches/tags/converts), `hf_create_repo` (`POST /api/repos/create` with
+  `name`+`organization` **split apart** — a `name` still containing the namespace is rejected — 409 means
+  "already created", 409 + "conflicting operation" is retried), `hf_status()` (version, endpoint,
+  token source, whoami, HTTP transport name from `HTTPUtil::Get(db).GetName()`, the read settings).
+  `hf_create_repo`'s `private` argument and `hf_list_revisions`' `max_revisions` are named that way because
+  `private`/`limit` parse as keywords; keyword-only params need defaults (see 16:15).
+* `16:35` — **multipart git-LFS uploads implemented** (previously refused, and silently misdetected): the
+  batch answer quotes `chunk_size` as a string, so `HFJson::AsInt` read it as 0 and the numeric presigned
+  part urls ended up as *headers* — a 20 MB blob was PUT at the `complete_multipart` url (404). Now
+  `chunk_size` is parsed with `AsString`, numeric header keys become part urls, parts are streamed from disk
+  (never the whole file), each PUT collects its `ETag`, and the completion `POST` sends
+  `{"oid":sha,"parts":[{"partNumber":n,"etag":...}]}` with git-lfs content types. 20 MB blob + 17 MB parquet
+  written by `COPY` both round-trip byte-identically.
+* `16:40` — smoke suites re-run: read 28/28, write 36 OK + the 3 intended refusals, models/buckets green.

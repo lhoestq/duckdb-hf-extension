@@ -24,6 +24,12 @@ SELECT 'r10 zstd' AS t, count(*) AS n FROM 'hf://datasets/lhoestq/playground/duc
 COPY (SELECT 1 i) TO 'hf://datasets/lhoestq/definitely-not-a-repo-xyz/a.parquet';
 COPY (SELECT 1 i) TO 'hf://datasets/wikimedia/wikipedia/nope.parquet';
 COPY (SELECT 1 i) TO 'hf://buckets/lhoestq/playground/nope.parquet';
+SELECT 'i1 upload 20mb' AS t, size FROM hf_upload('/tmp/hf_big_blob.bin', 'hf://datasets/lhoestq/playground/duckdb/big.bin');
+SELECT 'i2 read back md5' AS t, (SELECT md5(content) FROM read_blob('hf://datasets/lhoestq/playground/duckdb/big.bin')) = (SELECT md5(content) FROM read_blob('/tmp/hf_big_blob.bin')) AS match;
+SELECT 'i3 upload message' AS t, url FROM hf_upload('/tmp/hf_big_blob.bin', 'hf://datasets/lhoestq/playground/duckdb/big2.bin', message := 'duckdb smoke: hf_upload with message');
+SELECT 'i4 commit title' AS t, count(*) > 0 AS ok FROM hf_list_revisions('hf://datasets/lhoestq/playground', max_revisions := 3) WHERE title = 'duckdb smoke: hf_upload with message';
+SELECT 'i5 status' AS t, endpoint LIKE 'https://%', user <> '', whoami_error = '', token_source <> 'none' FROM hf_status();
+SELECT 'i6 cleanup' AS t, count(*) AS n FROM hf_delete(['hf://datasets/lhoestq/playground/duckdb/big.bin', 'hf://datasets/lhoestq/playground/duckdb/big2.bin']);
 SELECT 'd1 delete dir' AS t, url FROM hf_delete(['hf://datasets/lhoestq/playground/duckdb/wpart']);
 SELECT 'd2 check deleted' AS t, count(*) AS n FROM hf_ls('hf://datasets/lhoestq/playground/duckdb', recursive := true) WHERE path LIKE '%wpart%';
 SELECT 'd3 cleanup' AS t, count(*) AS n FROM hf_delete(['hf://datasets/lhoestq/playground/duckdb/w.parquet', 'hf://datasets/lhoestq/playground/duckdb/w.csv', 'hf://datasets/lhoestq/playground/duckdb/w.json', 'hf://datasets/lhoestq/playground/duckdb/empty.parquet', 'hf://datasets/lhoestq/playground/duckdb/zstd.parquet', 'hf://datasets/lhoestq/playground/duckdb/msg.parquet', 'hf://datasets/lhoestq/playground/duckdb/wéird name.parquet']);

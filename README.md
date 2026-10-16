@@ -73,11 +73,74 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | `hf_meta(path)` | `url, exists, size, etag, repo_type, repository, revision` |
 | `hf_upload(local_path, hf_path, message := ...)` | `url, size, sha256` |
 | `hf_delete(path)` / `hf_delete([...])` | `url` (one commit per repository in the list) |
+| `hf_list_revisions(path, max_revisions := 20)` | `repository, revision, title, author, date` |
+| `hf_list_refs(path)` | `repository, kind, name, ref, target_commit` |
+| `hf_create_repo(path, private := true)` | `url, created` (`created = false` when it already existed) |
+| `hf_status()` | `duckdb_version, endpoint, token_source, user, fullname, whoami_error, http_transport, hf_read_buffer_size, hf_read_cache_size, hf_max_per_page, hf_create_repo, hf_cache_dir` |
+
+`max_revisions` is spelled that way because `limit` is a reserved word in DuckDB's grammar.
+`hf_status()` is the "what am I connected to" command: it never prints the token, and a rejected or
+missing token shows up in `whoami_error` instead of throwing, so the settings stay readable.
 
 `hf_delete` accepts a mix of repository types and revisions: paths are grouped by
 `(endpoint, repo_type, repository, revision)` and committed together per repository. A directory is
 deleted by deleting the files below it (the commit API has no folder deletion for existing
 revisions), and deleting something that does not exist is an error rather than a silent no-op.
+
+## Every repo type
+
+Reads work for all five repo types, with or without the `@revision` suffix:
+
+```sql
+-- datasets
+SELECT * FROM read_parquet('hf://datasets/wikimedia/wikipedia/20231101.ab/*.parquet');
+SELECT * FROM hf_ls('hf://datasets/lhoestq/demo1', recursive := true);
+
+-- models (note: no `models/` prefix in the underlying url, like huggingface_hub)
+SELECT content FROM read_text('hf://models/google-bert/bert-base-uncased/config.json');
+SELECT * FROM glob('hf://models/nvidia/**/*.safetensors');
+
+-- spaces and kernels
+SELECT * FROM hf_ls('hf://spaces/dalle-mini/dalle-mini');
+SELECT content FROM read_text('hf://kernels/kernels-community/flash-attn3/README.md');
+
+-- buckets (S3-like storage: unversioned, addressed by id)
+SELECT * FROM read_parquet('hf://buckets/lhoestq/playground/duckdb/*.parquet');
+SELECT url, size FROM hf_meta('hf://buckets/lhoestq/playground/duckdb/probe.parquet');
+```
+
+Writes (parquet, csv, json, partitioned output, LFS-tracked files, multipart LFS for big blobs)
+work for `datasets`, `models`, `spaces` and `kernels`:
+
+```sql
+COPY (SELECT * FROM range(10) t(i)) TO 'hf://datasets/me/demo/out.parquet';
+COPY (SELECT * FROM read_parquet('hf://datasets/me/in/*.parquet'))
+  TO 'hf://models/me/demo/partitioned' (FORMAT PARQUET, PARTITION_BY (kind));
+
+-- overwrite in place (a commit that replaces the previous file)
+COPY (SELECT 42 AS answer) TO 'hf://datasets/me/demo/out.parquet';
+
+-- one-shot helpers
+SELECT * FROM hf_upload('out.parquet', 'hf://datasets/me/demo/out.parquet',
+                        message := 'daily export 2026-10-16');
+SELECT * FROM hf_delete(['hf://datasets/me/demo/old.parquet', 'hf://models/me/demo/partitioned']);
+```
+
+Buckets are readable and deletable but **not writable** from DuckDB: a bucket `addFile` requires a
+Xet `xetHash`, which only the `hf_xet` client computes. The extension refuses the write and points
+at the CLI instead:
+
+```sql
+COPY (SELECT 1) TO 'hf://buckets/me/playground/x.parquet';
+-- IO Error: Writing to Hugging Face buckets is not supported yet: bucket uploads (...) go through
+-- Xet storage, whose `xetHash` only the `hf_xet` client computes - use `hf buckets cp` (...)
+```
+```bash
+hf buckets cp out.parquet hf://buckets/lhoestq/playground/duckdb/out.parquet   # the way that works
+```
+
+Verified end to end (read + glob + delete) in `scripts/smoke_buckets.sh`, which seeds a bucket with
+the CLI and reads it back through `hf://`.
 
 ## Reading performance
 
@@ -121,10 +184,14 @@ Everything below is implemented in this tree; the ✔ marks are verified against
 * ✔ write path: `COPY ... TO 'hf://...'` (parquet/csv/json/zstd, overwrite, empty files,
   `PARTITION_BY`, unicode + spaces in paths, model + dataset repos, custom commit messages)
 * ✔ `hf_upload`, `hf_delete` (single path, list of paths, mixed repositories, recursive directories)
+* ✔ model / space / kernel repos end to end (writes, nested paths, `**` globs, LFS and git-tracked
+  files verified byte-identical with `md5(read_blob(...))`)
 * ✔ bucket reads and bucket deletes (`hf://buckets/...`)
-* ✘ Xet uploads (`hf_xet` is a Rust library, out of scope) — an LFS fallback is used whenever the
-  server allows it
-* ✘ multipart LFS uploads (>5 GiB single objects) — use `PARTITION_BY` to split output
+* ✔ `hf_list_revisions`, `hf_list_refs`, `hf_create_repo`, `hf_status`
+* ✔ multipart git-LFS uploads (the Hub switches a blob to `basic multipart` above ~10 MB: one
+  presigned PUT per part, then a completion POST with the part etags)
+* ✘ Xet uploads (`hf_xet` is a Rust library, out of scope) — the git-LFS transfer is used instead,
+  which the Hub accepts for every repo type
 * ✘ `hf://buckets/*` writes: bucket uploads require an Xet `xetHash`, which only `hf_xet` computes;
   the extension refuses with a message pointing at `hf buckets cp`
 
@@ -142,12 +209,16 @@ src/
   hf_read.cpp       per-file range cache (shared, coalesced, growing windows)
   hf_commit.cpp     the write protocol: preupload -> lfs batch -> ndjson commit (+repo mutex)
   hf_write.cpp      write handle: temp file buffering, upload+commit on close
-  hf_functions.cpp  hf_ls / hf_meta / hf_upload / hf_delete
+  hf_functions.cpp  hf_ls / hf_meta / hf_upload / hf_delete / hf_list_revisions / hf_list_refs
+                    / hf_create_repo / hf_status
   hf_extension.cpp  entry point
 scripts/
   try.py            runs one SQL statement per line, prints OK/FAIL (used by the smoke tests)
   smoke_read.sql    read-side end-to-end checks against the live Hub
   smoke_write.sql   write-side end-to-end checks (uses the lhoestq/playground scratch repos)
+  smoke_models.sql  model-repo round trips, incl. git vs LFS byte-level integrity
+  smoke_buckets.sh  seeds a bucket with `hf buckets cp`, then reads/globs/deletes it through hf://
+  smoke_buckets.sql the SQL run by smoke_buckets.sh
   bench.py          times a query with either the `hf` filesystem or plain `httpfs`
   check.sh          compile-only syntax check of every source file (fast feedback)
 ```
@@ -173,7 +244,8 @@ con.execute("LOAD '/path/to/hf.duckdb_extension'")
   upload + commit happen on `Close()`. One commit per file, serialised per repository within a
   process; concurrent writers are handled by the Hub's own conflict detection.
 * Files ≤ the Hub's inline threshold are sent as base64 in the commit payload; larger ones use
-  git-LFS *basic* transfer (a single presigned PUT, so the file is held in memory once). The
+  git-LFS transfer: *basic* (one presigned PUT, the file is held in memory once) or, above the
+  Hub's ~10 MB threshold, *basic multipart* (parts streamed from disk one at a time). The
   presigned PUT must **not** carry the API token, and a commit header must omit `parentCommit`
   rather than send it as null — both are rejected by the Hub.
 * Writing to a protected revision creates a pull request instead of committing — that is surfaced as

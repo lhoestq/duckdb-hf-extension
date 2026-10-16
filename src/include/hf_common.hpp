@@ -77,6 +77,12 @@ struct HFUrl {
 	string ResolveUrl() const;
 	//! `{endpoint}/api/{repo_type}/{repo}/tree/{revision}{path}`
 	string TreeUrl(idx_t limit, bool recursive) const;
+	//! `{endpoint}/api/{repo_type}/{repo}/commits/{revision}?limit=N` (commit history)
+	string CommitsUrl(idx_t limit) const;
+	//! `{endpoint}/api/{repo_type}/{repo}/refs` (branches, tags, conversions)
+	string RefsUrl() const;
+	//! `{endpoint}/api/{repo_type}/{repo}` (repo info)
+	string InfoUrl() const;
 
 	//! Throw an IOException explaining the expected syntax
 	[[noreturn]] static void ThrowParseError(const string &url, const string &reason = string());

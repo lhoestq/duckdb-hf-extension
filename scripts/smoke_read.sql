@@ -20,3 +20,11 @@ SELECT 'footer read' AS t, sum(total_compressed_size) > 0 AS ok FROM parquet_met
 SELECT 'revision read' AS t, count(*) AS n FROM 'hf://datasets/lhoestq/demo1@main/data/train.csv';
 SELECT 'glob model' AS t, count(*) AS n FROM glob('hf://models/lhoestq/playground/duckdb/*');
 SELECT 'glob one level' AS t2, count(*) AS n2 FROM glob('hf://datasets/wikimedia/wikipedia/20231101.ab/*');
+SELECT 'ls space' AS t, count(*) > 0 AS n FROM hf_ls('hf://spaces/dalle-mini/dalle-mini');
+SELECT 'ls kernel' AS t, count(*) > 0 AS n FROM hf_ls('hf://kernels/kernels-community/flash-attn3');
+SELECT 'kernel file' AS t, length(content) > 0 AS n FROM read_text('hf://kernels/kernels-community/flash-attn3/README.md');
+SELECT 'model config' AS t, length(content) > 10 AS n FROM read_text('hf://models/google-bert/bert-base-uncased/config.json');
+SELECT 'model glob' AS t, count(*) > 0 AS n FROM glob('hf://models/google-bert/bert-base-uncased/*.json');
+SELECT 'refs' AS t, kind, name FROM hf_list_refs('hf://datasets/lhoestq/demo1');
+SELECT 'revisions' AS t, count(*) > 0 AS ok FROM hf_list_revisions('hf://datasets/lhoestq/demo1', max_revisions := 3);
+SELECT 'status' AS t, endpoint LIKE 'https://%', token_source <> 'none', whoami_error = '' FROM hf_status();

@@ -130,6 +130,25 @@ string HFUrl::ResolveUrl() const {
 	return url + EncodePath(path);
 }
 
+string HFUrl::InfoUrl() const {
+	auto url = HFUtil::Join(endpoint, "api");
+	url = HFUtil::Join(url, HFRepoType::ToApiSegment(repo_type));
+	return HFUtil::Join(url, repository);
+}
+
+string HFUrl::RefsUrl() const {
+	return HFUtil::Join(InfoUrl(), "refs");
+}
+
+string HFUrl::CommitsUrl(idx_t limit) const {
+	auto url = HFUtil::Join(InfoUrl(), "commits");
+	url = HFUtil::Join(url, EncodePath(revision).empty() ? string("main") : EncodePath(revision));
+	if (limit > 0) {
+		url += "?limit=" + to_string(limit);
+	}
+	return url;
+}
+
 string HFUrl::TreeUrl(idx_t limit, bool recursive) const {
 	auto url = HFUtil::Join(endpoint, "api");
 	url = HFUtil::Join(url, HFRepoType::ToApiSegment(repo_type));

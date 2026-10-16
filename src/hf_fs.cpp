@@ -168,6 +168,98 @@ void HFFileSystem::Register(ExtensionLoader &loader) {
 	FileSystem::GetFileSystem(db).RegisterSubSystem(make_uniq<HFFileSystem>(db));
 }
 
+void HFListRevisions(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target, idx_t limit,
+                     const std::function<void(const HFRevisionInfo &)> &callback) {
+	if (target.url.IsBucket()) {
+		throw IOException("'%s' is a bucket: buckets are unversioned and have no commit history",
+		                  target.url.ToString());
+	}
+	auto client = HFMakeClient(db, opener, target);
+	auto body = client->Get(target.url.CommitsUrl(limit));
+	HFJson::ForEachObject(body, [&](const string &object) {
+		HFRevisionInfo revision;
+		bool found = false;
+		revision.sha = HFJson::GetString(object, "id", found);
+		if (!found) {
+			return;
+		}
+		revision.title = HFJson::GetString(object, "title", found);
+		// "authors":[{"user":"..."}] - the first author is what the Hub shows
+		revision.author = HFJson::GetString(object, "user", found);
+		revision.date = HFJson::GetString(object, "date", found);
+		revision.message = HFJson::GetString(object, "message", found);
+		callback(revision);
+	});
+}
+
+void HFListRefs(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
+                const std::function<void(const HFRefInfo &)> &callback) {
+	if (target.url.IsBucket()) {
+		throw IOException("'%s' is a bucket: buckets are unversioned and have no refs", target.url.ToString());
+	}
+	auto client = HFMakeClient(db, opener, target);
+	auto body = client->Get(target.url.RefsUrl());
+	for (const auto &kind : {"branches", "tags", "converts"}) {
+		auto array = HFJson::FindArray(body, kind);
+		if (array.empty()) {
+			continue;
+		}
+		HFJson::ForEachObject(array, [&](const string &object) {
+			HFRefInfo ref;
+			bool found = false;
+			ref.kind = kind;
+			ref.name = HFJson::GetString(object, "name", found);
+			if (!found) {
+				return;
+			}
+			ref.ref = HFJson::GetString(object, "ref", found);
+			ref.target_commit = HFJson::GetString(object, "targetCommit", found);
+			callback(ref);
+		});
+	}
+}
+
+void HFWhoami(DatabaseInstance &db, optional_ptr<FileOpener> opener, const string &path, string &user,
+              string &fullname, bool &is_pro, string &error) {
+	user.clear();
+	fullname.clear();
+	is_pro = false;
+	error.clear();
+
+	auto connection = HFSecrets::Resolve(opener, nullptr, path, &db);
+	if (!connection.HasToken()) {
+		error = "no token configured - anonymous access only";
+		return;
+	}
+	// the endpoint has to be read before `connection` moves into the client
+	auto whoami_url = connection.endpoint + "/api/whoami-v2";
+	try {
+		HFClient client(db, opener, std::move(connection), path);
+		auto body = client.Get(whoami_url);
+		bool found = false;
+		user = HFJson::GetString(body, "name", found);
+		if (!found) {
+			error = "unexpected answer from /api/whoami-v2";
+			return;
+		}
+		fullname = HFJson::GetString(body, "fullname", found);
+		is_pro = HFJson::AsBool(HFJson::GetString(body, "isPro", found));
+	} catch (std::exception &ex) {
+		error = string(ex.what());
+	}
+}
+
+void HFRefuseBucketWrite(const HFUrl &url, const string &action) {
+	if (!url.IsBucket()) {
+		return;
+	}
+	throw IOException("Writing to Hugging Face buckets is not supported yet: bucket uploads ('%s') go through Xet "
+	                  "storage, whose `xetHash` only the `hf_xet` client computes - use `hf buckets cp` (or `hf "
+	                  "buckets sync`) to write a bucket, or write to a dataset/model/space repo instead. Reading and "
+	                  "deleting buckets through hf://buckets/ works.",
+	                  action);
+}
+
 string HFFileSystem::GetHFUrl(const HFUrl &dir, const string &entry_path) {
 	HFUrl result = dir;
 	result.path = "/" + entry_path;
@@ -183,12 +275,7 @@ unique_ptr<FileHandle> HFFileSystem::OpenFile(const string &path, FileOpenFlags 
 	auto target = HFResolveTarget(path, opener, db);
 	if (flags.OpenForWriting() || flags.CreateFileIfNotExists() || flags.OverwriteExistingFile() ||
 	    flags.OpenForAppending()) {
-		if (target.url.IsBucket()) {
-			throw IOException("Writing to Hugging Face buckets ('%s') is not supported yet: bucket uploads go through "
-			                  "Xet storage, which only the `hf_xet` client speaks - use `hf buckets cp` to write, or "
-			                  "write to a dataset/model/space repo (hf://datasets/...) which supports COPY TO",
-			                  path);
-		}
+		HFRefuseBucketWrite(target.url, path);
 		return make_uniq<HFWriteHandle>(*this, path, flags, std::move(target), opener);
 	}
 	return make_uniq<HFReadHandle>(*this, path, flags, std::move(target), opener);

@@ -97,6 +97,40 @@ string HFMakeTempPathIn(DatabaseInstance &db, const string &preferred_dir, const
 //! Same, resolving the `hf_cache_dir` setting from `opener` first
 string HFMakeTempPath(DatabaseInstance &db, optional_ptr<FileOpener> opener, const string &extension);
 
+//! One commit of a repository history
+struct HFRevisionInfo {
+	string sha;
+	string title;
+	string message;
+	string author;
+	string date; //!< raw ISO-8601 as returned by the Hub
+};
+
+//! A branch, tag or conversion ref of a repository
+struct HFRefInfo {
+	string kind; //!< branch, tag or convert
+	string name;
+	string ref;
+	string target_commit;
+};
+
+//! Commit history of the revision a target points at. Throws for buckets, which are unversioned.
+void HFListRevisions(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target, idx_t limit,
+                     const std::function<void(const HFRevisionInfo &)> &callback);
+//! Branches, tags and conversions of a repository
+void HFListRefs(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
+                const std::function<void(const HFRefInfo &)> &callback);
+//! Create the repository behind `target`; returns false when it already existed
+bool HFCreateRepo(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target, bool private_repo);
+//! Who the resolved token belongs to. Failures are reported through `error` rather than thrown, so that
+//! `hf_status()` still shows the configuration when the token is missing or rejected.
+void HFWhoami(DatabaseInstance &db, optional_ptr<FileOpener> opener, const string &path, string &user,
+              string &fullname, bool &is_pro, string &error);
+
+//! Buckets are Xet-backed, and only the `hf_xet` client can compute the `xetHash` that `addFile` requires, so
+//! every write path (COPY, hf_upload, ...) refuses them with the same explanation
+void HFRefuseBucketWrite(const HFUrl &url, const string &action);
+
 //! Default commit message when `hf_commit_message` is not set
 string HFDefaultCommitMessage(const HFUrl &url);
 //@}

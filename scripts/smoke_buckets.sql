@@ -1,0 +1,15 @@
+SELECT 'bucket read parquet' AS t, count(*) AS n FROM read_parquet('hf://buckets/lhoestq/playground/duckdb/probe.parquet');
+SELECT 'bucket read csv' AS t, count(*) AS n FROM read_csv('hf://buckets/lhoestq/playground/duckdb/probe.csv');
+SELECT 'bucket glob' AS t, count(*) AS n FROM glob('hf://buckets/lhoestq/playground/duckdb/*.parquet');
+SELECT 'bucket ls' AS t, count(*) AS n FROM hf_ls('hf://buckets/lhoestq/playground/duckdb');
+SELECT 'bucket ls recursive' AS t, count(*) AS n FROM hf_ls('hf://buckets/lhoestq/playground', recursive := true);
+SELECT 'bucket meta' AS t, exists, size > 0 AS has_size, repo_type FROM hf_meta('hf://buckets/lhoestq/playground/duckdb/probe.parquet');
+SELECT 'bucket meta missing' AS t, exists FROM hf_meta('hf://buckets/lhoestq/playground/duckdb/nope.parquet');
+SELECT 'bucket multi file' AS t, count(*) AS n FROM read_parquet('hf://buckets/lhoestq/playground/duckdb/*.parquet');
+SELECT 'bucket direct read' AS t, answer FROM 'hf://buckets/lhoestq/playground/duckdb/probe.parquet';
+COPY (SELECT 1 i) TO 'hf://buckets/lhoestq/playground/duckdb/nope.parquet';
+SELECT * FROM hf_upload('/tmp/hf_bucket_probe.csv', 'hf://buckets/lhoestq/playground/duckdb/uploaded.csv');
+SELECT 'bucket delete' AS t, count(*) AS n FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/probe.csv');
+SELECT 'bucket gone' AS t, exists FROM hf_meta('hf://buckets/lhoestq/playground/duckdb/probe.csv');
+SELECT 'bucket cleanup' AS t, count(*) AS n FROM hf_delete(['hf://buckets/lhoestq/playground/duckdb/probe.parquet', 'hf://buckets/lhoestq/playground/duckdb/second.parquet']);
+SELECT 'bucket leftovers' AS t, path FROM hf_ls('hf://buckets/lhoestq/playground', recursive := true) WHERE path LIKE 'duckdb%' ORDER BY path;
