@@ -205,4 +205,6 @@ Then continue with the first unchecked box in `PLAN.md`. Do not restart the env 
   `expand=true` for listing mtimes and dropped it (payload cost not worth it: the tree endpoint's `expand`
   is a boolean that drags in `securityFileStatus` per entry).
 * `15:12` — both smoke suites re-run green; `README.md` rewritten with the read-performance design.
-  `gh` is authenticated as `lhoestq` → pushing this tree to a private repo.
+* `15:18` — `git init` + first commit pushed to the **private repo `github.com/lhoestq/duckdb-hf-extension`**
+  (`gh` is authenticated as `lhoestq`; `.gitignore` keeps `.venv/`, `build/`, `dist/` and scratch out).
+  Remember: commit + push after every milestone from now on.
