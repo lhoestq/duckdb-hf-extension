@@ -1,0 +1,33 @@
+-- write-side smoke test against the scratch repos. Run with:
+--   timeout 900 python3 -u scripts/try.py < scripts/smoke_write.sql
+COPY (SELECT * FROM range(5) t(i)) TO 'hf://datasets/lhoestq/playground/duckdb/w.parquet' (FORMAT PARQUET);
+SELECT 'r1 parquet' AS t, count(*) AS n FROM 'hf://datasets/lhoestq/playground/duckdb/w.parquet';
+COPY (SELECT 1 AS a, 'x' AS b) TO 'hf://datasets/lhoestq/playground/duckdb/w.csv' (FORMAT CSV);
+SELECT 'r2 csv' AS t, count(*) AS n FROM 'hf://datasets/lhoestq/playground/duckdb/w.csv';
+COPY (SELECT * FROM range(3) t(i)) TO 'hf://datasets/lhoestq/playground/duckdb/w.json' (FORMAT JSON, ARRAY true);
+SELECT 'r3 json' AS t, count(*) AS n FROM read_json('hf://datasets/lhoestq/playground/duckdb/w.json');
+COPY (SELECT * FROM range(9) t(i)) TO 'hf://datasets/lhoestq/playground/duckdb/w.parquet' (FORMAT PARQUET);
+SELECT 'r4 overwrite' AS t, count(*) AS n FROM 'hf://datasets/lhoestq/playground/duckdb/w.parquet';
+COPY (SELECT 1 i WHERE false) TO 'hf://datasets/lhoestq/playground/duckdb/empty.parquet' (FORMAT PARQUET);
+SELECT 'r5 empty' AS t, count(*) AS n FROM 'hf://datasets/lhoestq/playground/duckdb/empty.parquet';
+COPY (SELECT i, i % 3 AS g FROM range(9) t(i)) TO 'hf://datasets/lhoestq/playground/duckdb/wpart' (FORMAT PARQUET, PARTITION_BY (g));
+SELECT 'r6 partitioned' AS t, count(*) AS n FROM read_parquet('hf://datasets/lhoestq/playground/duckdb/wpart/**/*.parquet');
+COPY (SELECT 1 AS a) TO 'hf://datasets/lhoestq/playground/duckdb/wéird name.parquet' (FORMAT PARQUET);
+SELECT 'r7 spaces+unicode' AS t, count(*) AS n FROM 'hf://datasets/lhoestq/playground/duckdb/wéird name.parquet';
+COPY (SELECT 42 AS answer) TO 'hf://models/lhoestq/playground/duckdb/m.parquet' (FORMAT PARQUET);
+SELECT 'r8 model' AS t, answer FROM 'hf://models/lhoestq/playground/duckdb/m.parquet';
+SET hf_commit_message = 'duckdb smoke: custom commit message';
+COPY (SELECT 1 i) TO 'hf://datasets/lhoestq/playground/duckdb/msg.parquet';
+RESET hf_commit_message;
+COPY (SELECT * FROM range(100) t(i)) TO 'hf://datasets/lhoestq/playground/duckdb/zstd.parquet' (FORMAT PARQUET, COMPRESSION zstd);
+SELECT 'r10 zstd' AS t, count(*) AS n FROM 'hf://datasets/lhoestq/playground/duckdb/zstd.parquet';
+COPY (SELECT 1 i) TO 'hf://datasets/lhoestq/definitely-not-a-repo-xyz/a.parquet';
+COPY (SELECT 1 i) TO 'hf://datasets/wikimedia/wikipedia/nope.parquet';
+COPY (SELECT 1 i) TO 'hf://buckets/lhoestq/playground/nope.parquet';
+SELECT 'd1 delete dir' AS t, url FROM hf_delete(['hf://datasets/lhoestq/playground/duckdb/wpart']);
+SELECT 'd2 check deleted' AS t, count(*) AS n FROM hf_ls('hf://datasets/lhoestq/playground/duckdb', recursive := true) WHERE path LIKE '%wpart%';
+SELECT 'd3 cleanup' AS t, count(*) AS n FROM hf_delete(['hf://datasets/lhoestq/playground/duckdb/w.parquet', 'hf://datasets/lhoestq/playground/duckdb/w.csv', 'hf://datasets/lhoestq/playground/duckdb/w.json', 'hf://datasets/lhoestq/playground/duckdb/empty.parquet', 'hf://datasets/lhoestq/playground/duckdb/zstd.parquet', 'hf://datasets/lhoestq/playground/duckdb/msg.parquet', 'hf://datasets/lhoestq/playground/duckdb/wéird name.parquet']);
+SELECT 'd4 cleanup model' AS t, count(*) AS n FROM hf_delete('hf://models/lhoestq/playground/duckdb/m.parquet');
+SELECT 'z1 dataset leftovers' AS t, path FROM hf_ls('hf://datasets/lhoestq/playground', recursive := true) WHERE path LIKE 'duckdb%' ORDER BY path;
+SELECT 'z2 model leftovers' AS t, path FROM hf_ls('hf://models/lhoestq/playground', recursive := true) WHERE path LIKE 'duckdb%' ORDER BY path;
+SELECT 'z3 bucket leftovers' AS t, path FROM hf_ls('hf://buckets/lhoestq/playground', recursive := true) WHERE path LIKE 'duckdb%' ORDER BY path;

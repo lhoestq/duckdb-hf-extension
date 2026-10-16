@@ -1,0 +1,305 @@
+#pragma once
+
+#include "hf_common.hpp"
+#include "hf_http.hpp"
+#include "hf_secrets.hpp"
+
+#include "duckdb/common/file_system.hpp"
+
+#include <atomic>
+#include <list>
+#include <mutex>
+
+namespace duckdb {
+
+class DatabaseInstance;
+
+//! A path plus the connection/auth info resolved for it (endpoint, token)
+struct HFTarget {
+	HFUrl url;
+	HFConnection connection;
+
+	const HFUrl &Url() const {
+		return url;
+	}
+};
+
+//! One entry returned by a repository listing
+struct HFListEntry {
+	string path;    //!< path inside the repository (no leading slash)
+	bool is_dir {};
+	idx_t size {};
+	string sha256;  //!< only filled in by the detail-carrying listings
+	string lfs_oid; //!< empty for regular git files
+	string commit_url;
+};
+
+//! sha256 + size of a local file, as needed by the Hub upload APIs
+struct HFBlobInfo {
+	string sha256;
+	idx_t size = 0;
+	//! first bytes of the file, base64 encoded (the Hub uses them to detect LFS candidates)
+	string sample;
+};
+
+//! A single file operation in a commit
+struct HFCommitOp {
+	enum class Kind { WRITE, DELETE, DELETE_FOLDER, COPY };
+
+	Kind kind = Kind::WRITE;
+	string path;
+	//! for WRITE with uploadMode == "regular": raw content (base64-encoded when encoding is "base64")
+	string content;
+	string encoding = "base64";
+	//! for WRITE with uploadMode == "lfs" and for COPY of existing LFS files
+	string oid;
+	idx_t size = 0;
+	bool is_lfs = false;
+};
+
+//!\name High level Hugging Face operations, shared by the file system and the table functions
+//@{
+
+//! Parse an `hf://` path and resolve the endpoint + token to use for it
+HFTarget HFResolveTarget(const string &path, optional_ptr<FileOpener> opener, DatabaseInstance &db);
+
+//! Build an HTTP client (transport + auth) for a resolved target
+unique_ptr<HFClient> HFMakeClient(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target);
+
+//! List a "directory" of a repository. `recursive` is only honoured for buckets (the tree API is flat otherwise).
+//! `tolerate_not_found` keeps the listing of a missing path empty instead of throwing: the glob walk needs that,
+//! as a folder entry reported for one prefix may not resolve when listed on its own.
+void HFListEntries(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &dir, bool recursive,
+                   const std::function<void(const HFListEntry &)> &callback, bool with_details = false,
+                   bool tolerate_not_found = false);
+
+//! HEAD a file; returns false (and leaves size untouched) when it does not exist
+bool HFTryGetFileSize(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target, idx_t &size,
+                      string &etag);
+
+//! POST an ndjson commit payload to a repository, retrying on revision conflicts
+void HFCommit(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &repo_target,
+              const vector<HFCommitOp> &operations, const string &commit_message);
+
+//! Upload a local file to a repository path (preupload -> blob/LFS upload -> commit)
+void HFUploadLocalFile(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
+                       const string &local_path, const HFBlobInfo &blob, const string &commit_message);
+
+//! Delete files / folders in one commit
+void HFDeletePaths(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
+                   const vector<string> &files, const vector<string> &folders, const string &commit_message);
+
+//! sha256/size/sample of a local file
+HFBlobInfo HFComputeBlobInfo(DatabaseInstance &db, const string &local_path);
+
+//! Path of a scratch file used to buffer writes before they are uploaded. `preferred_dir` (empty = auto)
+string HFMakeTempPathIn(DatabaseInstance &db, const string &preferred_dir, const string &extension);
+//! Same, resolving the `hf_cache_dir` setting from `opener` first
+string HFMakeTempPath(DatabaseInstance &db, optional_ptr<FileOpener> opener, const string &extension);
+
+//! Default commit message when `hf_commit_message` is not set
+string HFDefaultCommitMessage(const HFUrl &url);
+//@}
+
+//! The Hugging Face file system: reads through the `/resolve/` endpoints, writes through the Hub commit API.
+class HFFileSystem : public FileSystem {
+public:
+	explicit HFFileSystem(DatabaseInstance &db_p) : db(db_p) {}
+
+	//! Register ourselves alongside httpfs' read-only `hf://` implementation (we win, see IsManuallySet)
+	static void Register(ExtensionLoader &loader);
+
+	unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags,
+	                                optional_ptr<FileOpener> opener) override;
+
+	bool CanHandleFile(const string &fpath) override;
+	string GetName() const override;
+	//! Win against the (read-only) `hf://` filesystem httpfs may also register, whoever registered last
+	bool IsManuallySet() override;
+	bool IsPathAbsolute(const string &path) override;
+	string PathSeparator(const string &path) override;
+	bool SupportsListFilesExtended() const override {
+		return true;
+	}
+
+	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
+	int64_t Read(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
+	void Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
+	int64_t Write(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
+	bool CanSeek() override;
+	void Seek(FileHandle &handle, idx_t location) override;
+	idx_t SeekPosition(FileHandle &handle) override;
+	int64_t GetFileSize(FileHandle &handle) override;
+	FileType GetFileType(FileHandle &handle) override;
+	FileMetadata Stats(FileHandle &handle) override;
+	optional<FileMetadata> GetStatsIfExists(const OpenFileInfo &file, optional_ptr<FileOpener> opener) override;
+	void Truncate(FileHandle &handle, int64_t new_size) override;
+	void FileSync(FileHandle &handle) override;
+	void AbortFileWrite(FileHandle &handle) override;
+	string GetVersionTag(FileHandle &handle) override;
+	bool OnDiskFile(FileHandle &handle) override;
+	timestamp_t GetLastModifiedTime(FileHandle &handle) override;
+
+	bool DirectoryExists(const string &directory, optional_ptr<FileOpener> opener) override;
+	bool CreateDirectoryExtended(const string &directory, const CreateDirectoryOptions &options,
+	                             optional_ptr<FileOpener> opener) override;
+	bool RemoveDirectoryExtended(const string &directory, const RemoveDirectoryOptions &options,
+	                             optional_ptr<FileOpener> opener) override;
+	bool ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
+	                       optional_ptr<FileOpener> opener) override;
+	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener) override;
+	bool TryRemoveFile(const string &filename, optional_ptr<FileOpener> opener) override;
+	void RemoveFiles(const vector<string> &filenames, optional_ptr<FileOpener> opener) override;
+	void MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener) override;
+	bool FileExists(const string &filename, optional_ptr<FileOpener> opener) override;
+	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener) override;
+
+	//! Build the `hf://` url of a listing entry found in `dir`
+	static string GetHFUrl(const HFUrl &dir, const string &entry_path);
+
+	DatabaseInstance &Db() const {
+		return db;
+	}
+
+private:
+	DatabaseInstance &db;
+};
+
+//! A run of bytes fetched from the hub in one request
+struct HFByteRange {
+	idx_t start = 0;
+	string data;
+
+	idx_t End() const {
+		return start + data.size();
+	}
+	idx_t Bytes() const {
+		return data.capacity();
+	}
+};
+
+//! A window that some thread is downloading right now
+struct HFPendingRange {
+	idx_t start = 0;
+	idx_t end = 0;
+	bool finished = false;
+};
+
+//! Fetched byte ranges of one remote file, shared by every handle that has it open. DuckDB reads a single file
+//! with tasks that share handles, and the hub charges ~0.3s of latency per range request: without sharing and
+//! coalescing, threads download the same bytes repeatedly and scans end up an order of magnitude slower.
+class HFFileCache : public enable_shared_from_this<HFFileCache> {
+public:
+	HFFileCache(string key_p, idx_t buffer_size_p, idx_t cache_limit_p);
+
+	//! Borrow (or create) the cache registered under `key` for as long as a handle holds it
+	static shared_ptr<HFFileCache> Acquire(const string &key, idx_t buffer_size, idx_t cache_limit);
+	//! Drop the registry entry for `key` once the last handle closed
+	static void Release(const string &key);
+
+	//! Read exactly [offset, offset + nr_bytes), fetching aligned windows on a miss
+	void Read(HFClient &client, const string &url, const string &path, data_ptr_t buffer, idx_t offset,
+	          idx_t nr_bytes);
+	//! HEAD the file once; the size, etag and mtime are then remembered
+	idx_t Size(HFClient &client, const string &url, const string &path);
+	const string &ETag() const {
+		return etag;
+	}
+	int64_t LastModified() const {
+		return last_modified;
+	}
+
+private:
+	//! HEAD the file if needed - callers must hold `lock`
+	idx_t SizeLocked(HFClient &client, const string &url, const string &path);
+	//! Insert a fetched window and trim the cache back to `cache_limit` - callers must hold `lock`
+	void InsertLocked(HFByteRange fresh);
+
+	mutable std::mutex lock;
+	std::condition_variable cv;
+	string key;
+	idx_t buffer_size;
+	idx_t cache_limit;
+	//! Size of the next read-ahead window, it doubles on every cache miss
+	idx_t fetch_length;
+	idx_t cached_bytes = 0;
+	optional_idx file_size;
+	string etag;
+	int64_t last_modified = 0;
+	//! Fetched ranges, most recently used first
+	std::list<HFByteRange> ranges;
+	//! Windows currently being downloaded by some thread
+	std::list<shared_ptr<HFPendingRange>> pending;
+};
+
+//! Read handle: fetches byte ranges on demand through the shared per-file cache.
+class HFReadHandle : public FileHandle {
+public:
+	HFReadHandle(HFFileSystem &file_system, const string &path, FileOpenFlags flags, HFTarget target,
+	             optional_ptr<FileOpener> opener);
+
+	void Close() override;
+	//! Read exactly [offset, offset + nr_bytes)
+	void ReadAt(data_ptr_t buffer, idx_t offset, idx_t nr_bytes);
+	idx_t Size();
+	idx_t GetPosition() const {
+		return position.load();
+	}
+	void SetPosition(idx_t position_p) {
+		position.store(position_p);
+	}
+	const string &ETag() const {
+		return cache->ETag();
+	}
+	//! Last modification time of the revision content, epoch seconds (0 when the Hub did not tell us)
+	int64_t LastModified() const {
+		return cache->LastModified();
+	}
+	const HFTarget &Target() const {
+		return target;
+	}
+	HFClient &Client() {
+		return *client;
+	}
+
+private:
+	HFTarget target;
+	string resolve_url;
+	string cache_key;
+	unique_ptr<HFClient> client;
+	shared_ptr<HFFileCache> cache;
+	std::atomic<idx_t> position {0};
+};
+
+//! Write handle: buffers into a local temp file, uploads + commits on Close().
+class HFWriteHandle : public FileHandle {
+public:
+	HFWriteHandle(HFFileSystem &file_system, const string &path, FileOpenFlags flags, HFTarget target,
+	              optional_ptr<FileOpener> opener);
+
+	void Close() override;
+	void Write(data_ptr_t buffer, idx_t nr_bytes);
+	//! Drop the buffered data without uploading anything
+	void Abort();
+	idx_t BytesWritten() const {
+		return bytes_written;
+	}
+	const HFTarget &Target() const {
+		return target;
+	}
+
+private:
+	void EnsureTempFile();
+	void CleanupTempFile();
+
+	HFTarget target;
+	string temp_path;
+	string cache_dir;
+	string commit_message;
+	unique_ptr<FileHandle> temp_handle;
+	idx_t bytes_written = 0;
+	bool closed = false;
+	bool aborted = false;
+};
+
+} // namespace duckdb

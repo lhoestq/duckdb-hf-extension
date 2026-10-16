@@ -1,0 +1,18 @@
+# build output
+build/
+dist/
+*.o
+*.a
+*.so
+*.duckdb_extension
+
+# local environment
+.venv/
+__pycache__/
+*.pyc
+
+# scratch
+.cache/
+.tmp/
+logs/
+compile_flags.txt
