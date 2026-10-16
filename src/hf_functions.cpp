@@ -433,6 +433,10 @@ static unique_ptr<GlobalTableFunctionState> HFStatusInit(ClientContext &context,
 	state->row.emplace_back(Value(transport));
 	state->row.emplace_back(setting("hf_read_buffer_size", Value::UBIGINT(HF_DEFAULT_READ_BUFFER)));
 	state->row.emplace_back(setting("hf_read_cache_size", Value::UBIGINT(HF_DEFAULT_READ_CACHE)));
+	state->row.emplace_back(
+	    setting("hf_read_max_parallel_requests", Value::UBIGINT(HF_DEFAULT_READ_MAX_PARALLEL)));
+	state->row.emplace_back(
+	    setting("hf_read_cache_total_size", Value::UBIGINT(HF_DEFAULT_READ_CACHE_TOTAL)));
 	state->row.emplace_back(setting("hf_max_per_page", Value::UBIGINT(HF_DEFAULT_LIST_PAGE_SIZE)));
 	state->row.emplace_back(setting("hf_create_repo", Value::BOOLEAN(false)));
 	state->row.emplace_back(setting("hf_cache_dir", Value("")));
@@ -459,6 +463,10 @@ static unique_ptr<FunctionData> HFStatusBind(ClientContext &, TableFunctionBindI
 	return_types.push_back(LogicalType::UBIGINT);
 	names.emplace_back("hf_read_cache_size");
 	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("hf_read_max_parallel_requests");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("hf_read_cache_total_size");
+	return_types.push_back(LogicalType::UBIGINT);
 	names.emplace_back("hf_max_per_page");
 	return_types.push_back(LogicalType::UBIGINT);
 	names.emplace_back("hf_create_repo");
@@ -470,6 +478,86 @@ static unique_ptr<FunctionData> HFStatusBind(ClientContext &, TableFunctionBindI
 
 static void HFStatusFunction(ClientContext &, TableFunctionInput &data, DataChunk &output) {
 	auto &state = data.global_state->Cast<HFStatusState>();
+	if (state.done) {
+		return;
+	}
+	state.done = true;
+	for (idx_t col = 0; col < state.row.size(); col++) {
+		output.data[col].SetValue(0, state.row[col]);
+	}
+	output.SetChildCardinality(1);
+}
+
+//===----------------------------------------------------------------------===//
+// hf_read_stats
+//===----------------------------------------------------------------------===//
+
+struct HFReadStatsBindData : public TableFunctionData {
+	bool reset = false;
+};
+
+struct HFReadStatsState : public GlobalTableFunctionState {
+	vector<Value> row;
+	bool done = false;
+
+	idx_t MaxThreads() const override {
+		return 1;
+	}
+};
+
+static unique_ptr<FunctionData> HFReadStatsBind(ClientContext &, TableFunctionBindInput &input,
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto bind_data = make_uniq<HFReadStatsBindData>();
+	bind_data->reset = NamedArgumentOr(input, "reset", false);
+
+	names.emplace_back("files_opened");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("range_hits");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("coalesced_waits");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("window_fetches");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("part_requests");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("straddling_fetches");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("evictions");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("bytes_fetched");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("invalidations");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("retained_bytes");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("retained_files");
+	return_types.push_back(LogicalType::UBIGINT);
+	return std::move(bind_data);
+}
+
+static unique_ptr<GlobalTableFunctionState> HFReadStatsInit(ClientContext &, TableFunctionInitInput &input) {
+	auto &bind_data = input.bind_data->Cast<HFReadStatsBindData>();
+	auto state = make_uniq<HFReadStatsState>();
+	auto &counters = HFReadCountersGet();
+	state->row.emplace_back(Value::UBIGINT(NumericCast<idx_t>(counters.files_opened.load())));
+	state->row.emplace_back(Value::UBIGINT(NumericCast<idx_t>(counters.range_hits.load())));
+	state->row.emplace_back(Value::UBIGINT(NumericCast<idx_t>(counters.coalesced_waits.load())));
+	state->row.emplace_back(Value::UBIGINT(NumericCast<idx_t>(counters.window_fetches.load())));
+	state->row.emplace_back(Value::UBIGINT(NumericCast<idx_t>(counters.part_requests.load())));
+	state->row.emplace_back(Value::UBIGINT(NumericCast<idx_t>(counters.straddling_fetches.load())));
+	state->row.emplace_back(Value::UBIGINT(NumericCast<idx_t>(counters.evictions.load())));
+	state->row.emplace_back(Value::UBIGINT(NumericCast<idx_t>(counters.bytes_fetched.load())));
+	state->row.emplace_back(Value::UBIGINT(NumericCast<idx_t>(counters.invalidations.load())));
+	state->row.emplace_back(Value::UBIGINT(HFReadCacheRetainedBytes()));
+	state->row.emplace_back(Value::UBIGINT(HFReadCacheRetainedFiles()));
+	if (bind_data.reset) {
+		HFReadCountersReset();
+	}
+	return std::move(state);
+}
+
+static void HFReadStatsFunction(ClientContext &, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<HFReadStatsState>();
 	if (state.done) {
 		return;
 	}
@@ -689,6 +777,10 @@ void HFFunctions::Register(ExtensionLoader &loader) {
 
 	TableFunction hf_status(Identifier("hf_status"), {}, HFStatusFunction, HFStatusBind, HFStatusInit);
 	loader.RegisterFunction(hf_status);
+
+	TableFunction hf_read_stats(Identifier("hf_read_stats"), {}, HFReadStatsFunction, HFReadStatsBind, HFReadStatsInit);
+	hf_read_stats.GetSignature().AddKeywordOnly("reset", LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	loader.RegisterFunction(hf_read_stats);
 
 	TableFunction hf_delete_str(Identifier("hf_delete"), {LogicalType::VARCHAR}, HFDeleteFunction, HFDeleteBind,
 	                             HFDeleteInit);

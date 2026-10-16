@@ -377,6 +377,8 @@ void HFCommit(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTar
 				    "protected, commit the PR to see the data",
 				    repo_target.url.ToString(), pr);
 			}
+			// the repository has new bytes at these paths now: any window cached for it is stale
+			HFReadCacheInvalidateRepo(HFRepoCacheKey(repo_target.url));
 			return;
 		}
 		if ((status == 404 || status == 403) && !created_repo) {

@@ -365,6 +365,7 @@ unique_ptr<HTTPResponse> HFClient::SendRequest(BaseRequest &request) {
 		return response;
 	} catch (std::exception &ex) {
 		RethrowWithTransportHint(ex, http_util->GetName(), request.url);
+		return nullptr; // RethrowWithTransportHint always throws, this only keeps the compiler certain of it
 	}
 }
 
@@ -514,6 +515,36 @@ bool HFClient::GetRange(const string &url, idx_t offset, idx_t len, string &out,
 		get.try_request = true;
 		return SendRequest(get);
 	});
+	return ok && !response->HasRequestError();
+}
+
+bool HFClient::GetRangeInto(const string &url, idx_t offset, idx_t len, data_ptr_t buffer, idx_t &bytes_read,
+                           const HTTPHeaders &headers) {
+	HTTPHeaders final_headers = WithAuth(headers);
+	final_headers.Insert("Range", StringUtil::Format("bytes=%llu-%llu", offset, offset + len - 1));
+	bool ok = false;
+	idx_t written = 0;
+	auto response = RunWithRetry([&]() {
+		ok = false;
+		written = 0;
+		GetRequestInfo get(url, final_headers, *params,
+		                   [&](const HTTPResponse &response) {
+			                   ok = static_cast<int>(response.status) == 206 || static_cast<int>(response.status) == 200;
+			                   return true;
+		                   },
+		                   [&](const_data_ptr_t data, idx_t data_length) {
+			                   if (written + data_length > len) {
+				                   // the server sent more than the requested range, the buffer would overflow
+				                   return false;
+			                   }
+			                   memcpy(buffer + written, data, data_length);
+			                   written += data_length;
+			                   return true;
+		                   });
+		get.try_request = true;
+		return SendRequest(get);
+	});
+	bytes_read = written;
 	return ok && !response->HasRequestError();
 }
 

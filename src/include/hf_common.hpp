@@ -17,8 +17,14 @@ static constexpr const char *HF_DEFAULT_ENDPOINT = "https://huggingface.co";
 constexpr idx_t HF_DEFAULT_LIST_PAGE_SIZE = 1000;
 //! Read-ahead buffer used by `HFReadHandle`
 constexpr idx_t HF_DEFAULT_READ_BUFFER = 8 * 1024 * 1024;
-//! Total amount of fetched bytes a single hf:// file handle may keep around
-constexpr idx_t HF_DEFAULT_READ_CACHE = 128 * 1024 * 1024;
+//! Total amount of fetched bytes a single hf:// file may keep around
+constexpr idx_t HF_DEFAULT_READ_CACHE = 256 * 1024 * 1024;
+//! How many range requests one read-ahead window is split over (1 disables the fan-out)
+constexpr idx_t HF_DEFAULT_READ_MAX_PARALLEL = 4;
+//! How many fetched bytes the process keeps around over all hf:// files, handles closed or not
+constexpr idx_t HF_DEFAULT_READ_CACHE_TOTAL = 1024 * 1024 * 1024;
+//! Smallest per-file window cache a file is left with when the budget is split over open files
+constexpr idx_t HF_MIN_READ_CACHE = 64 * 1024 * 1024;
 //! How often a single GET/HEAD/range request is retried on throttling or transport errors
 constexpr idx_t HF_MAX_HTTP_ATTEMPTS = 5;
 //! Single-PUT (non multipart) LFS uploads are capped by S3 at 5GiB
@@ -91,6 +97,10 @@ struct HFUrl {
 	//! Percentage-encode the path component for use in a URL (keeps '/' separators)
 	static string EncodePath(const string &path);
 };
+
+//! Identifies the repository a url points at (`endpoint|repo_type|repository`), used to invalidate the
+//! in-memory read caches of exactly the repository a commit just changed
+string HFRepoCacheKey(const HFUrl &url);
 
 //! Small helpers shared by the filesystem, the writer and the table functions.
 struct HFUtil {

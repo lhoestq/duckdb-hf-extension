@@ -2,24 +2,38 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-16, ~15:15 UTC)
+## Current position (2026-10-16, ~18:35 UTC)
 
-**Milestone: the extension is feature-complete for v1 and green on both live smoke suites, and reads are
-now within ~1.3x of `httpfs` on large files (was ~15x).**
+**Milestone: the read path reached parity with `httpfs` on large parquet scans (was ~1.3x slower), with
+1.008x download amplification, and the read path got a dashboard (`hf_read_stats()`).**
 
 * Built `dist/hf.duckdb_extension` for `v2.0.0-alpha47600` (`OVERRIDE_GIT_DESCRIBE=v2.0.0-alpha47600`),
   loads in the Python pre-release with `allow_unsigned_extensions`.
-* `scripts/smoke_read.sql` (22 checks) and `scripts/smoke_write.sql` (parquet/csv/json/overwrite/empty/
-  partitioned/unicode/model/zstd + the three expected error paths) pass.
-* Read perf work of this session, in order: thread-safety fix for a `SIGSEGV` (DuckDB 2.0 shares one file
-  handle between tasks), transport-session reuse, per-file shared byte-range cache with coalesced
-  in-flight windows and doubling aligned read-ahead. See "Reading performance" in `README.md` for numbers.
-* Remaining known gaps (deliberate, documented in `README.md`): Xet uploads, multipart LFS (>5 GiB
-  objects), `hf://buckets/*` writes.
+* Live smoke suites after this session's read rewrite: `smoke_read.sql` 30 OK / 0 FAIL, `smoke_models.sql`
+  25 OK / 0 FAIL, `smoke_write.sql` 42 OK (+ the 3 intended refusals), `smoke_buckets.sh` 13 OK (+ 2 intended
+  refusals). The write suite now also covers "read after overwrite must see the new bytes".
+* What changed in the read path (all of it in `src/hf_read.cpp`, described in `README.md`):
+  * the cache registry keeps `shared_ptr<HFFileCache>` entries instead of `weak_ptr`, so a file's fetched
+    windows survive the handle churn of a parquet metadata open/close — this alone took a 287 MB scan from
+    ~1.9x the file down to ~1.47x;
+  * windows are always taken on a `hf_read_buffer_size` grid, widened to finish a read instead of falling
+    back to an unaligned fetch — this removed the remaining overlap re-downloads (now 1.008x);
+  * a missing window is pulled in up to `hf_read_max_parallel_requests` parallel range parts
+    (`GetRangeInto` streams straight into the caller's buffer, no extra copy);
+  * new settings `hf_read_max_parallel_requests` (4) and `hf_read_cache_total_size` (1 GiB, split between
+    the files open at once), per-file `hf_read_cache_size` default raised 128 MiB -> 256 MiB;
+  * new counters + `hf_read_stats(reset := false)`, `HFReadCacheClear()`;
+  * **a commit invalidates the cached windows of its repository** — retention beyond the handle had made a
+    read-after-`COPY TO` return the old bytes (caught by `smoke_models.sql`, now covered by tests).
+* Read cache is in-memory only: no disk I/O anywhere on the read path (verified by grep + by behaviour);
+  the only local files created are write-path scratch buffers before a commit.
+* Remaining known gaps (deliberate, documented in `README.md`): Xet uploads, bucket writes, async prefetch
+  across windows (the one pattern still behind httpfs: whole-file `read_blob`, 6.0 s vs 4.3 s).
 
-Immediate next actions: (1) push to a private `lhoestq` GitHub repo (doing this now), (2) package/ship -
-`make release` + `scripts/create_local_extension_repo.py` so `INSTALL hf` works instead of `LOAD '<path>'`,
-(3) optional read tuning (async prefetch of the next window).
+Immediate next actions: (1) get one green run of `.github/workflows/build.yml` — the `gh` token is missing
+Actions permission (`gh workflow list` -> HTTP 403), so either the token needs the Actions scope or the
+workflow has to be started from the web UI; (2) dogfood distribution by hosting the generated repository on
+the Hub and installing from `https://huggingface.co/datasets/...`.
 
 ## What the user asked for
 
@@ -272,3 +286,23 @@ Then continue with the first unchecked box in `PLAN.md`. Do not restart the env 
   the vendored ci-tools sha. **Not executed on GitHub yet** — the matrix needs a first green run.
 * `17:40` — all suites re-run after the transport change: read 30 OK / 0 FAIL, write 36 OK (+ the 3
   intended refusals), models 25 OK, buckets green (2 intended refusals).
+* `18:05` — byte amplification hunt, using the new `hf_read_stats()` counters. Two independent causes:
+  (a) the cache registry held `weak_ptr`s, so a parquet file's cache died with the metadata handle and was
+  rebuilt by the data scan (the same 287 MB file downloaded ~1.9x); (b) a read straddling a window edge
+  fell back to `fetch_start = offset`, abandoning grid alignment and re-downloading the overlap. Registry
+  now owns `shared_ptr` entries (LRU over `hf_read_cache_total_size`, entries with open handles skipped),
+  and `Read` loops over grid-aligned windows, copying across window boundaries instead of refetching.
+* `18:20` — `FetchWindow` splits one missing window into up to `hf_read_max_parallel_requests` range
+  requests on separate `HFClient`s (a client owns a transport session and cannot be shared between
+  threads) and joins them in the claiming thread; `HFClient::GetRangeInto` streams a range straight into the
+  caller's buffer. Counters renamed `unaligned_fetches` -> `straddling_fetches`, plus `hf_read_stats()`
+  exposing files/hits/waits/windows/parts/straddles/evictions/invalidations/bytes/retained.
+* `18:30` — retention beyond the handle broke read-after-write: `COPY` twice to the same path, the second
+  read served the pre-commit window (`smoke_models.sql` caught it). Every commit (repo *and* bucket batch)
+  now calls `HFReadCacheInvalidateRepo(HFRepoCacheKey(url))`, which drops the windows of that repository
+  even from caches that still have live handles. Regression tests added to `smoke_write.sql` (c1-c4).
+* `18:35` — defaults: `hf_read_cache_size` 128 MiB -> 256 MiB (8 windows of the 32 MiB ceiling: at 128 MiB
+  an 8-thread scan evicts its own windows), `hf_read_cache_total_size` 1 GiB with a per-file share of
+  `budget / open files` (floor 64 MiB) so a scan over many files cannot multiply the budget by its
+  parallelism. Full scan of the 287 MB file: **3.9 s vs httpfs 3.8 s**, 289 612 440 bytes fetched for
+  287 412 556 bytes on disk.

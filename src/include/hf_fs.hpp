@@ -222,20 +222,67 @@ struct HFPendingRange {
 //! Fetched byte ranges of one remote file, shared by every handle that has it open. DuckDB reads a single file
 //! with tasks that share handles, and the hub charges ~0.3s of latency per range request: without sharing and
 //! coalescing, threads download the same bytes repeatedly and scans end up an order of magnitude slower.
+//! Counters for the read path, process wide and exposed by hf_read_stats(). They exist so that a slow scan
+//! can be told apart from an amplifying one: bytes_fetched / file size says how many times the bytes crossed
+//! the wire, part_requests / window_fetches how parallel each window was.
+struct HFReadCounters {
+	std::atomic<uint64_t> files_opened {0};
+	//! reads answered from a window that was already fetched
+	std::atomic<uint64_t> range_hits {0};
+	//! reads that waited for a window another thread was fetching
+	std::atomic<uint64_t> coalesced_waits {0};
+	//! windows pulled from the hub
+	std::atomic<uint64_t> window_fetches {0};
+	//! range requests used to pull those windows (more than one per window when a window is split)
+	std::atomic<uint64_t> part_requests {0};
+	//! windows that had to span more than one grid block because one read straddled a window edge
+	std::atomic<uint64_t> straddling_fetches {0};
+	//! windows dropped to stay under hf_read_cache_size
+	std::atomic<uint64_t> evictions {0};
+	//! repositories whose cached windows were thrown away because something was committed to them
+	std::atomic<uint64_t> invalidations {0};
+	std::atomic<uint64_t> bytes_fetched {0};
+};
+
+HFReadCounters &HFReadCountersGet();
+void HFReadCountersReset();
+
+//! What the process keeps fetched after the handles are closed (see HFReadCacheRegistry in hf_read.cpp)
+idx_t HFReadCacheRetainedBytes();
+idx_t HFReadCacheRetainedFiles();
+//! Drop every retained cache (the caches of files that are being read right now survive until they close)
+void HFReadCacheClear();
+//! Forget what was fetched for one repository, after a commit changed it: a reader that opens the file
+//! again must see the new bytes, not the window cached before the commit
+void HFReadCacheInvalidateRepo(const string &repo_key);
+
 class HFFileCache : public enable_shared_from_this<HFFileCache> {
 public:
-	HFFileCache(string key_p, idx_t buffer_size_p, idx_t cache_limit_p);
+	HFFileCache(string key_p, idx_t buffer_size_p, idx_t cache_limit_p, idx_t max_parallel_p);
 
-	//! Borrow (or create) the cache registered under `key` for as long as a handle holds it
-	static shared_ptr<HFFileCache> Acquire(const string &key, idx_t buffer_size, idx_t cache_limit);
-	//! Drop the registry entry for `key` once the last handle closed
-	static void Release(const string &key);
+	//! Borrow (or create) the cache registered under `key`, keeping at most `total_budget` fetched bytes
+	//! around over all files. `repo_key` names the repository the bytes come from, see HFRepoCacheKey.
+	static shared_ptr<HFFileCache> Acquire(const string &key, idx_t buffer_size, idx_t cache_limit,
+	                                      idx_t max_parallel, idx_t total_budget, const string &repo_key);
 
 	//! Read exactly [offset, offset + nr_bytes), fetching aligned windows on a miss
 	void Read(HFClient &client, const string &url, const string &path, data_ptr_t buffer, idx_t offset,
 	          idx_t nr_bytes);
 	//! HEAD the file once; the size, etag and mtime are then remembered
 	idx_t Size(HFClient &client, const string &url, const string &path);
+	//! How many fetched bytes this entry currently holds
+	idx_t CachedBytes() {
+		std::lock_guard<std::mutex> guard(lock);
+		return cached_bytes;
+	}
+	//! Forget every fetched window: the repository behind this entry just changed underneath us
+	void DropAllWindows() {
+		std::lock_guard<std::mutex> guard(lock);
+		ranges.clear();
+		cached_bytes = 0;
+		file_size = optional_idx();
+		etag = "";
+	}
 	const string &ETag() const {
 		return etag;
 	}
@@ -254,6 +301,8 @@ private:
 	string key;
 	idx_t buffer_size;
 	idx_t cache_limit;
+	//! Range requests one missing window is fetched with, see FetchWindow
+	idx_t max_parallel;
 	//! Size of the next read-ahead window, it doubles on every cache miss
 	idx_t fetch_length;
 	idx_t cached_bytes = 0;

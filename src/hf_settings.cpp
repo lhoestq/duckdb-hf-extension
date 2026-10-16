@@ -59,6 +59,12 @@ void HFSettings::Register(DBConfig &config) {
 	                          LogicalType::UBIGINT, Value::UBIGINT(HF_DEFAULT_READ_BUFFER));
 	config.AddExtensionOption("hf_read_cache_size", "How many fetched bytes a single hf:// file may keep in memory (shared by all readers of that file)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(HF_DEFAULT_READ_CACHE));
+	config.AddExtensionOption("hf_read_max_parallel_requests",
+	                          "How many range requests one hf:// read-ahead window is fetched with in parallel",
+	                          LogicalType::UBIGINT, Value::UBIGINT(HF_DEFAULT_READ_MAX_PARALLEL));
+	config.AddExtensionOption("hf_read_cache_total_size",
+	                          "How many fetched bytes are kept around over all hf:// files (an in-memory cache, nothing is written to disk)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(HF_DEFAULT_READ_CACHE_TOTAL));
 }
 
 } // namespace duckdb

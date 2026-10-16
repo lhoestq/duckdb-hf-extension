@@ -59,8 +59,10 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | `hf_token` | `` | API token (secrets and env vars take precedence as above) |
 | `hf_endpoint` | `https://huggingface.co` | Hub endpoint (global) |
 | `hf_cache_dir` | `` | where to buffer files before uploading (falls back to `temp_directory`/`TMPDIR`) |
-| `hf_read_buffer_size` | `8388608` | smallest read-ahead window fetched for a `hf://` file, in bytes |
-| `hf_read_cache_size` | `134217728` | how many fetched bytes one `hf://` file may keep in memory (shared by every reader of that file) |
+| `hf_read_buffer_size` | `8388608` | smallest read-ahead window fetched for a `hf://` file, in bytes (also the size of one range request when a window is split) |
+| `hf_read_cache_size` | `268435456` | how many fetched bytes one `hf://` file may keep in memory (shared by every reader of that file) |
+| `hf_read_cache_total_size` | `1073741824` | how many fetched bytes the process keeps around over all files, and how that budget is split between the files open at once |
+| `hf_read_max_parallel_requests` | `4` | how many range requests one missing window is pulled with, in parallel (`1` disables the fan-out) |
 | `hf_max_per_page` | `0` (=1000) | page size for tree listings |
 | `hf_commit_message` | `Upload files with DuckDB` | commit message for writes |
 | `hf_create_repo` | `false` | create the target repository when it does not exist |
@@ -76,7 +78,13 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | `hf_list_revisions(path, max_revisions := 20)` | `repository, revision, title, author, date` |
 | `hf_list_refs(path)` | `repository, kind, name, ref, target_commit` |
 | `hf_create_repo(path, private := true)` | `url, created` (`created = false` when it already existed) |
-| `hf_status()` | `duckdb_version, endpoint, token_source, user, fullname, whoami_error, http_transport, hf_read_buffer_size, hf_read_cache_size, hf_max_per_page, hf_create_repo, hf_cache_dir` |
+| `hf_status()` | `duckdb_version, endpoint, token_source, user, fullname, whoami_error, http_transport, hf_read_buffer_size, hf_read_cache_size, hf_read_max_parallel_requests, hf_read_cache_total_size, hf_max_per_page, hf_create_repo, hf_cache_dir` |
+| `hf_read_stats(reset := false)` | `files_opened, range_hits, coalesced_waits, window_fetches, part_requests, straddling_fetches, evictions, invalidations, bytes_fetched, retained_bytes, retained_files` |
+
+`hf_read_stats()` is the read path's dashboard: `bytes_fetched / <file size>` is the download
+amplification (a scan of one file should be ~1.0), `evictions` says the per-file cache is too small for
+the working set, and `retained_bytes` what it is still holding after the handles closed. `reset := true`
+zeroes the counters without touching the cached bytes.
 
 `max_revisions` is spelled that way because `limit` is a reserved word in DuckDB's grammar.
 `hf_status()` is the "what am I connected to" command: it never prints the token, and a rejected or
@@ -148,29 +156,52 @@ The Hub's CDN charges roughly **0.3 s of latency per range request**, no matter 
 (a 1 MB range request downloads at ~2 MB/s, a full GET of the same file at ~72 MB/s). Reading a
 large file therefore comes down to issuing few, large, *shared* requests:
 
-* fetched byte ranges live in a **per-file cache** shared by every handle that has the file open —
-  DuckDB reads one file with many concurrent tasks, and without sharing each of them re-downloads
-  the same bytes;
-* a window that another thread is already downloading is **waited for instead of re-requested**,
-  while reads of other parts of the file still run in parallel (this is what makes the per-request
-  latency overlap the way httpfs manages to);
-* the read-ahead window **doubles on every miss** (8 MB → 16 MB → 32 MB) and is **aligned**, so a
-  footer read costs one small request while a full scan converges on a handful of big ones.
+* fetched bytes live in a **per-file cache**, keyed by the resolved url, shared by every handle and
+  every thread reading that file — DuckDB 2.0 reads one file with several concurrent tasks, and
+  without sharing each of them re-downloads the same bytes;
+* **everything is fetched on an aligned grid** of `hf_read_buffer_size` blocks. A window starts on the
+  grid and is a whole number of blocks wide (widened when that is needed to end the read), so a read
+  that straddles a window edge is served from two windows instead of re-downloading the overlap. A
+  strided access pattern — which is exactly what DuckDB's parquet prefetch does, 2 MB reads at large
+  offsets — then costs one request per block, whatever the read order;
+* a window another thread is already downloading is **waited for instead of re-requested**, while
+  reads of other parts of the file keep running in parallel;
+* a missing window is **pulled apart into up to `hf_read_max_parallel_requests` range requests** and
+  fetched in parallel. One connection can only pull ~15 MB/s from the CDN, so the fan-out is what
+  hides the per-request latency, and it happens inside one read: no background threads, a thread never
+  downloads bytes nobody asked for;
+* caches **outlive the handle that created them** and are kept until the process-wide
+  `hf_read_cache_total_size` budget needs the space (LRU, entries currently being read are left
+  alone), so a second query over the same file is served from memory. When the budget is split between
+  the files open at once, no single file can push the sum over it. A commit invalidates the cached
+  windows of exactly the repository it changed, so a read after a `COPY TO` sees the new bytes;
+* nothing is ever written to disk on the read path — the cache is **in-memory only** (the opposite of
+  httpfs's `extension_metadata_cache` / DuckDB's external file cache). The only local files this
+  extension creates are the mandatory scratch buffers of the *write* path, before a commit.
 
 Measured on a 287 MB parquet file
 (`hf://datasets/open-thoughts/OpenThoughts3-1.2M/data/train-00017-of-00120.parquet`), DuckDB
-2.0.0-alpha + the Python pre-release, once against the live Hub:
+2.0.0-alpha + the Python pre-release, against the live Hub (and `httpfs` on the same URL in the same
+conditions, so the numbers move a bit per run):
 
 | query | `hf` extension | `httpfs` (`https://`) |
 | --- | --- | --- |
-| full scan (`count(*), sum(length(...))`) | 8.8 s | 6.6 s |
-| whole file through `read_blob` | 5.0 s | 4.9 s |
-| footer only (`count(*)`) | 0.9 s | 0.6 s |
+| full scan (`count(*), sum(len(...))`) | **3.9 s** | 3.8 s |
+| whole file through `read_blob` | 6.0 s | 4.3 s |
+| footer only (`parquet_metadata`) | 0.7 s | 0.7 s |
 | small file (1.2 MB) | 0.9 s | 0.8 s |
 
-Raise `hf_read_cache_size` (e.g. `SET hf_read_cache_size = 268435456`) when scanning files much
-bigger than the cache with many threads: the cache is bounded per file, so threads stop evicting
-each other's windows.
+The full scan fetches **289 612 440 bytes for a 287 412 556 byte file (1.008×)**: no window is ever
+downloaded twice. Getting there is what the earlier rounds of this section were about — the same query
+used to download 1.9× the file and run in 8.8 s against httpfs' 6.6 s.
+
+`read_blob` of a whole file is the one pattern still behind httpfs: the file is read strictly in order
+by one cursor, so each window is fetched when its turn comes instead of ahead of it. Raising
+`hf_read_buffer_size` (say `SET hf_read_buffer_size = 33554432`) shrinks the number of stalls; true
+read-ahead prefetch across windows is the remaining known gap, see *Limitations*.
+
+`scripts/bench.py hf|httpfs <url> <sql> [settings]` reproduces these numbers, printing the timing and
+`hf_read_stats()` of the run (`python3 scripts/bench.py hf "$URL" "$SQL" "hf_read_buffer_size=33554432"`).
 
 ## Status
 
@@ -187,7 +218,7 @@ Everything below is implemented in this tree; the ✔ marks are verified against
 * ✔ model / space / kernel repos end to end (writes, nested paths, `**` globs, LFS and git-tracked
   files verified byte-identical with `md5(read_blob(...))`)
 * ✔ bucket reads and bucket deletes (`hf://buckets/...`)
-* ✔ `hf_list_revisions`, `hf_list_refs`, `hf_create_repo`, `hf_status`
+* ✔ `hf_list_revisions`, `hf_list_refs`, `hf_create_repo`, `hf_status`, `hf_read_stats`
 * ✔ distribution: `scripts/make_extension_repo.sh` + `INSTALL hf FROM '<prefix>'` verified against a
   local repository, both unsigned and signed (signature required, tampered binaries refused)
 * ✔ multipart git-LFS uploads (the Hub switches a blob to `basic multipart` above ~10 MB: one
@@ -208,7 +239,8 @@ src/
   hf_http.{hpp,cpp} HTTPUtil wrapper: auth, retries, pagination, error translation, JSON scanning,
                     transport-session reuse
   hf_fs.{hpp,cpp}   FileSystem implementation (dispatch, listing, glob, delete, move)
-  hf_read.cpp       per-file range cache (shared, coalesced, growing windows)
+  hf_read.cpp       per-file range cache: aligned window grid, shared + coalesced, parallel window
+                    fetch, budgeted retention beyond the handle, invalidation on commit
   hf_commit.cpp     the write protocol: preupload -> lfs batch -> ndjson commit (+repo mutex)
   hf_write.cpp      write handle: temp file buffering, upload+commit on close
   hf_functions.cpp  hf_ls / hf_meta / hf_upload / hf_delete / hf_list_revisions / hf_list_refs
@@ -350,6 +382,16 @@ and clients get `INSTALL hf FROM 'https://huggingface.co/datasets/me/duckdb-hf-r
 * Reads are served by the shared per-file cache described above. DuckDB 2.0 hands one file handle to
   several concurrent tasks, so all handle/cache state is guarded: an unguarded `std::string` read
   cache corrupted itself into a `SIGSEGV` (which is how the shared cache earned its mutexes).
+* The read cache is **in-memory only** — there is no on-disk read cache, and none is planned. Retained
+  bytes are not tracked by DuckDB's buffer manager, so on a small machine lower
+  `hf_read_cache_total_size` / `hf_read_cache_size` (or set `hf_read_max_parallel_requests = 1` to
+  also cut the number of live sockets).
+* Retention is per process: if another client (the `hf` CLI, a `huggingface_hub` script) rewrites a
+  file while a DuckDB process already read it, that process keeps serving what it fetched until the
+  cache is evicted. Writes from *this* process invalidate the affected repository immediately.
+* One read pattern is still behind httpfs: pulling a whole file in one strict sequence
+  (`read_blob` of a big file). Windows are fetched as the cursor reaches them rather than ahead of it,
+  so a true async prefetch (with safe cancellation) is the remaining gap; see *Reading performance*.
 * `hf://` listings come from `/api/{type}/{repo}/tree/...` with `Link` pagination; a folder entry
   that no longer resolves during a glob walk is treated as empty instead of failing the query.
 * Every request goes through DuckDB's `HTTPUtil` API, and the transport that answers has to speak

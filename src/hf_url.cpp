@@ -276,4 +276,10 @@ HFUrl HFUrl::Parse(const string &url, const string &endpoint) {
 	return result;
 }
 
+string HFRepoCacheKey(const HFUrl &url) {
+	// identifies everything a commit to this repository can change, so a commit can invalidate the read
+	// caches of exactly that repository
+	return url.endpoint + "|" + url.repo_type + "|" + url.repository;
+}
+
 } // namespace duckdb

@@ -30,6 +30,10 @@ public:
 	string Get(const string &url, const HTTPHeaders &headers = HTTPHeaders(), bool throw_on_error = true);
 	//! GET a byte range `[offset, offset + len)` appending to `out`. Returns false on a non-2xx response.
 	bool GetRange(const string &url, idx_t offset, idx_t len, string &out, const HTTPHeaders &headers = HTTPHeaders());
+	//! GET a byte range straight into a caller-provided buffer of exactly `len` bytes. Returns false on a
+	//! non-2xx response, and tells how much actually arrived in `bytes_read`.
+	bool GetRangeInto(const string &url, idx_t offset, idx_t len, data_ptr_t buffer, idx_t &bytes_read,
+	                  const HTTPHeaders &headers = HTTPHeaders());
 	//! GET streaming chunks of a byte range through a callback. Throws on failure.
 	void GetRangeStreaming(const string &url, idx_t offset, idx_t len,
 	                       const std::function<void(const_data_ptr_t, idx_t)> &callback,
