@@ -99,7 +99,23 @@ CREATE TABLE x AS SELECT * FROM 'hf://datasets/foo/data.parquet';
 - [ ] Optional: a thin `pip` wrapper that registers the repo path (not required for the SQL experience).
 - [ ] Upstream/README notes: what needs DuckDB-core or Hub changes (e.g. signed dev builds).
 
-## Known unknowns (resolve in order)
+## Phase 6 — Xet client (0.0.2), research in `docs/XET.md`
+
+- [ ] M1 hashing: BLAKE3 keyed hashes (two fixed keys), the byte-swapped-per-word hex rendering,
+      the mean-tree rule (cut when `hash[3] % 4 == 0`, groups of 2..9, parent hashed over
+      `"{hex} : {size}\n"` lines), then file / xorb / range hashes.
+- [ ] M2 chunking: Gear hash + high-bit mask, 64 KiB target / 8 KiB min / 128 KiB max, boundaries and
+      chunk hashes identical to the reference `examples/chunk`.
+- [ ] M3 xorb writer: chunk serialization, compression (none, lz4 frame, bg4+lz4), footer with
+      `XBLBHSH` / `XBLBBND` + nonce (nonce excluded from the hash); `examples/xorb-check` accepts it.
+- [ ] M4 CAS client: refresh-route token exchange, `PUT {cas}/v1/xorbs/{key}`, exists checks, retried
+      against the in-tree simulation server before the real Hub.
+- [ ] M5 shard + commit: upload the session shard, commit with the file hash. First target is
+      `COPY … TO 'hf://buckets/…'`, the one write 0.0.1 refuses; git-LFS stays the default elsewhere.
+- [ ] Every stage diff-tested against `xet-core`'s own examples (`chunk`, `hash`, `xorb-check`) - the
+      reference implementation is the oracle, since hash/format bugs are silent failures.
+
+## ## Known unknowns (resolve in order)
 
 1. Exact 2.0 extension ABI/`extension_version` tag rules for **locally built** extensions vs the wheel.
 2. Whether 2.0's `FileSystem` still allows registering arbitrary schemes from a loadable extension

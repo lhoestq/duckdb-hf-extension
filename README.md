@@ -266,8 +266,9 @@ what the 0.0.1 binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
   local repository, both unsigned and signed (signature required, tampered binaries refused)
 * ✔ multipart git-LFS uploads (the Hub switches a blob to `basic multipart` above ~10 MB: one
   presigned PUT per part, then a completion POST with the part etags)
-* ✘ Xet uploads (`hf_xet` is a Rust library, out of scope) — the git-LFS transfer is used instead,
-  which the Hub accepts for every repo type
+* ✘ Xet uploads are not implemented yet — the git-LFS transfer is used instead, which the Hub
+  accepts for every repo type. Chunking + hashing client-side is the 0.0.2 plan, in
+  [docs/XET.md](docs/XET.md)
 * ✘ `COPY ... TO 'hf://buckets/...'`: pushing DuckDB's own bytes into a bucket needs an Xet
   `xetHash`, which only `hf_xet` computes; the extension refuses with a message pointing at
   `hf buckets cp` and `hf_bucket_copy`. The same reason makes a `hf_bucket_copy` of a file the Hub
