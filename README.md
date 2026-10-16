@@ -243,8 +243,9 @@ read-ahead prefetch across windows is the remaining known gap, see *Limitations*
 
 ## Status
 
-Everything below is implemented in this tree; the ✔ marks are verified against the live Hub (see
-`scripts/smoke_read.sql` / `scripts/smoke_write.sql`), the ✘ marks are deliberately out of scope.
+Everything below is implemented in this tree; the ✔ marks are verified against the live Hub by the
+suites in [*Testing*](#testing), the ✘ marks are deliberately out of scope. Release notes, including
+what the 0.0.1 binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
 
 * ✔ `hf://` URL parsing (repo types, `@revision`, short form, buckets)
 * ✔ settings + `huggingface` secrets (`config`, `credential_chain`), shared with httpfs
@@ -259,6 +260,8 @@ Everything below is implemented in this tree; the ✔ marks are verified against
   (server-side copies of anything already on the Hub: files, folders, globs, bucket to bucket)
 * ✔ `hf_list_revisions`, `hf_list_refs`, `hf_create_repo`, `hf_status`, `hf_read_stats`,
   `hf_read_cache_clear`
+* ✔ create-on-write: with `hf_create_repo = true` the first write creates the repository (private;
+  spaces as `sdk = static`), and a 404 without it explains that rather than only quoting the Hub
 * ✔ distribution: `scripts/make_extension_repo.sh` + `INSTALL hf FROM '<prefix>'` verified against a
   local repository, both unsigned and signed (signature required, tampered binaries refused)
 * ✔ multipart git-LFS uploads (the Hub switches a blob to `basic multipart` above ~10 MB: one
@@ -287,23 +290,58 @@ src/
   hf_write.cpp      write handle: temp file buffering, upload+commit on close
   hf_functions.cpp  hf_ls / hf_meta / hf_upload / hf_delete / hf_bucket_copy / hf_list_revisions /
                     hf_list_refs / hf_create_repo / hf_status / hf_read_stats / hf_read_cache_clear
-                    / hf_create_repo / hf_status
   hf_extension.cpp  entry point
 scripts/
-  try.py            runs one SQL statement per line, prints OK/FAIL (used by the smoke tests)
-  smoke_read.sql    read-side end-to-end checks against the live Hub
-  smoke_write.sql   write-side end-to-end checks (uses the lhoestq/playground scratch repos)
-  smoke_models.sql  model-repo round trips, incl. git vs LFS byte-level integrity
-  smoke_buckets.sh  seeds a bucket with `hf buckets cp`, then reads/globs/deletes it through hf://
-  smoke_buckets.sql the SQL run by smoke_buckets.sh
+  try.py            the smoke runner: one SQL statement per line, graded (see *Testing*)
+  run_all.sh        builds if asked, runs every suite, prints one grade line per suite
+  smoke_read.sh/.sql      read path: range reads, globbing, cache behaviour, byte accounting
+  smoke_write.sh/.sql     write path: formats, LFS multipart, create-on-write, delete semantics
+  smoke_models.sh/.sql    model repos: nested paths, globs, git vs LFS byte-level integrity
+  smoke_buckets.sh/.sql   buckets: server-side copies in, reads, globs, deletes (+ setup fixtures)
+  delete_repo.sh    drop a scratch repository for good (see the note in *Notes / limitations*)
   bench.py          times a query with either the `hf` filesystem or plain `httpfs`
   check.sh          compile-only syntax check of every source file (fast feedback)
   make_extension_repo.sh  turn a build into a serveable <version>/<platform>/ repository (+signing)
   test_install.py   INSTALL + LOAD + query from that repository, unsigned and signed (with a tamper check)
-  bench.py          times a query with either the `hf` filesystem or plain `httpfs`
 .github/workflows/
   build.yml         calls DuckDB's reusable distribution workflow for the platform matrix
 ```
+
+## Testing
+
+The suites run against the **live Hub** — they write to scratch repositories and clean up after
+themselves, so they need a token with write access (`~/.cache/huggingface/token`, or `HF_TOKEN`).
+
+```bash
+scripts/run_all.sh --build    # build once, then all four suites
+bash scripts/smoke_read.sh    # or one suite on its own: smoke_read / smoke_write / smoke_models
+bash scripts/smoke_models.sh  # each .sh makes its own fixtures and cleans up after itself
+```
+
+```
+--- read
+    read: 55 passed, 0 expected failures, 0 failed
+--- write
+    write: 45 passed, 5 expected failures, 0 failed
+--- models
+    models: 24 passed, 0 expected failures, 0 failed
+--- buckets
+    buckets: 16 passed, 2 expected failures, 0 failed
+```
+
+`scripts/try.py` is the runner. It takes a `.sql` file, executes **one statement per line-group**
+(semicolon separated), and grades the result:
+
+* a returned column named `assert*` must be `TRUE` — that is how a check is written, so the SQL stays
+  SQL and a failure names the statement that produced it;
+* a `-- expect-fail: <substring>` comment above a statement means the statement must raise, with that
+  substring in the message. That is how refusals are tested (writing into a bucket, `hf_upload` to a
+  repository that does not exist), so a refusal that stops refusing starts failing.
+
+Each `.sh` wrapper makes its own fixtures (random bytes for the LFS/blob checks, text files), so there
+are no manual pre-steps. Scratch state: `lhoestq/playground` (datasets, models, buckets) is kept and
+reused, `hf-smoke-staging` and `hf-ext-write-probe` are created per run and deleted by
+`scripts/delete_repo.sh` afterwards.
 
 ## Building
 
@@ -437,6 +475,13 @@ and clients get `INSTALL hf FROM 'https://huggingface.co/datasets/me/duckdb-hf-r
   so a true async prefetch (with safe cancellation) is the remaining gap; see *Reading performance*.
 * `hf://` listings come from `/api/{type}/{repo}/tree/...` with `Link` pagination; a folder entry
   that no longer resolves during a glob walk is treated as empty instead of failing the query.
+* A **repository** cannot be deleted from SQL: the Hub wants its name as a JSON body on a `DELETE`
+  request, and DuckDB's HTTP transport sends `DELETE` without a body (`DeleteRequestInfo` has no
+  payload field, and neither the curl nor the httplib client attaches one). `hf_delete` deletes the
+  files inside a repository; `scripts/delete_repo.sh`, `hf repos delete` and
+  `huggingface_hub.delete_repo()` delete the repository itself.
+* Creating a Space needs an sdk, so create-on-write sends `sdk = static` for `hf://spaces/...`.
+  Nothing else is inferred about a new repository: it is private, and named after the url.
 * Every request goes through DuckDB's `HTTPUtil` API, and the transport that answers has to speak
   https: the client built into DuckDB ships without TLS in the official distributions. The extension
   therefore asks for `httpfs` whenever the registered transport is the placeholder or `Built-In`, and

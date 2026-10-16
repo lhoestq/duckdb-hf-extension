@@ -28,16 +28,24 @@ ls -l dist/hf.duckdb_extension | awk '{print "extension:", $5, "bytes"}'
 run() { # name, command...
   local name="$1"; shift
   echo "--- $name"
-  if "$@" > "logs/smoke_$name.log" 2>&1; then
-    tail -1 "logs/smoke_$name.log" | sed "s/^/    $name: /"
+  "$@" > "logs/smoke_$name.log" 2>&1
+  local code=$?
+  # the suites end with a grading line; housekeeping messages can come after it, so search for the grade
+  local summary
+  summary="$(grep -E '^[0-9]+ passed' "logs/smoke_$name.log" | tail -1)"
+  if [ -z "$summary" ]; then
+    summary="$(tail -1 "logs/smoke_$name.log")"
+  fi
+  if [ $code -eq 0 ]; then
+    echo "    $name: $summary"
   else
-    echo "    $name: FAILED - $(tail -1 "logs/smoke_$name.log" | cut -c1-100)"
+    echo "    $name: FAILED - ${summary:0:110}"
     grep '^FAIL' "logs/smoke_$name.log" | head -5 | sed 's/^/      /'
     status=1
   fi
 }
 
-run read bash -c 'python3 -u scripts/try.py < scripts/smoke_read.sql'
+run read bash scripts/smoke_read.sh
 run write bash scripts/smoke_write.sh
 run models bash scripts/smoke_models.sh
 run buckets bash scripts/smoke_buckets.sh

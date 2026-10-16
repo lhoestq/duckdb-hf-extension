@@ -415,9 +415,11 @@ static unique_ptr<GlobalTableFunctionState> HFStatusInit(ClientContext &context,
 		transport = "none";
 	}
 
+	// looked up through the context, not the database: `SET hf_create_repo = true` is session scoped and
+	// a database-level lookup would keep reporting false, contradicting what duckdb_settings() shows
 	auto setting = [&](const char *key, Value fallback) {
 		Value value;
-		auto result = db.TryGetCurrentSetting(Identifier(key), value);
+		auto result = context.TryGetCurrentSetting(Identifier(key), value);
 		if (result && !value.IsNull()) {
 			return value;
 		}

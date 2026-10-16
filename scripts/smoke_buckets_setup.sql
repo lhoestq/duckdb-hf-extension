@@ -1,7 +1,8 @@
 -- Fixtures for scripts/smoke_buckets.sh: data written by the extension itself, into a staging dataset repo.
 -- A first write to a missing repository has to bootstrap it, so this file doubles as the create-on-write test.
 SET hf_create_repo = true;
-SELECT 'reset staging repo' AS t, count(*) AS n FROM hf_delete('hf://datasets/lhoestq/hf-smoke-staging/data');
+-- the suite is idempotent: the fixtures are rewritten each run and the repo may or may not exist yet
+SELECT 'reset staging repo' AS t, count(*) AS deleted_before FROM hf_delete('hf://datasets/lhoestq/hf-smoke-staging/data', missing_ok := true);
 COPY (SELECT 42 AS answer UNION ALL SELECT 43) TO 'hf://datasets/lhoestq/hf-smoke-staging/data/one.parquet' (FORMAT PARQUET);
 COPY (SELECT 7 AS answer) TO 'hf://datasets/lhoestq/hf-smoke-staging/data/two.parquet' (FORMAT PARQUET);
 COPY (SELECT 1 AS a, 'x' AS b) TO 'hf://datasets/lhoestq/hf-smoke-staging/data/small.csv' (FORMAT CSV);

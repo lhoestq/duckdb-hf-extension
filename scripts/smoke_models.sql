@@ -12,8 +12,11 @@ SELECT 'm3 csv' AS t, count(*) = 1 AS assert_rows FROM 'hf://models/lhoestq/play
 COPY (SELECT 'json' AS k) TO 'hf://models/lhoestq/playground/duckdb/m1.json';
 SELECT 'm4 json' AS t, k = 'json' AS assert_value FROM 'hf://models/lhoestq/playground/duckdb/m1.json';
 COPY (SELECT 'git tracked text' AS t) TO 'hf://models/lhoestq/playground/duckdb/m1.txt';
-SELECT 'm5 a small text file goes in as a git blob' AS t, t = 'git tracked text' AS assert_value
-FROM 'hf://models/lhoestq/playground/duckdb/m1.txt';
+-- a bare path only works for formats duckdb can sniff; a .txt needs its reader named. the file is whatever
+-- COPY wrote (csv shaped, so a header line), which is not what the check is about: the bytes must round trip
+SELECT 'm5 a small text file goes in as a git blob' AS t,
+       content LIKE '%git tracked text%' AS assert_value
+FROM read_text('hf://models/lhoestq/playground/duckdb/m1.txt');
 SELECT 'm6 ** globbing over a model repo' AS t, count(*) >= 2 AS assert_found
 FROM glob('hf://models/lhoestq/playground/duckdb/**/*.parquet');
 SELECT 'm7 listing, flat and recursive' AS t,

@@ -13,10 +13,7 @@ ls -l /tmp/hf_write_fixture.bin | awk '{print "fixture: " $5 " bytes"}'
 
 python3 -u scripts/try.py < scripts/smoke_write.sql
 
-# the three probe repositories were created by the create-on-write test; the hub has no trash for them
-token="$(cat "$HOME/.cache/huggingface/token")"
-for kind in datasets models spaces; do
-  code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "https://huggingface.co/api/$kind/lhoestq/hf-ext-write-probe" \
-    -H "Authorization: Bearer $token")
-  echo "probe repo $kind deleted: HTTP $code"
-done
+# the create-on-write test made three throwaway repositories; the hub has no trash, so they go now
+scripts/delete_repo.sh dataset lhoestq/hf-ext-write-probe
+scripts/delete_repo.sh model lhoestq/hf-ext-write-probe
+scripts/delete_repo.sh space lhoestq/hf-ext-write-probe

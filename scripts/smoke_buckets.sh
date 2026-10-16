@@ -23,7 +23,5 @@ python3 -u scripts/try.py < scripts/smoke_buckets.sql
 
 # 3. the staging repository goes with the fixtures
 if [ "${CLEANUP:-}" = "1" ]; then
-  token="$(cat "$HOME/.cache/huggingface/token")"
-  curl -sS -o /dev/null -X DELETE "https://huggingface.co/api/datasets/lhoestq/hf-smoke-staging" \
-    -H "Authorization: Bearer $token" -w 'staging repo deleted: HTTP %{http_code}\n'
+  scripts/delete_repo.sh dataset lhoestq/hf-smoke-staging
 fi

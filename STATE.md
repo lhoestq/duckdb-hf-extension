@@ -2,19 +2,20 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-16, ~20:38 UTC)
+## Current position (2026-10-16, ~23:14 UTC)
 
-**Milestone: buckets are writable from SQL. `hf_bucket_copy(source, target)` moves any file, folder or
-glob that the Hub already stores into a bucket with a server-side copy (`copyFile`), which sidesteps the
-Xet `xetHash` that a bucket `addFile` demands - DuckDB never needed to compute a hash, it just asks the
-Hub to point a bucket path at content the Hub already has.**
+**Milestone: 0.0.1 is packaged. All four live suites are green (`scripts/run_all.sh`: read 55, write 45 +5
+expected refusals, models 24, buckets 16 +2 expected refusals), the extension reports its own version
+(`hf_status().hf_version = 0.0.1`), and `CHANGELOG.md` + the README testing section describe exactly what
+that binary does. Phase 1 of the two-phase task is done; Phase 2 (client-side Xet chunking/hashing,
+against `/home/quentin/hf/xet-core`) is what 0.0.2 is for.**
 
 * Built `dist/hf.duckdb_extension` for `v2.0.0-alpha47600` (`OVERRIDE_GIT_DESCRIBE=v2.0.0-alpha47600`),
   loads in the Python pre-release with `allow_unsigned_extensions`.
-* Live smoke suites after this session: `smoke_read.sql` 55 OK / 0 FAIL, `smoke_models.sql` 25 OK / 0 FAIL,
-  `smoke_write.sql` 40 OK (+ the 3 intended refusals), `smoke_buckets.sh` 23 OK (+ 2 intended refusals).
-  `scripts/try.py` fails a statement when any column named `assert_*` comes back False, and now splits
-  statements on `;` instead of on newlines, so the suites could become readable multi-line SQL.
+* Live smoke suites after this session: `read` 55, `write` 45 (+5 intended refusals), `models` 24,
+  `buckets` 16 (+2 intended refusals), 0 failures. `scripts/try.py` now grades two ways — any column named
+  `assert*` must be TRUE, and a `-- expect-fail: <substring>` marker above a statement means it must raise
+  with that text — so refusals are covered by tests instead of by comments.
 * What bucket writes needed, and what they still cannot do:
   * `addFile` on the bucket batch API needs a `xetHash` (probed: `sha256`, no hash, and inline `contents`
     are all rejected), and there is no plain `PUT /buckets/.../resolve/...` route;
@@ -52,10 +53,12 @@ Hub to point a bucket path at content the Hub already has.**
   of DuckDB's own bytes, and async prefetch across windows (the one read pattern still behind httpfs:
   whole-file `read_blob`, 6.0 s vs 4.3 s).
 
-Immediate next actions: (1) get one green run of `.github/workflows/build.yml` — the `gh` token is missing
-Actions permission (`gh workflow list` -> HTTP 403), so either the token needs the Actions scope or the
-workflow has to be started from the web UI; (2) dogfood distribution by hosting the generated repository on
-the Hub and installing from `https://huggingface.co/datasets/...`.
+Immediate next actions: (1) start Phase 2 - read `xet-core` for the CDC parameters, the chunk-hash format
+and the CAS upload protocol, since client-side chunking is what unlocks real bucket writes and cheaper
+uploads; (2) get one green run of `.github/workflows/build.yml` — the `gh` token is missing Actions
+permission (`gh workflow list` -> HTTP 403), so either the token needs the Actions scope or the workflow
+has to be started from the web UI; (3) dogfood distribution by hosting the generated repository on the Hub
+and installing from `https://huggingface.co/datasets/...`.
 
 ## What the user asked for
 
@@ -361,3 +364,28 @@ Then continue with the first unchecked box in `PLAN.md`. Do not restart the env 
 * `20:55` — `straddling_fetches = 0` turned out not to be an invariant (one read at the file tail is served
   across a window boundary depending on how DuckDB interleaves tasks; bytes stayed exact either way), so the
   read suite *reports* it and only promises `bytes_fetched == file size`. Two clean 55 OK / 0 FAIL runs.
+* `22:20` — create-on-write was broken by the settings lookup, not by the Hub: `HFWriteHandle` resolves
+  settings at open time on purpose (the opener does not outlive the handle), so by the time `PreuploadMode`
+  asked `TryGetCurrentSetting` the opener was null and `hf_create_repo` read as `false`. The flag is now a
+  value passed down (`HFCommit(..., bool create_repo)`), and `HFSettingAsBool` centralises the lookup. The
+  "the Hub provisions repos asynchronously" theory was a red herring caused by probing bare repo names: a
+  fresh repo answers `GET /api/datasets/{ns}/{name}` in ~0.15 s and `preupload` stops 404-ing in ~0.2 s.
+* `22:35` — creating a Space needs `"sdk"` in the create payload (`gradio|docker|static`); create-on-write
+  sends `static`. Write suite: 45 passed, 5 expected failures, 0 failed.
+* `22:50` — repo deletion is not reachable from SQL: the Hub wants `DELETE /api/repos/delete` with a JSON
+  body, `DeleteRequestInfo` has no payload field, neither the curl nor the httplib client attaches one, and
+  the endpoint is not routed for POST. An `hf_delete_repo` function was written, proven impossible over the
+  transport, and removed; `scripts/delete_repo.sh` does it, and the smoke suites now call it. Their old
+  `DELETE /api/datasets/<repo>` cleanup had been 404-ing silently for weeks - 29 leaked probe repos found
+  and deleted with the correct route.
+* `23:05` — suite fixes: bare `FROM 'hf://....txt'` is not snifiable, use `read_text`; buckets setup uses
+  `missing_ok := true` so it is idempotent against a deleted staging repo; `run_all.sh` reads the grade line
+  instead of `tail -1` (housekeeping output came after it). 140 checks + 7 refusal checks, all four suites
+  green in one run.
+* `23:15` — 0.0.1 packaging: `CHANGELOG.md` (with the two-axes note: this project's version vs the DuckDB
+  identifier the binary is tied to), README *Testing* section documenting the `assert*` / `expect-fail`
+  conventions, layout listing corrected, repo-delete + Space-sdk limitations written down.
+* `23:30` — `hf_status()` read settings through `DatabaseInstance::TryGetCurrentSetting`, which only sees
+  GLOBAL scope, so it kept saying `hf_create_repo = false` after `SET hf_create_repo = true`. It now looks
+  them up on the `ClientContext` (the init function always had one) and agrees with `duckdb_settings()`.
+  Added the missing `scripts/smoke_read.sh` so all four suites are invoked the same way.

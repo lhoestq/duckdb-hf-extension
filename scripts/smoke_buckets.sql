@@ -1,6 +1,6 @@
 -- Bucket behaviour through the hf extension. Run with scripts/smoke_buckets.sh, which puts the fixtures in a
--- staging dataset repository first. The two statements marked "expected failure" are the direct bucket write
--- paths, which need a Xet client; try.py reports them as FAIL on purpose.
+-- staging dataset repository first. The two statements carrying an `expect-fail` marker are the direct bucket
+-- write paths, which need a Xet client to compute a chunk hash - try.py counts those as expected failures.
 SELECT 'clean slate' AS t, count(*) = 0 AS assert_nothing_to_clean
 FROM hf_delete('hf://buckets/lhoestq/playground/duckdb', missing_ok := true);
 SELECT 'copy one file onto an exact name' AS t,
@@ -49,8 +49,10 @@ FROM read_parquet('hf://buckets/lhoestq/playground/duckdb/**/*.parquet', filenam
 SELECT 'deleting a copy works' AS t, count(*) = 1 AS assert_deleted
 FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/second-copy.parquet');
 SELECT 'and it is gone' AS t, exists = false AS assert_gone FROM hf_meta('hf://buckets/lhoestq/playground/duckdb/second-copy.parquet');
--- expected failures, see the note at the top
+-- expected failures: direct byte writes into a bucket need a Xet xetHash, see the note at the top
+-- expect-fail: is not supported
 COPY (SELECT 1 i) TO 'hf://buckets/lhoestq/playground/duckdb/nope.parquet';
+-- expect-fail: is not supported
 SELECT * FROM hf_upload('/tmp/hf_bucket_probe.csv', 'hf://buckets/lhoestq/playground/duckdb/uploaded.csv');
 SELECT 'cleanup' AS t, count(*) >= 1 AS assert_deleted FROM hf_delete('hf://buckets/lhoestq/playground/duckdb');
 SELECT 'nothing left behind' AS t, count(*) = 0 AS assert_empty
