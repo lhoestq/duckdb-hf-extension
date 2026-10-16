@@ -237,3 +237,38 @@ Then continue with the first unchecked box in `PLAN.md`. Do not restart the env 
   `{"oid":sha,"parts":[{"partNumber":n,"etag":...}]}` with git-lfs content types. 20 MB blob + 17 MB parquet
   written by `COPY` both round-trip byte-identically.
 * `16:40` — smoke suites re-run: read 28/28, write 36 OK + the 3 intended refusals, models/buckets green.
+* `17:05` — **Phase 5, first half**: `scripts/make_extension_repo.sh` (assembles `<version>/<platform>/`,
+  reads version+platform out of the binary footer instead of guessing, ships plain + `.gz`) and
+  `scripts/test_install.py` (throwaway `home_directory`, `INSTALL` + `LOAD` + a real `hf_ls`). Verified:
+  `INSTALL hf FROM 'file:///.../dist/repo/'` works; `duckdb_extensions().installed_from` records the prefix.
+* `17:10` — gotcha worth remembering: pointing `custom_extension_repository` at your own repo redirects
+  *every* autoinstall there, **including httpfs**, which is this extension's https transport ⇒ bootstrap
+  failure (`INSTALL httpfs` never runs, first query fails). Use `INSTALL hf FROM '<prefix>'`, or keep
+  `autoinstall_extension_repository='core'`. The built-in DuckDB http client has no TLS in official builds
+  (`'https' scheme is not supported.` is raised from `third_party/httplib`), while *extension install* does
+  have TLS — that asymmetry is the whole reason this trap exists.
+* `17:20` — **signing implemented and actually verified**. The format: reserve the trailing 256 bytes, hash
+  with a *two-level* sha256 (sha256 over the concatenation of the sha256 of each 1 MiB chunk), `openssl
+  pkeyutl -sign -pkeyopt digest:sha256`, append. Served metadata is
+  `<prefix>/.well-known/duckdb-extension-repo.json` = `{"version":1,"signature_keys":["-----BEGIN PUBLIC
+  KEY-----…"]}`. SQL quirks learned: `allow_extension_repositories` is a *string* enum
+  ('undecided'/'allowed'/'forbidden'); `CREATE EXTENSION REPOSITORY` accepts no bind parameters; the key
+  list is `USING PUBLIC KEYS 'a', 'b'` (comma separated, **no** parentheses); keys are compact base64 DER
+  (PEM body without armor works too, it gets normalized); per-repository installs land in
+  `extensions/<version>/<platform>/repositories/<repo>/` and need `LOAD hf FROM <repo>`.
+* `17:22` — tamper test: copy the repo, flip a byte in **both** the plain and the `.gz` copy (DuckDB sniffs
+  gzip and may take either — flipping only the plain one silently "passed"), then require a fresh process
+  to refuse: `Attempting to install an extension file that doesn't have a valid signature`.
+* `17:24` — chased a `SIGSEGV` in GC at interpreter shutdown: it was the *test* truncating the extension
+  file DuckDB had mapped (`open(path,'wb')` truncates a loaded binary). Never mutate a loaded extension in
+  place — tamper with a copy of the repository in another process.
+* `17:28` — `HFClient::SendRequest` had a latent infinite recursion (`return SendRequest(request)` in the
+  no-session branch, unreachable until now). It drives `HTTPUtil::SendRequest(request, client)` with a
+  per-request client slot instead, and transport failures that mean "no https here" are rethrown as one
+  actionable error naming `INSTALL httpfs; LOAD httpfs;`. Transport auto-load now also triggers on
+  `Built-In`, not just on an empty transport.
+* `17:32` — Makefile auto-detects both layouts (`./duckdb` + `./extension-ci-tools` for CI, `../vendor/*`
+  locally); `.github/workflows/build.yml` calls DuckDB's reusable `_extension_distribution.yml` pinned to
+  the vendored ci-tools sha. **Not executed on GitHub yet** — the matrix needs a first green run.
+* `17:40` — all suites re-run after the transport change: read 30 OK / 0 FAIL, write 36 OK (+ the 3
+  intended refusals), models 25 OK, buckets green (2 intended refusals).

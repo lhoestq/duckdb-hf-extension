@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Verify `INSTALL hf; LOAD hf;` against a locally built extension repository.
+
+    python3 scripts/test_install.py dist/repo            # unsigned build
+    python3 scripts/test_install.py dist/repo-signed --signed   # signature is required
+
+Every run uses a throw-away home directory, so it never touches ~/.duckdb. For signed repositories
+the test also flips a byte in the *installed* binary and checks that DuckDB refuses to load it -
+otherwise "we signed it" would just mean "we appended 256 bytes somewhere".
+"""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+repo = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "dist/repo")
+signed = "--signed" in sys.argv
+prefix = "file://" + repo.rstrip("/") + "/"
+
+import duckdb  # noqa: E402
+
+if "--tamper-child" in sys.argv:
+    # Runs in its own process (and its own home): install from a repository whose binary was modified
+    # after signing, and require DuckDB to refuse it. Never tamper with a *loaded* extension file -
+    # truncating a file DuckDB has mapped takes the whole process down with it.
+    tampered_home = sys.argv[sys.argv.index("--tamper-child") + 1]
+    tampered_repo = sys.argv[sys.argv.index("--tamper-child") + 2]
+    os.makedirs(os.path.join(tampered_home, ".duckdb"), exist_ok=True)
+    with open(os.path.join(tampered_repo, ".well-known/duckdb-extension-repo.json")) as f:
+        tampered_keys = json.load(f)["signature_keys"]
+    key = "".join(l for l in tampered_keys[0].splitlines() if not l.startswith("-----")).strip()
+    kid = duckdb.connect(config={"home_directory": tampered_home, "allow_extension_repositories": "allowed"})
+    kid.execute(f"CREATE EXTENSION REPOSITORY hf_local WITH PREFIX 'file://{tampered_repo}/' "
+                f"USING PUBLIC KEY '{key}'")
+    kid.execute("INSTALL hf FROM hf_local")
+    kid.execute("LOAD hf FROM hf_local")
+    raise SystemExit("LOADED DESPITE TAMPERING")
+
+
+version = duckdb.sql("PRAGMA version").fetchall()[0][0]
+home = tempfile.mkdtemp(prefix="hf-ext-home-")
+os.makedirs(os.path.join(home, ".duckdb"), exist_ok=True)  # DuckDB will not create its home itself
+
+# httpfs is the https transport this extension rides on, so installing known extensions stays enabled
+common = {"home_directory": home, "autoinstall_known_extensions": True}
+
+if signed:
+    with open(os.path.join(repo, ".well-known", "duckdb-extension-repo.json")) as f:
+        public_keys = json.load(f)["signature_keys"]
+    # deliberately NO allow_unsigned_extensions: the signature has to carry the load
+    con = duckdb.connect(config={**common, "allow_extension_repositories": "allowed"})
+    # the statement is parsed literally (no bind parameters), List(StringLiteral) is a bare comma
+    # separated list without parentheses, and DuckDB wants compact keys: the base64 DER
+    # SubjectPublicKeyInfo, i.e. the PEM body without its armor.
+    compact = lambda pem: "".join(l for l in pem.splitlines() if not l.startswith("-----")).strip()
+    key_sql = ", ".join("'" + compact(k) + "'" for k in public_keys)
+    con.execute(f"CREATE EXTENSION REPOSITORY hf_local WITH PREFIX '{prefix}' USING PUBLIC KEYS {key_sql}")
+    con.execute("INSTALL hf FROM hf_local")
+    con.execute("LOAD hf FROM hf_local")
+    install_mode = "FROM a trusted repository"
+else:
+    con = duckdb.connect(config={**common, "allow_unsigned_extensions": True})
+    # INSTALL ... FROM '<prefix>' keeps the official repositories in place, so the httpfs transport can
+    # still be auto-installed. Setting custom_extension_repository instead would redirect *every*
+    # autoinstall to this repository (including httpfs) and break that bootstrap.
+    con.execute(f"INSTALL hf FROM '{prefix}'")
+    con.execute("LOAD hf")
+    install_mode = "unsigned, INSTALL hf FROM '<repo prefix>'"
+
+print("duckdb", version, "|", install_mode)
+print("INSTALL/LOAD ok ->", con.execute("SELECT duckdb_version, endpoint, http_transport FROM hf_status()").fetchone())
+row = con.execute("SELECT install_mode, installed_from, signature_key_fingerprint FROM duckdb_extensions()"
+                  " WHERE extension_name = 'hf'").fetchone()
+print("metadata        ->", row)
+assert row is not None and row[0] == "REPOSITORY", f"unexpected install metadata: {row}"
+if signed:
+    # duckdb_extensions().signature_key_fingerprint is not filled for named repositories, so compare
+    # against the fingerprint the repository itself pinned (that is the key LOAD verifies against)
+    import base64, hashlib
+    expected = "sha256:" + hashlib.sha256(base64.b64decode(compact(public_keys[0]))).hexdigest()
+    pinned = con.execute("SELECT key_fingerprints FROM duckdb_extension_repositories()"
+                         " WHERE repository_name = 'hf_local'").fetchone()[0]
+    assert pinned == [expected], f"pinned keys {pinned} != our signing key {expected}"
+    print("signature       -> verified against", expected[:24] + "...")
+assert con.execute("SELECT count(*) FROM hf_ls('hf://datasets/lhoestq/demo1')").fetchone()[0] > 0
+print("usable          -> hf_ls('hf://datasets/lhoestq/demo1') works")
+
+found = subprocess.run(["find", home, "-name", "hf.duckdb_extension"], capture_output=True, text=True).stdout.split()
+assert found, "nothing was installed"
+installed = found[0].replace(home + "/", "")
+assert f"extensions/{version}/" in installed, "installed under the wrong version directory"
+print("installed at    ->", installed)
+
+if signed:
+    # A signature that is never verified is worse than none: copy the repository, flip one byte in the
+    # copied binary, and require a fresh DuckDB process to refuse it.
+    tampered = tempfile.mkdtemp(prefix="hf-ext-tampered-")
+    subprocess.run(["cp", "-r", repo, tampered + "/repo"], check=True)
+    tampered_repo = tampered + "/repo"
+    served = os.path.join(tampered_repo, version, os.listdir(os.path.join(repo, version))[0])
+    # both the plain and the gzipped copy have to be corrupted: DuckDB 2.0 sniffs gzip and may pick
+    # either, so tampering only one of them proves nothing
+    for name in ("hf.duckdb_extension", "hf.duckdb_extension.gz"):
+        path = os.path.join(served, name)
+        data = bytearray(open(path, "rb").read())
+        data[len(data) // 3] ^= 0xFF
+        open(path, "wb").write(bytes(data))
+    tampered_home = tempfile.mkdtemp(prefix="hf-ext-tamper-home-")
+    child = subprocess.run([sys.executable, __file__, tampered_repo, "--signed", "--tamper-child",
+                            tampered_home, tampered_repo], capture_output=True, text=True)
+    if child.returncode == 0:
+        raise AssertionError("a tampered extension loaded cleanly:\n" + child.stdout)
+    print("tamper check    -> refused:", (child.stderr.strip().splitlines() or ["?"])[-1][:100])
+
+print("OK")

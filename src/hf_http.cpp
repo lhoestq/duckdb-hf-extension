@@ -299,12 +299,40 @@ string HFJson::NextLinkUrl(const string &link_header, bool &found) {
 	return "";
 }
 
+namespace {
+
+//! Transports that cannot talk https to the Hub: the empty placeholder, and the built-in httplib
+//! client, which ships without TLS in the official DuckDB builds (an https request through it fails
+//! with "'https' scheme is not supported.", raised inside third_party/httplib).
+bool NeedsHttpfs(const string &transport_name) {
+	return transport_name.empty() || transport_name == "none" || transport_name == "Built-In";
+}
+
+//! Turn the low-level "there is no https-capable HTTP client" failures into something actionable.
+void RethrowWithTransportHint(const std::exception &ex, const string &transport_name, const string &url) {
+	string message = ex.what();
+	if (message.find("scheme is not supported") != string::npos || message.find("no HTTP client for") != string::npos) {
+		throw IOException("reading Hugging Face assets requires an HTTP transport that supports https://, and the "
+		                  "registered one ('%s') does not - provide it with `INSTALL httpfs; LOAD httpfs;`. This "
+		                  "extension normally loads httpfs by itself, which settings like "
+		                  "autoinstall_known_extensions or autoload_known_extensions can block. Failed request: %s (%s)",
+		                  transport_name, url, message);
+	}
+	std::rethrow_exception(std::current_exception());
+}
+
+} // namespace
+
 HFClient::HFClient(DatabaseInstance &db_p, optional_ptr<FileOpener> opener_p, HFConnection connection_p,
                    const string &path)
     : db(db_p), opener(opener_p), connection(std::move(connection_p)) {
 	auto &util = HTTPUtil::Get(db);
-	if (util.GetName() == "none" || util.GetName().empty()) {
-		// No HTTP transport registered yet: httpfs provides one, and it is also needed for https:// paths
+	// httpfs is the transport this extension is designed to run on. The built-in client is compiled
+	// without TLS in the official DuckDB distributions, so "Built-In" cannot serve the https:// Hub
+	// endpoints either - it has to be upgraded too. TryAutoLoadExtension is a silent no-op when the
+	// extension is unavailable (autoinstall switched off), in which case requests fail with the
+	// actionable error from RethrowWithTransportHint below.
+	if (NeedsHttpfs(util.GetName())) {
 		ExtensionHelper::TryAutoLoadExtension(db, "httpfs");
 	}
 	http_util = &HTTPUtil::Get(db);
@@ -324,10 +352,20 @@ HFClient::HFClient(DatabaseInstance &db_p, optional_ptr<FileOpener> opener_p, HF
 }
 
 unique_ptr<HTTPResponse> HFClient::SendRequest(BaseRequest &request) {
-	if (session) {
-		return session->Request(request);
+	try {
+		if (session) {
+			return session->Request(request);
+		}
+		// No transport session (older/unavailable transport manager): drive HTTPUtil directly. The client
+		// slot is deliberately local, so a request to a different host (the API host vs a presigned LFS
+		// host) can never be served by a client that was opened for another one.
+		unique_ptr<HTTPClient> client;
+		auto response = http_util->SendRequest(request, client);
+		http_util->CloseClient(std::move(client));
+		return response;
+	} catch (std::exception &ex) {
+		RethrowWithTransportHint(ex, http_util->GetName(), request.url);
 	}
-	return SendRequest(request);
 }
 
 HTTPHeaders HFClient::WithAuth(const HTTPHeaders &headers) const {

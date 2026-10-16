@@ -188,6 +188,8 @@ Everything below is implemented in this tree; the ✔ marks are verified against
   files verified byte-identical with `md5(read_blob(...))`)
 * ✔ bucket reads and bucket deletes (`hf://buckets/...`)
 * ✔ `hf_list_revisions`, `hf_list_refs`, `hf_create_repo`, `hf_status`
+* ✔ distribution: `scripts/make_extension_repo.sh` + `INSTALL hf FROM '<prefix>'` verified against a
+  local repository, both unsigned and signed (signature required, tampered binaries refused)
 * ✔ multipart git-LFS uploads (the Hub switches a blob to `basic multipart` above ~10 MB: one
   presigned PUT per part, then a completion POST with the part etags)
 * ✘ Xet uploads (`hf_xet` is a Rust library, out of scope) — the git-LFS transfer is used instead,
@@ -221,22 +223,117 @@ scripts/
   smoke_buckets.sql the SQL run by smoke_buckets.sh
   bench.py          times a query with either the `hf` filesystem or plain `httpfs`
   check.sh          compile-only syntax check of every source file (fast feedback)
+  make_extension_repo.sh  turn a build into a serveable <version>/<platform>/ repository (+signing)
+  test_install.py   INSTALL + LOAD + query from that repository, unsigned and signed (with a tamper check)
+  bench.py          times a query with either the `hf` filesystem or plain `httpfs`
+.github/workflows/
+  build.yml         calls DuckDB's reusable distribution workflow for the platform matrix
 ```
 
 ## Building
 
 ```bash
-# duckdb + extension-ci-tools are vendored in ../vendor (see STATE.md)
-make release            # build/release/extension/hf/hf.duckdb_extension
+# duckdb + extension-ci-tools are either checked out next to this Makefile (as ./duckdb and
+# ./extension-ci-tools, which is what CI does) or vendored one level up in ../vendor
+cmake --version > /dev/null || pip install cmake ninja       # the build needs cmake inside the venv
+make release OVERRIDE_GIT_DESCRIBE="$(python -c \"import duckdb;print(duckdb.sql('PRAGMA version').fetchall()[0][0])\")"
+# -> build/release/extension/hf/hf.duckdb_extension (copied to dist/ by convention)
 ```
 
-Load it from the Python pre-release:
+Load it from the Python pre-release (a locally built extension is unsigned, so it needs the flag):
 
 ```python
 import duckdb
 con = duckdb.connect(config={"allow_unsigned_extensions": True})
 con.execute("LOAD '/path/to/hf.duckdb_extension'")
 ```
+
+## Distributing
+
+An extension is a binary tied to **one** DuckDB version identifier and **one** platform, so a
+repository is just a static file tree — any web server, `file://` directory, or Hugging Face repo
+will do:
+
+```
+<prefix>/<duckdb_version>/<platform>/hf.duckdb_extension[.gz]
+```
+
+`scripts/make_extension_repo.sh` assembles that tree from a build (DuckDB 2.0 sniffs gzip, so both
+the plain and the compressed file are valid; it reads the version and the platform *out of the
+binary footer* rather than guessing them):
+
+```bash
+./scripts/make_extension_repo.sh dist/repo
+python3 scripts/test_install.py dist/repo     # INSTALL + LOAD + a real hf_ls, in a throwaway home dir
+```
+
+Clients then say:
+
+```sql
+INSTALL hf FROM 'https://my.host/duckdb-extensions/';   -- or 'file:///home/me/dist/repo/'
+LOAD hf;
+```
+
+Use `FROM '<prefix>'` rather than `SET custom_extension_repository=...`: the latter redirects *every*
+installation — including the `httpfs` this extension needs as its https transport — to your own
+repository, where `httpfs` is not. If you do want your repository to be the default, keep the
+official one for autoinstalls with `SET autoinstall_extension_repository='core'`.
+
+### The version identifier has to match
+
+`LOAD` refuses a binary whose baked-in version identifier differs from the running DuckDB, which is
+why the build above takes `OVERRIDE_GIT_DESCRIBE`. For a released DuckDB just build against its tag
+(`v2.0.0`) and one artifact serves everyone. For a dev pre-release there is no tag: the Python wheel
+`2.0.0.dev2610151406` reports `v2.0.0-alpha47600`, and the next nightly bumps that number again — so
+per-dev-build artifacts mean rebuilding per dev build, with the string read from the target duckdb
+(the `python -c` above) rather than guessed.
+
+### Signing (optional, but what makes `INSTALL` safe)
+
+DuckDB reserves the last 256 bytes of the binary for an RSA signature over a two-level sha256 (the
+sha256 of the concatenation of the per-1 MiB-chunk digests). `make_extension_repo.sh` does that when
+`DUCKDB_EXTENSION_SIGNING_PK` is set, and publishes the matching public key at
+`<prefix>/.well-known/duckdb-extension-repo.json`:
+
+```bash
+openssl genrsa -out /tmp/repo.pem 2048
+DUCKDB_EXTENSION_SIGNING_PK="$(cat /tmp/repo.pem)" ./scripts/make_extension_repo.sh dist/repo-signed
+python3 scripts/test_install.py dist/repo-signed --signed   # installs without allow_unsigned_extensions
+```
+
+Clients trust the repository once, and DuckDB then verifies every install against the pinned key:
+
+```sql
+SET allow_extension_repositories = 'allowed';   -- opt-in: adding third-party repositories
+CREATE EXTENSION REPOSITORY hf_repo
+  WITH PREFIX 'https://my.host/duckdb-extensions/'
+  USING PUBLIC KEY '<base64 of the DER public key>';
+INSTALL hf FROM hf_repo;
+LOAD hf FROM hf_repo;                           -- per-repository installs live under repositories/<name>/
+SELECT repository_name, key_fingerprints FROM duckdb_extension_repositories();
+```
+
+`--signed` in the test script really means *required*: it connects without
+`allow_unsigned_extensions`, checks the fingerprint of the key that signed the installed binary, then
+copies the repository, flips a byte in it, and demands that a fresh DuckDB refuses to install it.
+
+### Hosting it on Hugging Face
+
+The repository is a folder of files, so the Hub can serve it — which means the extension can ship
+through the very protocol it implements:
+
+```sql
+-- one file per platform, straight from the build machine
+SELECT hf_upload('dist/repo/v2.0.0-alpha47600/linux_arm64/hf.duckdb_extension.gz',
+                 'hf://datasets/me/duckdb-hf-repo/v2.0.0-alpha47600/linux_arm64/hf.duckdb_extension.gz');
+```
+
+```bash
+# or the whole tree (every platform + the .well-known metadata) in one commit
+hf upload me/duckdb-hf-repo dist/repo --repo-type dataset --private
+```
+
+and clients get `INSTALL hf FROM 'https://huggingface.co/datasets/me/duckdb-hf-repo/resolve/main/'`.
 
 ## Notes / limitations
 
@@ -255,3 +352,8 @@ con.execute("LOAD '/path/to/hf.duckdb_extension'")
   cache corrupted itself into a `SIGSEGV` (which is how the shared cache earned its mutexes).
 * `hf://` listings come from `/api/{type}/{repo}/tree/...` with `Link` pagination; a folder entry
   that no longer resolves during a glob walk is treated as empty instead of failing the query.
+* Every request goes through DuckDB's `HTTPUtil` API, and the transport that answers has to speak
+  https: the client built into DuckDB ships without TLS in the official distributions. The extension
+  therefore asks for `httpfs` whenever the registered transport is the placeholder or `Built-In`, and
+  explains what to do when that auto-load is blocked (`autoinstall_known_extensions`, or a
+  `custom_extension_repository` that hides the official repository).
