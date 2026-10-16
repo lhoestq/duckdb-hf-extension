@@ -89,6 +89,35 @@ void HFUploadLocalFile(DatabaseInstance &db, optional_ptr<FileOpener> opener, co
 void HFDeletePaths(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
                    const vector<string> &files, const vector<string> &folders, const string &commit_message);
 
+//! A file that already lives on the Hub, addressed by the content hash buckets store files under. `xet_hash` is
+//! empty for the few files a bucket could not take (a repository that is not Xet-backed).
+struct HFXetFile {
+	string path;
+	idx_t size = 0;
+	string xet_hash;
+};
+
+//! Content hashes of `paths` in the repository (or bucket) `source` points at, in one API call. This is what
+//! makes writing to a bucket possible without a Xet client: a file already uploaded to a dataset or model repo
+//! has a hash a bucket can point at, and the copy itself happens on the Hub. `source` has to come from
+//! HFResolveTarget - the endpoint and token live in its connection, not in the url.
+vector<HFXetFile> HFXetHashes(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &source,
+                              const vector<string> &paths);
+
+//! One `copyFile` operation of the bucket batch endpoint
+struct HFBucketCopyOp {
+	string source_repo_type; //!< `dataset`, `model`, `space` or `bucket`
+	string source_repo_id;
+	string xet_hash;
+	string path; //!< path inside the destination bucket
+	idx_t size = 0;
+	string source_path;
+};
+
+//! Ask a bucket to take a list of files that already exist on the Hub, server side
+void HFCopyIntoBucket(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &bucket,
+                      const vector<HFBucketCopyOp> &operations);
+
 //! sha256/size/sample of a local file
 HFBlobInfo HFComputeBlobInfo(DatabaseInstance &db, const string &local_path);
 

@@ -45,18 +45,21 @@ SELECT 'p9 reset' AS t, count(*) = 1 AS ok FROM hf_read_stats(reset := true);
 SELECT 'p10 so the next read goes back to the network' AS t, octet_length(content) > 0 AS ok FROM read_blob('hf://models/google-bert/bert-base-uncased/tokenizer.json');
 SELECT 'p11 and it fetched again' AS t, bytes_fetched > 0 AS assert_fetched_again, retained_bytes > 0 AS assert_retained_again FROM hf_read_stats();
 -- a 64KiB grid over a 1.2MB parquet: several windows, each pulled apart into parallel range parts, and
--- still exactly one copy of every byte of the file on the wire
+-- still exactly one copy of every byte of the file on the wire. `straddling_fetches` is reported rather than
+-- asserted: a read can legitimately straddle two windows (windows are grid aligned, reads are not), and it
+-- is then served by copying across the boundary. Whether one happens depends on how DuckDB interleaves its
+-- tasks, so only the byte count is a promise.
 SELECT 'p12 reset and start from an empty cache' AS t, count(*) = 1 AS ok FROM hf_read_stats(reset := true);
 SELECT 'p13 cleared' AS t, cleared_files >= 0 AS ok FROM hf_read_cache_clear();
 SET hf_read_buffer_size = 65536;
 SELECT 'p14 full scan with 64KiB windows' AS t, count(*) AS n, sum(len(text)) AS chars FROM 'hf://datasets/wikimedia/wikipedia/20231101.ab/train-00000-of-00001.parquet';
-SELECT 'p15 no byte was fetched twice, windows were split' AS t, bytes_fetched = (SELECT size FROM hf_meta('hf://datasets/wikimedia/wikipedia/20231101.ab/train-00000-of-00001.parquet')) AS assert_fetched_the_file_exactly_once, window_fetches > 1 AS assert_several_windows, part_requests > window_fetches AS assert_fanned_out, straddling_fetches = 0 AS assert_stayed_on_the_grid FROM hf_read_stats();
+SELECT 'p15 no byte was fetched twice, windows were split' AS t, bytes_fetched = (SELECT size FROM hf_meta('hf://datasets/wikimedia/wikipedia/20231101.ab/train-00000-of-00001.parquet')) AS assert_fetched_the_file_exactly_once, window_fetches > 1 AS assert_several_windows, part_requests > window_fetches AS assert_fanned_out, straddling_fetches AS reads_served_across_a_window_boundary FROM hf_read_stats();
 SET VARIABLE fanout_bytes = (SELECT bytes_fetched FROM hf_read_stats());
 SELECT 'p16 reset and clear' AS t, count(*) = 1 AS ok FROM hf_read_stats(reset := true);
 SELECT 'p17 cleared' AS t, cleared_bytes > 0 AS assert_cleared FROM hf_read_cache_clear();
 SET hf_read_max_parallel_requests = 1;
 SELECT 'p18 same scan, one request per window' AS t, count(*) AS n, sum(len(text)) AS chars FROM 'hf://datasets/wikimedia/wikipedia/20231101.ab/train-00000-of-00001.parquet';
-SELECT 'p19 one part per window, same bytes on the wire' AS t, part_requests = window_fetches AS assert_no_fanout, bytes_fetched = getvariable('fanout_bytes') AS assert_identical_bytes, bytes_fetched = (SELECT size FROM hf_meta('hf://datasets/wikimedia/wikipedia/20231101.ab/train-00000-of-00001.parquet')) AS assert_fetched_the_file_exactly_once FROM hf_read_stats();
+SELECT 'p19 one part per window, same bytes on the wire' AS t, part_requests = window_fetches AS assert_no_fanout, bytes_fetched = getvariable('fanout_bytes') AS assert_identical_bytes, bytes_fetched = (SELECT size FROM hf_meta('hf://datasets/wikimedia/wikipedia/20231101.ab/train-00000-of-00001.parquet')) AS assert_fetched_the_file_exactly_once, straddling_fetches AS reads_served_across_a_window_boundary FROM hf_read_stats();
 RESET hf_read_max_parallel_requests;
 RESET hf_read_buffer_size;
 RESET enable_external_file_cache;

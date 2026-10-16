@@ -2,18 +2,31 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-16, ~18:35 UTC)
+## Current position (2026-10-16, ~20:38 UTC)
 
-**Milestone: the read path reached parity with `httpfs` on large parquet scans (was ~1.3x slower) and now
-fetches a file *exactly once* (1.000x) at every setting combination, with a dashboard to prove it
-(`hf_read_stats()`).**
+**Milestone: buckets are writable from SQL. `hf_bucket_copy(source, target)` moves any file, folder or
+glob that the Hub already stores into a bucket with a server-side copy (`copyFile`), which sidesteps the
+Xet `xetHash` that a bucket `addFile` demands - DuckDB never needed to compute a hash, it just asks the
+Hub to point a bucket path at content the Hub already has.**
 
 * Built `dist/hf.duckdb_extension` for `v2.0.0-alpha47600` (`OVERRIDE_GIT_DESCRIBE=v2.0.0-alpha47600`),
   loads in the Python pre-release with `allow_unsigned_extensions`.
-* Live smoke suites after this session's read rewrite: `smoke_read.sql` 55 OK / 0 FAIL (20 of them are real
-  assertions now), `smoke_models.sql` 25 OK / 0 FAIL, `smoke_write.sql` 40 OK (+ the 3 intended refusals),
-  `smoke_buckets.sh` 13 OK (+ 2 intended refusals). `scripts/try.py` fails a statement when any column named
-  `assert_*` comes back False, which is how the read-path checks became meaningful.
+* Live smoke suites after this session: `smoke_read.sql` 55 OK / 0 FAIL, `smoke_models.sql` 25 OK / 0 FAIL,
+  `smoke_write.sql` 40 OK (+ the 3 intended refusals), `smoke_buckets.sh` 23 OK (+ 2 intended refusals).
+  `scripts/try.py` fails a statement when any column named `assert_*` comes back False, and now splits
+  statements on `;` instead of on newlines, so the suites could become readable multi-line SQL.
+* What bucket writes needed, and what they still cannot do:
+  * `addFile` on the bucket batch API needs a `xetHash` (probed: `sha256`, no hash, and inline `contents`
+    are all rejected), and there is no plain `PUT /buckets/.../resolve/...` route;
+  * but `POST /api/{repo_type}/{repo}/paths-info/{revision}` with `{"blobs":true,"lfs":true,"xet":true}`
+    hands back the Hub's own `xetHash` for a file, and the bucket batch API accepts
+    `{"type":"copyFile","path":...,"xetHash":...,"sourceRepoType":...,"sourceRepoId":...}` - that is the
+    whole trick, and it works from datasets, models, spaces, kernels *and* other buckets;
+  * so `COPY TO 'hf://buckets/...'` stays refused (bytes from a local disk still mean `hf buckets cp`), and
+    a file the Hub keeps as a plain git blob (no Xet hash, typically small files) is reported as
+    `skipped: ...` per row instead of failing the copy;
+  * a file committed seconds earlier may not be hashed yet, so the copy re-asks up to 4 times with a
+    doubling backoff (250 ms..2 s) before believing a file is outside Xet.
 * What changed in the read path (all of it in `src/hf_read.cpp`, described in `README.md`):
   * the cache registry keeps `shared_ptr<HFFileCache>` entries instead of `weak_ptr`, so a file's fetched
     windows survive the handle churn of a parquet metadata open/close — this alone took a 287 MB scan from
@@ -31,8 +44,13 @@ fetches a file *exactly once* (1.000x) at every setting combination, with a dash
     read-after-`COPY TO` return the old bytes (caught by `smoke_models.sql`, now covered by tests).
 * Read cache is in-memory only: no disk I/O anywhere on the read path (verified by grep + by behaviour);
   the only local files created are write-path scratch buffers before a commit.
-* Remaining known gaps (deliberate, documented in `README.md`): Xet uploads, bucket writes, async prefetch
-  across windows (the one pattern still behind httpfs: whole-file `read_blob`, 6.0 s vs 4.3 s).
+* Two smaller write-path fixes came with it: a first write to a *missing* repository is now bootstrapped
+  before the `preupload` (create-on-write used to die on the preupload's 404 `RepoNotFound`, which the
+  commit endpoint never got to fix), and `hf_delete(..., missing_ok := true)` makes cleanup scripts work
+  against paths that may not exist.
+* Remaining known gaps (deliberate, documented in `README.md`): Xet uploads, `COPY TO 'hf://buckets/...'`
+  of DuckDB's own bytes, and async prefetch across windows (the one read pattern still behind httpfs:
+  whole-file `read_blob`, 6.0 s vs 4.3 s).
 
 Immediate next actions: (1) get one green run of `.github/workflows/build.yml` — the `gh` token is missing
 Actions permission (`gh workflow list` -> HTTP 403), so either the token needs the Actions scope or the
@@ -324,3 +342,22 @@ Then continue with the first unchecked box in `PLAN.md`. Do not restart the env 
   behind it is env-gated (`HF_READ_DEBUG=1`).
 * `19:45` — verified byte accounting: 287,412,556 fetched for a 287,412,556 byte parquet, all four buffer
   sizes and both fan-out settings, 0 straddling fetches, 0-2 evictions.
+* `20:00` — bucket writes: proved `addFile` needs a real `xetHash` (`sha256`/none/inline `contents` all
+  refused, no plain PUT route), then found the route that works without a Xet client - `paths-info` gives
+  the Hub's hash, the bucket batch accepts `copyFile`. `hf_bucket_copy(source, target)` implements it for
+  one file, a folder, a glob, and bucket-to-bucket, mirroring structure under the destination and skipping
+  `.gitattributes`.
+* `20:05` — `HFXetHashes` has to take a `HFTarget`, not an `HFUrl`: with only a url the `paths-info` call
+  lost the authenticated connection and came back `401 Invalid username or password`.
+* `20:10` — destination naming follows the hub client's rule (existing file wins, then existing prefix,
+  then trailing slash), which is what makes `.../duckdb/mirrored` land *inside* the folder.
+* `20:15` — create-on-write reached the `preupload`: a first write to a missing repo used to fail there;
+  `HFCreateRepoIfAllowed` now runs before the retry. Fresh dataset *and* model repos both work.
+* `20:20` — `hf_delete(..., missing_ok := true)`; `try.py` splits statements on `;`, so the suites are
+  multi-line and readable again; bucket suite rewritten to seed fixtures through the extension itself
+  (staging dataset repo) instead of the CLI, and to assert the copy semantics.
+* `20:35` — suites green: read 55, models 25, write 40 (+3 intended refusals), buckets 23 (+2 intended
+  refusals). README documents `hf_bucket_copy`, the skip case, and the delayed Xet hash.
+* `20:55` — `straddling_fetches = 0` turned out not to be an invariant (one read at the file tail is served
+  across a window boundary depending on how DuckDB interleaves tasks; bytes stayed exact either way), so the
+  read suite *reports* it and only promises `bytes_fetched == file size`. Two clean 55 OK / 0 FAIL runs.

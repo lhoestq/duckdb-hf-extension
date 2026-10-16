@@ -255,8 +255,8 @@ void HFRefuseBucketWrite(const HFUrl &url, const string &action) {
 	}
 	throw IOException("Writing to Hugging Face buckets is not supported yet: bucket uploads ('%s') go through Xet "
 	                  "storage, whose `xetHash` only the `hf_xet` client computes - use `hf buckets cp` (or `hf "
-	                  "buckets sync`) to write a bucket, or write to a dataset/model/space repo instead. Reading and "
-	                  "deleting buckets through hf://buckets/ works.",
+	                  "buckets sync`) for bytes on a local disk, or `hf_bucket_copy(...)` to move what the Hub "
+	                  "already stores into the bucket. Reading and deleting buckets through hf://buckets/ works.",
 	                  action);
 }
 

@@ -50,10 +50,7 @@ static string VerifyUrl(const string &endpoint, const string &href) {
 
 //! `datasets` -> `dataset`, used by the repo creation endpoint
 static string SingularRepoType(const string &repo_type) {
-	if (repo_type.size() > 1 && repo_type.back() == 's') {
-		return repo_type.substr(0, repo_type.size() - 1);
-	}
-	return repo_type;
+	return HFRepoType::ToSingular(repo_type);
 }
 
 //! The path inside the repository, without the leading slash the Hub does not want
@@ -329,6 +326,30 @@ static void BucketBatchDelete(DatabaseInstance &db, optional_ptr<FileOpener> ope
 	client->ThrowHTTPError(*response, "POST (bucket batch)", url);
 }
 
+//! A 404 (or a 403 for a private repo you can create) on a write path is the Hub's way of saying "this repository
+//! does not exist yet". `hf_create_repo` turns that into a create + retry, so a first `COPY TO` can bootstrap a
+//! repository. Both the commit endpoint and the preupload endpoint hit it - preupload comes first, so a fresh
+//! repository fails there before a commit is ever attempted.
+static bool HFCreateRepoIfAllowed(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
+                                  int status) {
+	if (status != 404 && status != 403) {
+		return false;
+	}
+	Value create_repo;
+	if (!opener) {
+		return false;
+	}
+	FileOpenerInfo info;
+	info.file_path = target.url.ToString();
+	if (!FileOpener::TryGetCurrentSetting(opener, Identifier("hf_create_repo"), create_repo, info) ||
+	    create_repo.IsNull() || !create_repo.GetValue<bool>()) {
+		return false;
+	}
+	// true even when the repository already existed (409): in both cases the write is worth retrying
+	HFCreateRepo(db, opener, target, true);
+	return true;
+}
+
 void HFCommit(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &repo_target,
               const vector<HFCommitOp> &operations, const string &commit_message) {
 	if (operations.empty()) {
@@ -341,9 +362,10 @@ void HFCommit(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTar
 			if (op.kind != HFCommitOp::Kind::DELETE) {
 				throw IOException("Writing to Hugging Face buckets ('%s') is not supported: bucket uploads go through "
 				                    "Xet storage, which DuckDB cannot speak yet (only the `hf_xet` client can). Bucket "
-				                    "files can be read and deleted from DuckDB; write them with `hf buckets cp`, or write "
-				                    "to a dataset, model or space repository instead, which supports `COPY TO`",
-				                    repo_target.url.ToString());
+				                    "files can be read, copied and deleted from DuckDB: write the data to a dataset or "
+				                    "model repository with `COPY TO`, then move it into the bucket with "
+				                    "`SELECT * FROM hf_bucket_copy('hf://datasets/user/repo/file', '%s')`",
+				                    repo_target.url.ToString(), repo_target.url.ToString());
 			}
 		}
 		BucketBatchDelete(db, opener, repo_target, operations);
@@ -382,17 +404,8 @@ void HFCommit(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTar
 			return;
 		}
 		if ((status == 404 || status == 403) && !created_repo) {
-			Value create_repo;
-			bool allow_create = false;
-			if (opener) {
-				FileOpenerInfo info;
-				info.file_path = repo_target.url.ToString();
-				allow_create = FileOpener::TryGetCurrentSetting(opener, Identifier("hf_create_repo"), create_repo,
-				                                                info) &&
-				               !create_repo.IsNull() && create_repo.GetValue<bool>();
-			}
-			if (allow_create) {
-				HFCreateRepo(db, opener, repo_target, true);
+			// the repository does not exist yet: `hf_create_repo` turns the write into create + retry
+			if (HFCreateRepoIfAllowed(db, opener, repo_target, status)) {
 				created_repo = true;
 				continue;
 			}
@@ -412,29 +425,11 @@ void HFCommit(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTar
 // Uploads
 //===----------------------------------------------------------------------===//
 
-static string PreuploadMode(HFClient &client, const HFUrl &url, const string &path_in_repo, const HFBlobInfo &blob,
-                            bool &should_ignore) {
-	HFJsonWriter body;
-	body.Raw("{\"files\":[{\"path\":");
-	body.String(path_in_repo);
-	body.Raw(",\"sample\":\"");
-	body.Raw(HFJsonWriter::Escape(blob.sample));
-	body.Raw("\",\"size\":");
-	body.Raw(std::to_string(blob.size));
-	body.Raw("}]}");
-
-	HTTPHeaders headers;
-	headers.Insert("Content-Type", "application/json");
-	auto request_url = HFUtil::Join(url.endpoint, HFUtil::Join(HFUtil::Join(HFUtil::Join("api", url.repo_type),
-	                                                                        url.repository),
-	                                                           "preupload/" + url.revision));
-	auto response = client.Post(request_url, body.out, headers);
-	if (response->HasRequestError() || static_cast<int>(response->status) >= 400) {
-		client.ThrowHTTPError(*response, "POST (preupload)", request_url);
-	}
+//! the answer is `{"files":[{"path":...,"uploadMode":...,"shouldIgnore":...,"oid":...}]}`
+static string ParsePreuploadMode(HFClient &client, const HTTPResponse &response, const HFUrl &url,
+                                 const string &path_in_repo, bool &should_ignore) {
 	string mode;
-	// the answer is `{"files":[{"path":...,"uploadMode":...,"shouldIgnore":...,"oid":...}]}`
-	auto files = HFJson::FindArray(response->body, "files");
+	auto files = HFJson::FindArray(response.body, "files");
 	HFJson::ForEachObject(files, [&](const string &object) {
 		string entry_path;
 		string entry_mode;
@@ -460,6 +455,40 @@ static string PreuploadMode(HFClient &client, const HFUrl &url, const string &pa
 		throw IOException("The Hugging Face Hub returned no upload mode for '%s'", url.ToString());
 	}
 	return mode;
+}
+
+static string PreuploadMode(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
+                            const string &path_in_repo, const HFBlobInfo &blob, bool &should_ignore) {
+	const auto &url = target.url;
+	HFJsonWriter body;
+	body.Raw("{\"files\":[{\"path\":");
+	body.String(path_in_repo);
+	body.Raw(",\"sample\":\"");
+	body.Raw(HFJsonWriter::Escape(blob.sample));
+	body.Raw("\",\"size\":");
+	body.Raw(std::to_string(blob.size));
+	body.Raw("}]}");
+
+	HTTPHeaders headers;
+	headers.Insert("Content-Type", "application/json");
+	auto request_url = HFUtil::Join(url.endpoint, HFUtil::Join(HFUtil::Join(HFUtil::Join("api", url.repo_type),
+	                                                                        url.repository),
+	                                                           "preupload/" + url.revision));
+	// a first write to a repository hits this endpoint before the commit does, so this is where a missing
+	// repository has to be created - otherwise `hf_create_repo` would only ever report a 404
+	string body_str = body.out;
+	auto client = HFMakeClient(db, opener, target);
+	for (idx_t attempt = 0;; attempt++) {
+		auto response = client->Post(request_url, body_str, headers);
+		auto status = static_cast<int>(response->status);
+		if (!response->HasRequestError() && status < 400) {
+			return ParsePreuploadMode(*client, *response, url, path_in_repo, should_ignore);
+		}
+		if (attempt == 0 && HFCreateRepoIfAllowed(db, opener, target, status)) {
+			continue;
+		}
+		client->ThrowHTTPError(*response, "POST (preupload)", request_url);
+	}
 }
 
 static void UploadLFSBlob(HFClient &client, const HFUrl &url, const HFBlobInfo &blob, const string &local_path) {
@@ -591,7 +620,7 @@ void HFUploadLocalFile(DatabaseInstance &db, optional_ptr<FileOpener> opener, co
 
 	auto client = HFMakeClient(db, opener, target);
 	bool should_ignore = false;
-	auto mode = PreuploadMode(*client, target.url, path_in_repo, blob, should_ignore);
+	auto mode = PreuploadMode(db, opener, target, path_in_repo, blob, should_ignore);
 	if (should_ignore) {
 		throw IOException("'%s' is ignored by the .gitignore file of the repository - refusing to upload it",
 		                  target.url.ToString());
@@ -641,6 +670,127 @@ void HFDeletePaths(DatabaseInstance &db, optional_ptr<FileOpener> opener, const 
 		operations.push_back(std::move(op));
 	}
 	HFCommit(db, opener, target, operations, commit_message);
+}
+
+//===----------------------------------------------------------------------===//
+// Server side copies (the way to write a bucket without a Xet client)
+//===----------------------------------------------------------------------===//
+
+vector<HFXetFile> HFXetHashes(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &source,
+                              const vector<string> &paths) {
+	vector<HFXetFile> out;
+	if (paths.empty()) {
+		return out;
+	}
+	const auto &url = source.url;
+	auto client = HFMakeClient(db, opener, source);
+
+	HFJsonWriter body;
+	string request_url;
+	if (url.IsBucket()) {
+		// the bucket flavour takes the paths and nothing else
+		request_url = HFUtil::Join(url.endpoint, HFUtil::Join(HFUtil::Join("api", url.repo_type), url.repository) +
+		                                        "/paths-info");
+		body.Raw("{\"paths\":[");
+	} else {
+		request_url = HFUtil::Join(url.endpoint, HFUtil::Join(HFUtil::Join(HFUtil::Join("api", url.repo_type),
+		                                                                        url.repository),
+		                                                           "paths-info/" + url.revision));
+		// `xet` is what makes the hub answer with the content hash a bucket can be pointed at
+		body.Raw("{\"paths\":[");
+	}
+	for (idx_t i = 0; i < paths.size(); i++) {
+		if (i > 0) {
+			body.Raw(",");
+		}
+		body.String(paths[i]);
+	}
+	body.Raw("]");
+	if (!url.IsBucket()) {
+		body.Raw(",\"blobs\":true,\"lfs\":true,\"xet\":true");
+	}
+	body.Raw("}");
+
+	HTTPHeaders headers;
+	headers.Insert("Content-Type", "application/json");
+	auto response = client->Post(request_url, body.out, headers);
+	if (response->HasRequestError() || static_cast<int>(response->status) >= 400) {
+		client->ThrowHTTPError(*response, "POST (paths-info)", request_url);
+	}
+	// the answer is a top level array, the scanner looks arrays up under a key
+	auto wrapped = "{\"files\":" + response->body + "}";
+	auto entries = HFJson::FindArray(wrapped, "files");
+	HFJson::ForEachObject(entries, [&](const string &object) {
+		HFXetFile file;
+		bool is_dir = false;
+		HFJson::ForEachMember(object, [&](const string &key, const string &raw) {
+			if (key == "path") {
+				file.path = HFJson::AsString(raw);
+			} else if (key == "xetHash") {
+				file.xet_hash = HFJson::AsString(raw);
+			} else if (key == "size") {
+				file.size = NumericCast<idx_t>(MaxValue<int64_t>(0, HFJson::AsInt(raw)));
+			} else if (key == "type") {
+				is_dir = HFJson::AsString(raw) != "file";
+			}
+		});
+		if (!file.path.empty() && !is_dir) {
+			out.push_back(std::move(file));
+		}
+	});
+	return out;
+}
+
+void HFCopyIntoBucket(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &bucket,
+                      const vector<HFBucketCopyOp> &operations) {
+	if (operations.empty()) {
+		return;
+	}
+	if (!bucket.url.IsBucket()) {
+		throw IOException("'%s' is not a bucket - copies land in a bucket, for example "
+		                  "'hf://buckets/my-user/my-bucket/data/'",
+		                  bucket.url.ToString());
+	}
+	auto client = HFMakeClient(db, opener, bucket);
+	auto url = HFUtil::Join(bucket.url.endpoint,
+	                        HFUtil::Join(HFUtil::Join("api", bucket.url.repo_type), bucket.url.repository) + "/batch");
+	HTTPHeaders headers;
+	headers.Insert("Content-Type", "application/x-ndjson");
+
+	const auto now_ms =
+	    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+	        .count();
+	// one batch of the ndjson endpoint is a round trip, and the Hub is fine with a hundred files in it
+	constexpr idx_t BATCH_SIZE = 100;
+	for (idx_t from = 0; from < operations.size(); from += BATCH_SIZE) {
+		HFJsonWriter out;
+		for (idx_t i = from; i < MinValue<idx_t>(from + BATCH_SIZE, operations.size()); i++) {
+			auto &op = operations[i];
+			out.Raw("{\"type\":\"copyFile\",\"path\":");
+			out.String(op.path);
+			out.Raw(",\"xetHash\":");
+			out.String(op.xet_hash);
+			out.Raw(",\"mtime\":");
+			out.Raw(std::to_string(now_ms));
+			out.Raw(",\"sourceRepoType\":");
+			out.String(op.source_repo_type);
+			out.Raw(",\"sourceRepoId\":");
+			out.String(op.source_repo_id);
+			out.Raw("}\n");
+		}
+		auto response = client->Post(url, out.out, headers);
+		if (!(response->HasRequestError() || static_cast<int>(response->status) >= 400)) {
+			auto failed = HFJson::FindArray(response->body, "failed");
+			if (failed.find('{') != string::npos || failed.find('"') != string::npos) {
+				throw IOException("The Hugging Face Hub refused some copies into '%s': %s", bucket.url.ToString(),
+				                    failed.size() > 512 ? failed.substr(0, 512) + "..." : failed);
+			}
+			continue;
+		}
+		client->ThrowHTTPError(*response, "POST (bucket batch)", url);
+	}
+	// the bucket has new bytes at these paths: anything cached for it is stale
+	HFReadCacheInvalidateRepo(HFRepoCacheKey(bucket.url));
 }
 
 } // namespace duckdb

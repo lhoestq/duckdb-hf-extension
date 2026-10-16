@@ -27,6 +27,11 @@ constexpr idx_t HF_DEFAULT_READ_CACHE_TOTAL = 1024 * 1024 * 1024;
 constexpr idx_t HF_MIN_READ_CACHE = 64 * 1024 * 1024;
 //! How often a single GET/HEAD/range request is retried on throttling or transport errors
 constexpr idx_t HF_MAX_HTTP_ATTEMPTS = 5;
+
+//! a bucket copy needs the hub's own content hash of each file, and a file committed seconds ago is hashed by
+//! the hub in its own time: ask again this many times, waiting HF_COPY_HASH_BACKOFF doubled each round
+constexpr idx_t HF_COPY_HASH_ATTEMPTS = 4;
+constexpr idx_t HF_COPY_HASH_BACKOFF = 250; // ms, doubling: 250 + 500 + 1000 + 2000
 //! Single-PUT (non multipart) LFS uploads are capped by S3 at 5GiB
 constexpr idx_t HF_MAX_SINGLE_UPLOAD_SIZE = 5ULL * 1024 * 1024 * 1024;
 
@@ -44,6 +49,8 @@ struct HFRepoType {
 
 	static bool IsValid(const string &repo_type);
 	static string ToApiSegment(const string &repo_type);
+	//! `datasets` -> `dataset`: the singular form the Hub uses in bucket copy operations and repo creation
+	static string ToSingular(const string &repo_type);
 	//! The git-facing prefix used by the `/resolve/`, `/raw/` and LFS routes: models live at the root of the
 	//! domain (`{endpoint}/{repo_id}/resolve/...`), everything else keeps its plural segment.
 	static string ToGitPrefix(const string &repo_type);

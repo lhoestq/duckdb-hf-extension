@@ -24,8 +24,9 @@ Target: **DuckDB 2.0** (`v2.0.0-alpha…`, codename *Cyanoptera*), including the
 
 `httpfs` already ships a *read-only* `hf://` filesystem. This extension:
 
-* adds **writes** (`COPY TO`, `INSERT INTO` through the fs, `hf_upload`, `hf_delete`),
-* adds `hf_ls` / `hf_meta` / `hf_upload` / `hf_delete` table functions,
+* adds **writes** (`COPY TO`, `INSERT INTO` through the fs, `hf_upload`, `hf_delete`,
+  `hf_bucket_copy`),
+* adds `hf_ls` / `hf_meta` / `hf_upload` / `hf_delete` / `hf_bucket_copy` table functions,
 * supports **all** repo types (`datasets`, `models`, `spaces`, `kernels`, `buckets`) for reads, with
   `@revision` and the short `hf://user/repo/path` form,
 * registers itself with `IsManuallySet()`, so it wins over httpfs' `hf://` handler whoever loads first,
@@ -74,7 +75,8 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | `hf_ls(path, recursive := false)` | `url, path, is_dir, size, sha256` |
 | `hf_meta(path)` | `url, exists, size, etag, repo_type, repository, revision` |
 | `hf_upload(local_path, hf_path, message := ...)` | `url, size, sha256` |
-| `hf_delete(path)` / `hf_delete([...])` | `url` (one commit per repository in the list) |
+| `hf_delete(path)` / `hf_delete([...], missing_ok := false)` | `url` (one commit per repository in the list) |
+| `hf_bucket_copy(source, target)` | `source, url, path, size, xet_hash, status` - moves files that are already on the Hub into a bucket |
 | `hf_list_revisions(path, max_revisions := 20)` | `repository, revision, title, author, date` |
 | `hf_list_refs(path)` | `repository, kind, name, ref, target_commit` |
 | `hf_create_repo(path, private := true)` | `url, created` (`created = false` when it already existed) |
@@ -87,7 +89,9 @@ amplification (a scan of one file should be exactly 1.0), `evictions` says the p
 small for the working set, and `retained_bytes` what it is still holding after the handles closed.
 `reset := true` zeroes the counters without touching the cached bytes. Running the process with
 `HF_READ_DEBUG=1` also logs every window the read path claims (`path`, window, grid, and the read that
-triggered it) on stderr.
+triggered it) on stderr. `straddling_fetches` counts reads served by copying across a window boundary -
+windows are grid aligned, reads are not, so a few are normal and cost no extra bytes; it grows when the
+read-ahead pattern and the cache shape disagree.
 
 `max_revisions` is spelled that way because `limit` is a reserved word in DuckDB's grammar.
 `hf_status()` is the "what am I connected to" command: it never prints the token, and a rejected or
@@ -96,7 +100,8 @@ missing token shows up in `whoami_error` instead of throwing, so the settings st
 `hf_delete` accepts a mix of repository types and revisions: paths are grouped by
 `(endpoint, repo_type, repository, revision)` and committed together per repository. A directory is
 deleted by deleting the files below it (the commit API has no folder deletion for existing
-revisions), and deleting something that does not exist is an error rather than a silent no-op.
+revisions), and deleting something that does not exist is an error rather than a silent no-op -
+until `missing_ok := true`, which is what cleanup scripts usually want.
 
 ## Every repo type
 
@@ -137,21 +142,45 @@ SELECT * FROM hf_upload('out.parquet', 'hf://datasets/me/demo/out.parquet',
 SELECT * FROM hf_delete(['hf://datasets/me/demo/old.parquet', 'hf://models/me/demo/partitioned']);
 ```
 
-Buckets are readable and deletable but **not writable** from DuckDB: a bucket `addFile` requires a
-Xet `xetHash`, which only the `hf_xet` client computes. The extension refuses the write and points
-at the CLI instead:
+Buckets are readable and deletable, and they take new data through `hf_bucket_copy`: a bucket upload
+(`addFile`) requires a Xet `xetHash`, which only the `hf_xet` client computes, so DuckDB cannot push
+bytes into one. What it *can* do is ask the Hub to point a bucket path at content it already stores -
+from a dataset, model, space, kernel or another bucket - which is a server-side copy: no bytes go
+through DuckDB, and the size does not matter.
+
+```sql
+-- one file, onto an exact name
+SELECT * FROM hf_bucket_copy('hf://datasets/me/demo/out.parquet',
+                             'hf://buckets/me/playground/exports/out.parquet');
+-- a whole folder (or a glob): the structure below the source is mirrored under the destination
+SELECT * FROM hf_bucket_copy('hf://datasets/me/demo/partitioned', 'hf://buckets/me/playground/exports/');
+SELECT * FROM hf_bucket_copy('hf://datasets/me/demo/*.parquet', 'hf://buckets/me/playground/parquet/');
+-- and from a bucket to a bucket
+SELECT * FROM hf_bucket_copy('hf://buckets/me/playground/exports/out.parquet',
+                             'hf://buckets/me/playground/archive/out.parquet');
+```
+
+One row per source file, with the `xet_hash` it was registered under and a `status`. Two things are
+worth knowing: a file committed seconds earlier is being hashed by the Hub in its own time (the copy
+asks again a few times before believing otherwise), and a file the Hub keeps outside Xet - a plain
+git blob, which is how small files sometimes land - has no hash to reference and comes back as
+`skipped: ...` rather than an error, because a bucket simply cannot point at it.
+
+A direct write is still refused, and says so:
 
 ```sql
 COPY (SELECT 1) TO 'hf://buckets/me/playground/x.parquet';
 -- IO Error: Writing to Hugging Face buckets is not supported yet: bucket uploads (...) go through
--- Xet storage, whose `xetHash` only the `hf_xet` client computes - use `hf buckets cp` (...)
+-- Xet storage, whose `xetHash` only the `hf_xet` client computes - use `hf buckets cp` or
+-- `hf_bucket_copy(...)` (...)
 ```
 ```bash
-hf buckets cp out.parquet hf://buckets/lhoestq/playground/duckdb/out.parquet   # the way that works
+hf buckets cp out.parquet hf://buckets/lhoestq/playground/duckdb/out.parquet   # bytes from a local disk
 ```
 
-Verified end to end (read + glob + delete) in `scripts/smoke_buckets.sh`, which seeds a bucket with
-the CLI and reads it back through `hf://`.
+Verified end to end in `scripts/smoke_buckets.sh`: fixtures are written by DuckDB into a staging
+dataset repository (which also covers create-on-write), copied into a bucket, read back through
+`hf://`, deleted again, and both refusal paths are exercised.
 
 ## Reading performance
 
@@ -226,7 +255,8 @@ Everything below is implemented in this tree; the ✔ marks are verified against
 * ✔ `hf_upload`, `hf_delete` (single path, list of paths, mixed repositories, recursive directories)
 * ✔ model / space / kernel repos end to end (writes, nested paths, `**` globs, LFS and git-tracked
   files verified byte-identical with `md5(read_blob(...))`)
-* ✔ bucket reads and bucket deletes (`hf://buckets/...`)
+* ✔ bucket reads, bucket deletes (`hf://buckets/...`) and bucket writes through `hf_bucket_copy`
+  (server-side copies of anything already on the Hub: files, folders, globs, bucket to bucket)
 * ✔ `hf_list_revisions`, `hf_list_refs`, `hf_create_repo`, `hf_status`, `hf_read_stats`,
   `hf_read_cache_clear`
 * ✔ distribution: `scripts/make_extension_repo.sh` + `INSTALL hf FROM '<prefix>'` verified against a
@@ -235,8 +265,10 @@ Everything below is implemented in this tree; the ✔ marks are verified against
   presigned PUT per part, then a completion POST with the part etags)
 * ✘ Xet uploads (`hf_xet` is a Rust library, out of scope) — the git-LFS transfer is used instead,
   which the Hub accepts for every repo type
-* ✘ `hf://buckets/*` writes: bucket uploads require an Xet `xetHash`, which only `hf_xet` computes;
-  the extension refuses with a message pointing at `hf buckets cp`
+* ✘ `COPY ... TO 'hf://buckets/...'`: pushing DuckDB's own bytes into a bucket needs an Xet
+  `xetHash`, which only `hf_xet` computes; the extension refuses with a message pointing at
+  `hf buckets cp` and `hf_bucket_copy`. The same reason makes a `hf_bucket_copy` of a file the Hub
+  keeps as a plain git blob come back `skipped` - there is no hash for a bucket to point at
 
 ## Layout
 
@@ -253,7 +285,8 @@ src/
                     fetch, budgeted retention beyond the handle, invalidation on commit
   hf_commit.cpp     the write protocol: preupload -> lfs batch -> ndjson commit (+repo mutex)
   hf_write.cpp      write handle: temp file buffering, upload+commit on close
-  hf_functions.cpp  hf_ls / hf_meta / hf_upload / hf_delete / hf_list_revisions / hf_list_refs
+  hf_functions.cpp  hf_ls / hf_meta / hf_upload / hf_delete / hf_bucket_copy / hf_list_revisions /
+                    hf_list_refs / hf_create_repo / hf_status / hf_read_stats / hf_read_cache_clear
                     / hf_create_repo / hf_status
   hf_extension.cpp  entry point
 scripts/

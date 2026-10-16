@@ -28,6 +28,22 @@ def q(sql, limit=4):
         print("FAIL", sql.strip()[:78], "->", type(e).__name__, str(e).replace("\n", " ")[:240])
 
 
-for sql in sys.stdin.read().splitlines():
-    if sql.strip() and not sql.strip().startswith("--"):
-        q(sql)
+def statements(text):
+    """Whole-line comments out, then split on ';' that is not inside a quoted string."""
+    body = "\n".join(line for line in text.splitlines() if not line.strip().startswith("--"))
+    out, current, quoted = [], [], False
+    for char in body:
+        if char == "'":
+            quoted = not quoted
+            current.append(char)
+        elif char == ";" and not quoted:
+            out.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    out.append("".join(current))
+    return [s.strip() for s in out if s.strip()]
+
+
+for sql in statements(sys.stdin.read()):
+    q(sql)

@@ -108,7 +108,7 @@ static unique_ptr<GlobalTableFunctionState> HFListInit(ClientContext &context, T
 	if (HFUtil::HasGlob(bind_data.target.url.path)) {
 		// a glob is expanded through the filesystem, which knows how to descend efficiently
 		auto &fs = FileSystem::GetFileSystem(context);
-		for (auto &file : fs.Glob(bind_data.target.url.ToString(), &file_opener)) {
+		for (auto &file : fs.Glob(bind_data.target.url.ToString(), nullptr)) {
 			auto target = HFResolveTarget(file.path, &file_opener, db);
 			HFListEntry entry;
 			entry.path = target.url.path;
@@ -685,6 +685,7 @@ static void HFUploadFunction(ClientContext &context, TableFunctionInput &data, D
 
 struct HFDeleteBindData : public TableFunctionData {
 	vector<HFTarget> targets;
+	bool missing_ok = false; //!< tolerate paths that are not there, so cleanup scripts can be idempotent
 };
 
 struct HFDeleteState : public GlobalTableFunctionState {
@@ -716,6 +717,7 @@ static unique_ptr<FunctionData> HFDeleteBind(ClientContext &context, TableFuncti
 		bind_data->targets.push_back(
 		    HFResolveTarget(StringValue::Get(input.inputs[0]), &file_opener, DatabaseInstance::GetDatabase(context)));
 	}
+	bind_data->missing_ok = NamedArgumentOr(input, "missing_ok", false);
 
 	names.emplace_back("url");
 	return_types.push_back(LogicalType::VARCHAR);
@@ -733,6 +735,7 @@ static unique_ptr<GlobalTableFunctionState> HFDeleteInit(ClientContext &context,
 		HFTarget target;
 		vector<string> files;
 		vector<string> folders;
+		vector<string> urls; //!< reported once the commit behind them actually went through
 	};
 	std::map<string, Group> groups;
 	for (auto &target : bind_data.targets) {
@@ -746,7 +749,7 @@ static unique_ptr<GlobalTableFunctionState> HFDeleteInit(ClientContext &context,
 		string etag;
 		if (HFTryGetFileSize(db, &file_opener, target, size, etag)) {
 			group.files.push_back(target.url.path);
-			state->deleted.push_back(target.url.ToString());
+			group.urls.push_back(target.url.ToString());
 			continue;
 		}
 		// not a file: delete everything below it (the hub deletes the now-empty folders along with them)
@@ -758,19 +761,35 @@ static unique_ptr<GlobalTableFunctionState> HFDeleteInit(ClientContext &context,
 				}
 			});
 		} catch (std::exception &) {
+			if (bind_data.missing_ok) {
+				continue; // cleanup scripts ask for paths that may not be there
+			}
 			throw IOException("Nothing to delete at '%s' - no file or folder exists there", target.url.ToString());
 		}
 		if (children.empty()) {
+			if (bind_data.missing_ok) {
+				continue;
+			}
 			throw IOException("Nothing to delete at '%s' - the folder is empty", target.url.ToString());
 		}
 		for (auto &child : children) {
 			group.files.push_back("/" + child);
-			state->deleted.push_back(target.url.WithPath("/" + child).ToString());
+			group.urls.push_back(target.url.WithPath("/" + child).ToString());
 		}
 	}
 	for (auto &entry : groups) {
-		HFDeletePaths(db, &file_opener, entry.second.target, entry.second.files, entry.second.folders,
-		              "Delete with DuckDB");
+		try {
+			HFDeletePaths(db, &file_opener, entry.second.target, entry.second.files, entry.second.folders,
+			              "Delete with DuckDB");
+		} catch (std::exception &) {
+			if (!bind_data.missing_ok) {
+				throw;
+			} // a repository that is already gone, a revision that is read only: nothing was deleted, carry on
+			continue;
+		}
+		for (auto &url : entry.second.urls) {
+			state->deleted.push_back(url);
+		}
 	}
 	state->done = true;
 	return std::move(state);
@@ -787,6 +806,242 @@ static void HFDeleteFunction(ClientContext &, TableFunctionInput &data, DataChun
 }
 
 //===----------------------------------------------------------------------===//
+// hf_bucket_copy
+//===----------------------------------------------------------------------===//
+
+struct HFBucketCopyBindData : public TableFunctionData {
+	HFTarget source;
+	HFTarget bucket;
+};
+
+struct HFCopyRow {
+	string source;
+	string url;
+	string path;
+	idx_t size = 0;
+	string xet_hash;
+	string status;
+};
+
+struct HFBucketCopyState : public GlobalTableFunctionState {
+	vector<HFCopyRow> rows;
+	idx_t offset = 0;
+
+	idx_t MaxThreads() const override {
+		return 1;
+	}
+};
+
+static unique_ptr<FunctionData> HFBucketCopyBind(ClientContext &context, TableFunctionBindInput &input,
+                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
+	if (input.inputs.size() < 2 || input.inputs[0].IsNull() || input.inputs[1].IsNull()) {
+		throw BinderException("hf_bucket_copy requires a source hf:// path and a bucket hf:// path, for example "
+		                      "hf_bucket_copy('hf://datasets/user/repo/data.parquet', "
+		                      "'hf://buckets/user/bucket/data.parquet')");
+	}
+	ClientContextFileOpener file_opener(context);
+	auto &db = DatabaseInstance::GetDatabase(context);
+	auto bind_data = make_uniq<HFBucketCopyBindData>();
+	bind_data->source = HFResolveTarget(StringValue::Get(input.inputs[0]), &file_opener, db);
+	bind_data->bucket = HFResolveTarget(StringValue::Get(input.inputs[1]), &file_opener, db);
+	if (!bind_data->bucket.url.IsBucket()) {
+		throw BinderException("hf_bucket_copy writes into a bucket - '%s' is a %s, use 'hf://buckets/user/bucket/...' "
+		                      "as destination",
+		                      StringValue::Get(input.inputs[1]), bind_data->bucket.url.repo_type);
+	}
+	if (bind_data->source.url.endpoint != bind_data->bucket.url.endpoint) {
+		throw BinderException("hf_bucket_copy copies inside one Hub - '%s' and '%s' are on different endpoints",
+	                          bind_data->source.url.ToString(), bind_data->bucket.url.ToString());
+	}
+
+	names.emplace_back("source");
+	return_types.push_back(LogicalType::VARCHAR);
+	names.emplace_back("url");
+	return_types.push_back(LogicalType::VARCHAR);
+	names.emplace_back("path");
+	return_types.push_back(LogicalType::VARCHAR);
+	names.emplace_back("size");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("xet_hash");
+	return_types.push_back(LogicalType::VARCHAR);
+	names.emplace_back("status");
+	return_types.push_back(LogicalType::VARCHAR);
+	return std::move(bind_data);
+}
+
+static unique_ptr<GlobalTableFunctionState> HFBucketCopyInit(ClientContext &context, TableFunctionInitInput &input) {
+	auto &db = DatabaseInstance::GetDatabase(context);
+	ClientContextFileOpener file_opener(context);
+	auto &bind_data = input.bind_data->Cast<HFBucketCopyBindData>();
+	auto state = make_uniq<HFBucketCopyState>();
+
+	// what is being copied: one file, or everything below a prefix (a folder, or a glob)
+	const auto strip = [](string path) {
+		while (!path.empty() && path.front() == '/') {
+			path = path.substr(1);
+		}
+		while (!path.empty() && path.back() == '/') {
+			path.pop_back();
+		}
+		return path;
+	};
+	auto source_path = strip(bind_data.source.url.path);
+	vector<string> paths;
+	string base; //!< the prefix the mirrored structure is relative to (empty = a single file)
+	if (!source_path.empty()) {
+		// is the source one file? the hub answers with an entry per path it actually has
+		if (!HFXetHashes(db, &file_opener, bind_data.source, vector<string> {source_path}).empty()) {
+			paths = {source_path};
+		}
+	}
+	if (paths.empty()) {
+		// not a file: take everything below it. `**` is the one glob the Hub tree listing serves in one call
+		auto glob_url = bind_data.source.url;
+		glob_url.path = source_path.empty() ? "/**" : "/" + source_path + "/**";
+		if (HFUtil::HasGlob(source_path)) {
+			// the caller already wrote a pattern, keep it and mirror relative to its fixed part
+			glob_url.path = "/" + source_path;
+			base = source_path.substr(0, source_path.find('*'));
+			while (!base.empty() && base.back() == '/') {
+				base.pop_back();
+			}
+		} else {
+			base = source_path;
+		}
+		auto &fs = FileSystem::GetFileSystem(context);
+		// the opener is pushed automatically by the wrapper filesystem - passing one here is an internal error
+		for (auto &found : fs.Glob(glob_url.ToString(), nullptr)) {
+			auto found_path = strip(HFResolveTarget(found.path, &file_opener, db).url.path);
+			if (found_path.empty() || found_path == ".gitattributes" ||
+			    found_path == base + "/.gitattributes") { // git bookkeeping, not data
+				continue;
+			}
+			paths.push_back(std::move(found_path));
+		}
+	}
+	if (paths.empty()) {
+		throw IOException("Nothing found at '%s' to copy into '%s'", bind_data.source.url.ToString(),
+		                  bind_data.bucket.url.ToString());
+	}
+
+	// the hub answers with the content hash of every file it has, in batches
+	map<string, HFXetFile> hashes;
+ unordered_set<string> pending_hash(paths.begin(), paths.end());
+	const auto fetch_hashes = [&](const vector<string> &wanted) {
+		for (idx_t from = 0; from < wanted.size(); from += 100) {
+			vector<string> batch;
+			for (idx_t i = from; i < MinValue<idx_t>(from + 100, wanted.size()); i++) {
+				batch.push_back(wanted[i]);
+			}
+			for (auto &file : HFXetHashes(db, &file_opener, bind_data.source, batch)) {
+				hashes[file.path] = file;
+			}
+		}
+	};
+	fetch_hashes(paths);
+	// a file committed a moment ago is hashed by the hub in its own time: ask again, backing off, before
+	// believing a file really is outside Xet (some never are, and they are reported as skipped below)
+	for (idx_t attempt = 0; attempt < HF_COPY_HASH_ATTEMPTS && !pending_hash.empty(); attempt++) {
+		HFClient::SleepMs(HF_COPY_HASH_BACKOFF * (1 << attempt));
+		vector<string> missing;
+		for (auto &path : pending_hash) {
+			missing.push_back(path);
+		}
+		fetch_hashes(missing);
+		for (auto it = pending_hash.begin(); it != pending_hash.end();) {
+			auto found = hashes.find(*it);
+			if (found != hashes.end() && !found->second.xet_hash.empty()) {
+				it = pending_hash.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+
+	string dest_prefix = strip(bind_data.bucket.url.path);
+	// one file into a destination that is not a directory lands on exactly that name; anything else is mirrored
+	// below the destination as a prefix. Whether the destination is a directory is decided the way the hub's own
+	// client decides it: an existing file wins, then an existing prefix, then a trailing slash.
+	const bool single_file = !source_path.empty() && paths.size() == 1 && paths[0] == source_path;
+	bool dest_is_dir = !single_file || dest_prefix.empty() || bind_data.bucket.url.path.back() == '/';
+	if (!dest_is_dir) {
+		// an existing file with that name wins, otherwise anything living under that prefix makes it a directory
+		if (HFXetHashes(db, &file_opener, bind_data.bucket, vector<string> {dest_prefix}).empty()) {
+			auto listing = bind_data.bucket;
+			listing.url.path = "/" + dest_prefix;
+			HFListEntries(
+			    db, &file_opener, listing, false,
+			    [&](const HFListEntry &entry) {
+				    auto found = strip(entry.path);
+				    if (found == dest_prefix || StringUtil::StartsWith(found, dest_prefix + "/")) {
+					    dest_is_dir = true;
+				    }
+				},
+			    false, true);
+		}
+	}
+	if (dest_is_dir && !dest_prefix.empty()) {
+		dest_prefix += "/";
+	}
+	const auto basename = [](const string &path) {
+		auto slash = path.rfind('/');
+		return slash == string::npos ? path : path.substr(slash + 1);
+	};
+
+	vector<HFBucketCopyOp> operations;
+	for (auto &path : paths) {
+		string relative;
+		if (base.empty()) {
+			relative = basename(path);
+		} else if (path.size() > base.size() + 1 && path[base.size()] == '/') {
+			relative = path.substr(base.size() + 1);
+		} else {
+			relative = basename(path);
+		}
+		HFCopyRow row;
+		row.source = bind_data.source.url.WithPath("/" + path).ToString();
+		row.path = dest_is_dir ? dest_prefix + relative : dest_prefix;
+		row.url = bind_data.bucket.url.WithPath("/" + row.path).ToString();
+		auto found = hashes.find(path);
+		if (found == hashes.end() || found->second.xet_hash.empty()) {
+			row.size = found == hashes.end() ? 0 : found->second.size;
+			row.status = "skipped: the hub reports no Xet hash for this file, so a bucket cannot point at it";
+		} else {
+			HFBucketCopyOp op;
+			op.source_repo_type = HFRepoType::ToSingular(bind_data.source.url.repo_type);
+			op.source_repo_id = bind_data.source.url.repository;
+			op.xet_hash = found->second.xet_hash;
+			op.path = row.path;
+			op.size = found->second.size;
+			op.source_path = path;
+			operations.push_back(std::move(op));
+			row.size = found->second.size;
+			row.xet_hash = found->second.xet_hash;
+			row.status = "copied";
+		}
+		state->rows.push_back(std::move(row));
+	}
+	HFCopyIntoBucket(db, &file_opener, bind_data.bucket, operations);
+	return std::move(state);
+}
+
+static void HFBucketCopyFunction(ClientContext &, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<HFBucketCopyState>();
+	idx_t count = 0;
+	while (state.offset < state.rows.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &row = state.rows[state.offset++];
+		output.data[0].SetValue(count, Value(std::move(row.source)));
+		output.data[1].SetValue(count, Value(std::move(row.url)));
+		output.data[2].SetValue(count, Value(std::move(row.path)));
+		output.data[3].SetValue(count, Value::UBIGINT(row.size));
+		output.data[4].SetValue(count, Value(std::move(row.xet_hash)));
+		output.data[5].SetValue(count, Value(std::move(row.status)));
+		count++;
+	}
+	output.SetChildCardinality(count_t(count));
+}
+
+//===----------------------------------------------------------------------===//
 // Registration
 //===----------------------------------------------------------------------===//
 
@@ -797,6 +1052,10 @@ void HFFunctions::Register(ExtensionLoader &loader) {
 
 	TableFunction hf_meta(Identifier("hf_meta"), {LogicalType::VARCHAR}, HFMetaFunction, HFMetaBind, HFOnceInit);
 	loader.RegisterFunction(hf_meta);
+
+	TableFunction hf_bucket_copy(Identifier("hf_bucket_copy"), {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                             HFBucketCopyFunction, HFBucketCopyBind, HFBucketCopyInit);
+	loader.RegisterFunction(hf_bucket_copy);
 
 	TableFunction hf_upload(Identifier("hf_upload"), {LogicalType::VARCHAR, LogicalType::VARCHAR}, HFUploadFunction,
 	                         HFUploadBind, HFOnceInit);
@@ -834,6 +1093,8 @@ void HFFunctions::Register(ExtensionLoader &loader) {
 	TableFunction hf_delete_list(Identifier("hf_delete"), {LogicalType::LIST(LogicalType::VARCHAR)}, HFDeleteFunction,
 	                              HFDeleteBind, HFDeleteInit);
 	TableFunctionSet hf_delete("hf_delete");
+	hf_delete_str.GetSignature().AddKeywordOnly("missing_ok", LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	hf_delete_list.GetSignature().AddKeywordOnly("missing_ok", LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	hf_delete.AddFunction(hf_delete_str);
 	hf_delete.AddFunction(hf_delete_list);
 	loader.RegisterFunction(std::move(hf_delete));

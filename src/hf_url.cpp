@@ -12,6 +12,13 @@ string HFRepoType::ToApiSegment(const string &repo_type) {
 	return repo_type;
 }
 
+string HFRepoType::ToSingular(const string &repo_type) {
+	if (repo_type.size() > 1 && repo_type.back() == 's') {
+		return repo_type.substr(0, repo_type.size() - 1);
+	}
+	return repo_type;
+}
+
 string HFRepoType::ToGitPrefix(const string &repo_type) {
 	// model repos are served straight off the domain root - asking for /models/.../resolve/... 404s
 	if (repo_type == MODELS) {
