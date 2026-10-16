@@ -4,20 +4,24 @@
 
 ## Current position (2026-10-16, ~18:35 UTC)
 
-**Milestone: the read path reached parity with `httpfs` on large parquet scans (was ~1.3x slower), with
-1.008x download amplification, and the read path got a dashboard (`hf_read_stats()`).**
+**Milestone: the read path reached parity with `httpfs` on large parquet scans (was ~1.3x slower) and now
+fetches a file *exactly once* (1.000x) at every setting combination, with a dashboard to prove it
+(`hf_read_stats()`).**
 
 * Built `dist/hf.duckdb_extension` for `v2.0.0-alpha47600` (`OVERRIDE_GIT_DESCRIBE=v2.0.0-alpha47600`),
   loads in the Python pre-release with `allow_unsigned_extensions`.
-* Live smoke suites after this session's read rewrite: `smoke_read.sql` 30 OK / 0 FAIL, `smoke_models.sql`
-  25 OK / 0 FAIL, `smoke_write.sql` 42 OK (+ the 3 intended refusals), `smoke_buckets.sh` 13 OK (+ 2 intended
-  refusals). The write suite now also covers "read after overwrite must see the new bytes".
+* Live smoke suites after this session's read rewrite: `smoke_read.sql` 55 OK / 0 FAIL (20 of them are real
+  assertions now), `smoke_models.sql` 25 OK / 0 FAIL, `smoke_write.sql` 40 OK (+ the 3 intended refusals),
+  `smoke_buckets.sh` 13 OK (+ 2 intended refusals). `scripts/try.py` fails a statement when any column named
+  `assert_*` comes back False, which is how the read-path checks became meaningful.
 * What changed in the read path (all of it in `src/hf_read.cpp`, described in `README.md`):
   * the cache registry keeps `shared_ptr<HFFileCache>` entries instead of `weak_ptr`, so a file's fetched
     windows survive the handle churn of a parquet metadata open/close — this alone took a 287 MB scan from
     ~1.9x the file down to ~1.47x;
-  * windows are always taken on a `hf_read_buffer_size` grid, widened to finish a read instead of falling
-    back to an unaligned fetch — this removed the remaining overlap re-downloads (now 1.008x);
+  * windows are taken on a grid that is **fixed for the life of the cache** (doubling adds blocks, it never
+    re-aligns), and a candidate window is trimmed at the first boundary already cached or in flight — with
+    that, `bytes_fetched == file size` for a full scan at every measured `hf_read_buffer_size` (64 KiB,
+    256 KiB, 1 MiB, 8 MiB) and with the fan-out on or off;
   * a missing window is pulled in up to `hf_read_max_parallel_requests` parallel range parts
     (`GetRangeInto` streams straight into the caller's buffer, no extra copy);
   * new settings `hf_read_max_parallel_requests` (4) and `hf_read_cache_total_size` (1 GiB, split between
@@ -306,3 +310,17 @@ Then continue with the first unchecked box in `PLAN.md`. Do not restart the env 
   `budget / open files` (floor 64 MiB) so a scan over many files cannot multiply the budget by its
   parallelism. Full scan of the 287 MB file: **3.9 s vs httpfs 3.8 s**, 289 612 440 bytes fetched for
   287 412 556 bytes on disk.
+* `19:05` — `hf_read_cache_clear()` exposed as a table function (`cleared_bytes, cleared_files`); useful on
+  its own and it makes the read-path tests able to start from an empty cache.
+* `19:20` — DuckDB 2.0 caches remote files *above* the filesystem (`enable_external_file_cache`, on by
+  default, block sized by `external_file_cache_remote_*`, `external_file_cache_request_sizing=AUTO|GRID`):
+  a re-read of a small file is served by DuckDB itself, so `hf_read_stats()` shows 0 bytes even with our
+  cache cleared. The read-path tests set `enable_external_file_cache = false` to measure this extension,
+  and the README says so; measured big-scan timings were within noise either way (4.5-5.0s, httpfs 5.4s).
+* `19:35` — the aligned grid still leaked bytes (1.58x-1.94x on some `hf_read_buffer_size` settings):
+  `fetch_length` doubling moved the *alignment* with it, and separately a widened window could re-download
+  a smaller window another thread had claimed a moment earlier. Fixed by a fixed `grid_length` per cache
+  plus trimming a candidate window at the first cached/pending boundary ahead of the cursor; the claim log
+  behind it is env-gated (`HF_READ_DEBUG=1`).
+* `19:45` — verified byte accounting: 287,412,556 fetched for a 287,412,556 byte parquet, all four buffer
+  sizes and both fan-out settings, 0 straddling fetches, 0-2 evictions.

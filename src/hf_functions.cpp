@@ -569,6 +569,49 @@ static void HFReadStatsFunction(ClientContext &, TableFunctionInput &data, DataC
 }
 
 //===----------------------------------------------------------------------===//
+// hf_read_cache_clear
+//===----------------------------------------------------------------------===//
+
+struct HFReadCacheClearState : public GlobalTableFunctionState {
+	vector<Value> row;
+	bool done = false;
+
+	idx_t MaxThreads() const override {
+		return 1;
+	}
+};
+
+static unique_ptr<FunctionData> HFReadCacheClearBind(ClientContext &, TableFunctionBindInput &,
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
+	names.emplace_back("cleared_bytes");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.emplace_back("cleared_files");
+	return_types.push_back(LogicalType::UBIGINT);
+	return make_uniq<TableFunctionData>();
+}
+
+static unique_ptr<GlobalTableFunctionState> HFReadCacheClearInit(ClientContext &, TableFunctionInitInput &) {
+	auto state = make_uniq<HFReadCacheClearState>();
+	// report what was held, then forget it: what a reader still holds on to is dropped with its window
+	state->row.emplace_back(Value::UBIGINT(HFReadCacheRetainedBytes()));
+	state->row.emplace_back(Value::UBIGINT(HFReadCacheRetainedFiles()));
+	HFReadCacheClear();
+	return std::move(state);
+}
+
+static void HFReadCacheClearFunction(ClientContext &, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<HFReadCacheClearState>();
+	if (state.done) {
+		return;
+	}
+	state.done = true;
+	for (idx_t col = 0; col < state.row.size(); col++) {
+		output.data[col].SetValue(0, state.row[col]);
+	}
+	output.SetChildCardinality(1);
+}
+
+//===----------------------------------------------------------------------===//
 // hf_upload
 //===----------------------------------------------------------------------===//
 
@@ -781,6 +824,10 @@ void HFFunctions::Register(ExtensionLoader &loader) {
 	TableFunction hf_read_stats(Identifier("hf_read_stats"), {}, HFReadStatsFunction, HFReadStatsBind, HFReadStatsInit);
 	hf_read_stats.GetSignature().AddKeywordOnly("reset", LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	loader.RegisterFunction(hf_read_stats);
+
+	TableFunction hf_read_cache_clear(Identifier("hf_read_cache_clear"), {}, HFReadCacheClearFunction,
+	                                  HFReadCacheClearBind, HFReadCacheClearInit);
+	loader.RegisterFunction(hf_read_cache_clear);
 
 	TableFunction hf_delete_str(Identifier("hf_delete"), {LogicalType::VARCHAR}, HFDeleteFunction, HFDeleteBind,
 	                             HFDeleteInit);

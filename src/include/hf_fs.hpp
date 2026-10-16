@@ -303,7 +303,10 @@ private:
 	idx_t cache_limit;
 	//! Range requests one missing window is fetched with, see FetchWindow
 	idx_t max_parallel;
-	//! Size of the next read-ahead window, it doubles on every cache miss
+	//! Grid every window is aligned to: fixed for the life of the cache, so windows stay disjoint whatever
+	//! size the current one is - see the comment in HFFileCache::Read
+	idx_t grid_length;
+	//! Size of the next read-ahead window, it doubles on every cache miss (in whole grid blocks)
 	idx_t fetch_length;
 	idx_t cached_bytes = 0;
 	optional_idx file_size;

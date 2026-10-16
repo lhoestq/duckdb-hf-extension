@@ -230,7 +230,10 @@ bool FetchWindow(HFClient &base, const string &url, const string &path, idx_t st
 HFFileCache::HFFileCache(string key_p, idx_t buffer_size_p, idx_t cache_limit_p, idx_t max_parallel_p)
     : key(std::move(key_p)), buffer_size(buffer_size_p), cache_limit(cache_limit_p),
       max_parallel(MaxValue<idx_t>(max_parallel_p, 1)) {
-	fetch_length = MinValue<idx_t>(buffer_size, cache_limit);
+	// the grid never moves for the life of this cache: windows grow by taking more blocks, not by
+	// switching to a coarser alignment (which is what used to make two windows overlap)
+	grid_length = MaxValue<idx_t>(MinValue<idx_t>(buffer_size, cache_limit), 1);
+	fetch_length = grid_length;
 }
 
 shared_ptr<HFFileCache> HFFileCache::Acquire(const string &key, idx_t buffer_size, idx_t cache_limit,
@@ -371,17 +374,43 @@ void HFFileCache::Read(HFClient &client, const string &url, const string &path, 
 				}
 			}
 			if (!waiting_for) {
-				// windows are always multiples of `fetch_length` and start on a multiple of it, so two windows
-				// are either disjoint or one contains the other: bytes are never fetched twice for the same
-				// file. `fetch_length` doubles on every miss, so reading a parquet footer costs one small
-				// request while a full scan converges on a handful of big ones.
-				fetch_length = MinValue<idx_t>(MaxValue<idx_t>(fetch_length * 2, buffer_size), HF_MAX_READ_AHEAD);
-				fetch_start = cursor / fetch_length * fetch_length;
+				// every window starts on a multiple of `grid_length` and is a whole number of those blocks, so two
+				// windows of the same file are always disjoint or one contains the other - no byte is ever fetched
+				// twice, whatever order the reads come in. The window doubles on every miss (so a parquet footer
+				// costs one small request and a full scan converges on a handful of big ones) but that only adds
+				// blocks, the grid itself stays where it was.
+				const auto max_window = MaxValue<idx_t>(HF_MAX_READ_AHEAD, grid_length);
+				fetch_length = MinValue<idx_t>(MaxValue<idx_t>(fetch_length * 2, grid_length), max_window);
+				fetch_start = cursor / grid_length * grid_length;
 				// wide enough to end the read, still on the grid
-				fetch_len = MinValue<idx_t>(CeilDiv(read_end - fetch_start, fetch_length) * fetch_length,
+				fetch_len = MinValue<idx_t>(MaxValue<idx_t>(fetch_length,
+				                                         CeilDiv(read_end - fetch_start, grid_length) * grid_length),
 				                            size - fetch_start);
+				// ... but never past a window that is already cached or being fetched: another thread may have
+				// claimed a smaller window inside this one a moment earlier, and re-downloading those bytes is
+				// exactly what the grid was supposed to prevent. Every window starts on the grid, so the first
+				// boundary ahead of the cursor is at most one block away and the trimmed window stays useful.
+				{
+					auto candidate_end = fetch_start + fetch_len;
+					const auto trim_at = [&](idx_t start) {
+						if (start > cursor && start < candidate_end) {
+							candidate_end = start;
+						}
+					};
+					for (auto &entry : ranges) {
+						trim_at(entry.start);
+					}
+					for (auto &entry : pending) {
+						trim_at(entry->start);
+					}
+					fetch_len = candidate_end - fetch_start;
+				}
 				if (fetch_len > fetch_length) {
 					counters.straddling_fetches++;
+				}
+				if (getenv("HF_READ_DEBUG")) {
+					fprintf(stderr, "hf read: %s claim [%llu,+%llu) grid=%llu window=%llu for read [%llu,%llu)\n", path.c_str(),
+					        fetch_start, fetch_len, grid_length, fetch_length, offset, read_end);
 				}
 				keep = nr_bytes <= cache_limit; // a read larger than the whole cache is not worth keeping
 				claimed = make_shared_ptr<HFPendingRange>();
