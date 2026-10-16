@@ -78,12 +78,18 @@ bool HFTryGetFileSize(DatabaseInstance &db, optional_ptr<FileOpener> opener, con
                       string &etag);
 
 //! POST an ndjson commit payload to a repository, retrying on revision conflicts
+//! `create_repo` is the resolved value of `hf_create_repo`: callers that hold a live FileOpener read it there,
+//! a write handle reads it once at open time, because the opener does not outlive the handle
 void HFCommit(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &repo_target,
-              const vector<HFCommitOp> &operations, const string &commit_message);
+              const vector<HFCommitOp> &operations, const string &commit_message, bool create_repo = false);
 
 //! Upload a local file to a repository path (preupload -> blob/LFS upload -> commit)
 void HFUploadLocalFile(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
-                       const string &local_path, const HFBlobInfo &blob, const string &commit_message);
+                       const string &local_path, const HFBlobInfo &blob, const string &commit_message,
+                       bool create_repo = false);
+
+//! Read a boolean extension setting through an opener, which may be null (then the fallback wins)
+bool HFSettingAsBool(optional_ptr<FileOpener> opener, const char *key, bool fallback);
 
 //! Delete files / folders in one commit
 void HFDeletePaths(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
@@ -411,6 +417,7 @@ private:
 	string temp_path;
 	string cache_dir;
 	string commit_message;
+	bool create_repo = false;
 	unique_ptr<FileHandle> temp_handle;
 	idx_t bytes_written = 0;
 	bool closed = false;

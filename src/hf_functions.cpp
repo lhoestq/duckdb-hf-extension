@@ -424,6 +424,7 @@ static unique_ptr<GlobalTableFunctionState> HFStatusInit(ClientContext &context,
 		return fallback;
 	};
 
+	state->row.emplace_back(Value(string(HF_EXTENSION_VERSION)));
 	state->row.emplace_back(Value(string(DuckDB::LibraryVersion())));
 	state->row.emplace_back(Value(connection.endpoint));
 	state->row.emplace_back(Value(connection.token_source.empty() ? "none" : connection.token_source));
@@ -445,6 +446,8 @@ static unique_ptr<GlobalTableFunctionState> HFStatusInit(ClientContext &context,
 
 static unique_ptr<FunctionData> HFStatusBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
                                            vector<Identifier> &names) {
+	names.emplace_back("hf_version");
+	return_types.push_back(LogicalType::VARCHAR);
 	names.emplace_back("duckdb_version");
 	return_types.push_back(LogicalType::VARCHAR);
 	names.emplace_back("endpoint");
@@ -671,7 +674,8 @@ static void HFUploadFunction(ClientContext &context, TableFunctionInput &data, D
 		                  bind_data.local_path);
 	}
 	auto blob = HFComputeBlobInfo(db, bind_data.local_path);
-	HFUploadLocalFile(db, &file_opener, bind_data.target, bind_data.local_path, blob, bind_data.commit_message);
+	HFUploadLocalFile(db, &file_opener, bind_data.target, bind_data.local_path, blob, bind_data.commit_message,
+	                  HFSettingAsBool(&file_opener, "hf_create_repo", false));
 
 	output.data[0].SetValue(0, Value(bind_data.target.url.ToString()));
 	output.data[1].SetValue(0, Value::UBIGINT(blob.size));

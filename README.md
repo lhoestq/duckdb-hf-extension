@@ -80,7 +80,7 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | `hf_list_revisions(path, max_revisions := 20)` | `repository, revision, title, author, date` |
 | `hf_list_refs(path)` | `repository, kind, name, ref, target_commit` |
 | `hf_create_repo(path, private := true)` | `url, created` (`created = false` when it already existed) |
-| `hf_status()` | `duckdb_version, endpoint, token_source, user, fullname, whoami_error, http_transport, hf_read_buffer_size, hf_read_cache_size, hf_read_max_parallel_requests, hf_read_cache_total_size, hf_max_per_page, hf_create_repo, hf_cache_dir` |
+| `hf_status()` | `hf_version, duckdb_version, endpoint, token_source, user, fullname, whoami_error, http_transport, hf_read_buffer_size, hf_read_cache_size, hf_read_max_parallel_requests, hf_read_cache_total_size, hf_max_per_page, hf_create_repo, hf_cache_dir` |
 | `hf_read_stats(reset := false)` | `files_opened, range_hits, coalesced_waits, window_fetches, part_requests, straddling_fetches, evictions, bytes_fetched, invalidations, retained_bytes, retained_files` |
 | `hf_read_cache_clear()` | `cleared_bytes, cleared_files` (drops everything the read cache retained) |
 

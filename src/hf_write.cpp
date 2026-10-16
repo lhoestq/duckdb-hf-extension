@@ -25,6 +25,7 @@ HFWriteHandle::HFWriteHandle(HFFileSystem &file_system, const string &path, File
 	// settings are resolved once here: the opener is not guaranteed to outlive the handle
 	cache_dir = SettingAsString(opener, "hf_cache_dir", path);
 	commit_message = SettingAsString(opener, "hf_commit_message", path);
+	create_repo = HFSettingAsBool(opener, "hf_create_repo", false);
 	if (commit_message.empty()) {
 		commit_message = HFDefaultCommitMessage(target.url);
 	}
@@ -88,7 +89,8 @@ void HFWriteHandle::Close() {
 	auto &db = file_system.Cast<HFFileSystem>().Db();
 	try {
 		auto blob = HFComputeBlobInfo(db, temp_path);
-		HFUploadLocalFile(db, nullptr, target, temp_path, blob, commit_message);
+		// the opener is gone by now, so the flag resolved at open time is the one that counts
+		HFUploadLocalFile(db, nullptr, target, temp_path, blob, commit_message, create_repo);
 	} catch (std::exception &) {
 		CleanupTempFile();
 		throw;

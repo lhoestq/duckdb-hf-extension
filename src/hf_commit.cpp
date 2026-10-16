@@ -270,7 +270,13 @@ bool HFCreateRepo(DatabaseInstance &db, optional_ptr<FileOpener> opener, const H
 	body.Raw("{\"name\":").String(url.repository.substr(slash + 1)).Raw(",\"organization\":");
 	body.String(url.repository.substr(0, slash));
 	body.Raw(",\"visibility\":\"").Raw(private_repo ? "private" : "public");
-	body.Raw("\",\"type\":\"").Raw(HFJsonWriter::Escape(SingularRepoType(url.repo_type))).Raw("\"}");
+	body.Raw("\",\"type\":\"").Raw(HFJsonWriter::Escape(SingularRepoType(url.repo_type))).Raw("\"");
+	if (url.repo_type == "spaces") {
+		// the hub insists on an sdk for spaces (gradio | docker | static): `static` is the one that fits data, since
+		// a space DuckDB writes is files on a git repo with a web viewer rather than an app
+		body.Raw(",\"sdk\":\"static\"");
+	}
+	body.Raw("}");
 
 	HTTPHeaders headers;
 	headers.Insert("Content-Type", "application/json");
@@ -326,32 +332,65 @@ static void BucketBatchDelete(DatabaseInstance &db, optional_ptr<FileOpener> ope
 	client->ThrowHTTPError(*response, "POST (bucket batch)", url);
 }
 
+#ifndef NDEBUG
+#else
+#endif
+static bool HFWriteDebugEnabled() {
+	static const bool enabled = getenv("HF_WRITE_DEBUG") != nullptr;
+	return enabled;
+}
+
+//! A missing repository is worth naming, because the fix is one setting away - but only when that setting is
+//! off, and only for the hub's own "RepoNotFound" (a genuine 403 on somebody else's repository keeps its error).
+static void HFThrowWriteError(HFClient &client, const HTTPResponse &response, const string &what, const string &url,
+                              const HFTarget &target, bool create_repo) {
+	// the hub puts the machine code in a header and the prose in the body; either identifies a missing repository
+	const bool repo_missing = (response.HasHeader("x-error-code") &&
+	                           response.GetHeaderValue("x-error-code") == "RepoNotFound") ||
+	                          response.body.find("Repository not found") != string::npos;
+	string hint;
+	if (repo_missing && !create_repo) {
+		hint = " - the repository does not exist; set hf_create_repo = true to have the first write create it";
+	}
+	if (HFWriteDebugEnabled()) {
+		fprintf(stderr, "[hf] throwing %s (hf_create_repo=%d, missing=%d)\n", what.c_str(), int(create_repo),
+		        int(repo_missing));
+	}
+	if (hint.empty()) {
+		client.ThrowHTTPError(response, what, url);
+	}
+	try {
+		client.ThrowHTTPError(response, what, url);
+	} catch (std::exception &error) {
+		throw IOException("%s%s", error.what(), hint);
+	}
+}
+
 //! A 404 (or a 403 for a private repo you can create) on a write path is the Hub's way of saying "this repository
-//! does not exist yet". `hf_create_repo` turns that into a create + retry, so a first `COPY TO` can bootstrap a
-//! repository. Both the commit endpoint and the preupload endpoint hit it - preupload comes first, so a fresh
-//! repository fails there before a commit is ever attempted.
+//! does not exist yet", and `hf_create_repo` turns that into a create + retry so a first `COPY TO` can bootstrap a
+//! repository. The setting is passed in as a value: the handle that started the write resolves it while its opener
+//! is still alive, because a write handle outlives the context it was opened with.
 static bool HFCreateRepoIfAllowed(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
-                                  int status) {
+                                  int status, bool create_repo) {
 	if (status != 404 && status != 403) {
 		return false;
 	}
-	Value create_repo;
-	if (!opener) {
-		return false;
-	}
-	FileOpenerInfo info;
-	info.file_path = target.url.ToString();
-	if (!FileOpener::TryGetCurrentSetting(opener, Identifier("hf_create_repo"), create_repo, info) ||
-	    create_repo.IsNull() || !create_repo.GetValue<bool>()) {
+	if (!create_repo) {
+		if (HFWriteDebugEnabled()) {
+			fprintf(stderr, "[hf] %s not found and hf_create_repo is off\n", target.url.ToString().c_str());
+		}
 		return false;
 	}
 	// true even when the repository already existed (409): in both cases the write is worth retrying
-	HFCreateRepo(db, opener, target, true);
+	auto created = HFCreateRepo(db, opener, target, true);
+	if (HFWriteDebugEnabled()) {
+		fprintf(stderr, "[hf] create-on-write %s: %d\n", target.url.ToString().c_str(), int(created));
+	}
 	return true;
 }
 
 void HFCommit(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &repo_target,
-              const vector<HFCommitOp> &operations, const string &commit_message) {
+              const vector<HFCommitOp> &operations, const string &commit_message, bool create_repo) {
 	if (operations.empty()) {
 		return;
 	}
@@ -385,7 +424,9 @@ void HFCommit(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTar
 
 	auto ndjson = CommitNdjson(operations, commit_message);
 	bool created_repo = false;
-	for (idx_t attempt = 0; attempt < 4; attempt++) {
+	idx_t settles = 0;
+	idx_t backoff = HF_REPO_SETTLE_BACKOFF;
+	for (idx_t attempt = 0; attempt < 8; attempt++) {
 		auto response = client->Post(url, ndjson, headers);
 		auto status = static_cast<int>(response->status);
 		if (!response->HasRequestError() && (status == 200 || status == 201)) {
@@ -405,16 +446,23 @@ void HFCommit(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTar
 		}
 		if ((status == 404 || status == 403) && !created_repo) {
 			// the repository does not exist yet: `hf_create_repo` turns the write into create + retry
-			if (HFCreateRepoIfAllowed(db, opener, repo_target, status)) {
+			if (HFCreateRepoIfAllowed(db, opener, repo_target, status, create_repo)) {
 				created_repo = true;
+				HFClient::SleepMs(backoff);
 				continue;
 			}
+		}
+		if (created_repo && (status == 404 || status == 403) && settles++ < HF_REPO_SETTLE_ATTEMPTS) {
+			// see the note in the preupload loop: a brand new repository is not instantly writable
+			HFClient::SleepMs(backoff);
+			backoff *= 2;
+			continue;
 		}
 		if (status == 409 || status == 412 || HFClient::ShouldRetry(*response)) {
 			// concurrent write or a transient failure: the payload is idempotent, just try again
 			continue;
 		}
-		client->ThrowHTTPError(*response, "POST (commit)", url);
+		HFThrowWriteError(*client, *response, "POST (commit)", url, repo_target, create_repo);
 	}
 	throw IOException("Failed to commit to '%s' after several attempts - the repository is likely being written to "
 	                  "concurrently",
@@ -458,7 +506,8 @@ static string ParsePreuploadMode(HFClient &client, const HTTPResponse &response,
 }
 
 static string PreuploadMode(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
-                            const string &path_in_repo, const HFBlobInfo &blob, bool &should_ignore) {
+                            const string &path_in_repo, const HFBlobInfo &blob, bool &should_ignore,
+                            bool create_repo) {
 	const auto &url = target.url;
 	HFJsonWriter body;
 	body.Raw("{\"files\":[{\"path\":");
@@ -478,17 +527,38 @@ static string PreuploadMode(DatabaseInstance &db, optional_ptr<FileOpener> opene
 	// repository has to be created - otherwise `hf_create_repo` would only ever report a 404
 	string body_str = body.out;
 	auto client = HFMakeClient(db, opener, target);
-	for (idx_t attempt = 0;; attempt++) {
+	bool created_repo = false;
+	idx_t settles = 0;
+	idx_t backoff = HF_REPO_SETTLE_BACKOFF;
+	for (idx_t attempt = 0; attempt < 8; attempt++) {
+		if (HFWriteDebugEnabled()) {
+			fprintf(stderr, "[hf] preupload attempt %llu for %s\n", attempt, request_url.c_str());
+		}
 		auto response = client->Post(request_url, body_str, headers);
 		auto status = static_cast<int>(response->status);
 		if (!response->HasRequestError() && status < 400) {
 			return ParsePreuploadMode(*client, *response, url, path_in_repo, should_ignore);
 		}
-		if (attempt == 0 && HFCreateRepoIfAllowed(db, opener, target, status)) {
+		if (HFWriteDebugEnabled()) {
+			fprintf(stderr, "[hf] preupload attempt %llu: status %d created=%d settles=%llu body=%s\n", attempt, status,
+			        created_repo, settles, response->body.substr(0, 90).c_str());
+		}
+		if ((status == 404 || status == 403) && !created_repo &&
+		    HFCreateRepoIfAllowed(db, opener, target, status, create_repo)) {
+			created_repo = true;
+			HFClient::SleepMs(backoff);
 			continue;
 		}
-		client->ThrowHTTPError(*response, "POST (preupload)", request_url);
+		if (created_repo && (status == 404 || status == 403) && settles++ < HF_REPO_SETTLE_ATTEMPTS) {
+			// provisioning a repository fans out across the hub's own storage before it serves writes, so the
+			// first write can create it and still be told it does not exist
+			HFClient::SleepMs(backoff);
+			backoff *= 2;
+			continue;
+		}
+		HFThrowWriteError(*client, *response, "POST (preupload)", request_url, target, create_repo);
 	}
+	throw IOException("Failed to pre-upload '%s' - the repository may still be provisioning, try again", path_in_repo);
 }
 
 static void UploadLFSBlob(HFClient &client, const HFUrl &url, const HFBlobInfo &blob, const string &local_path) {
@@ -609,7 +679,8 @@ static void UploadLFSBlob(HFClient &client, const HFUrl &url, const HFBlobInfo &
 }
 
 void HFUploadLocalFile(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
-                       const string &local_path, const HFBlobInfo &blob, const string &commit_message) {
+                       const string &local_path, const HFBlobInfo &blob, const string &commit_message,
+                       bool create_repo) {
 	HFRefuseBucketWrite(target.url, target.url.ToString());
 	auto path_in_repo = PathInRepo(target.url.path);
 	if (path_in_repo.empty()) {
@@ -620,7 +691,7 @@ void HFUploadLocalFile(DatabaseInstance &db, optional_ptr<FileOpener> opener, co
 
 	auto client = HFMakeClient(db, opener, target);
 	bool should_ignore = false;
-	auto mode = PreuploadMode(db, opener, target, path_in_repo, blob, should_ignore);
+	auto mode = PreuploadMode(db, opener, target, path_in_repo, blob, should_ignore, create_repo);
 	if (should_ignore) {
 		throw IOException("'%s' is ignored by the .gitignore file of the repository - refusing to upload it",
 		                  target.url.ToString());
@@ -645,7 +716,7 @@ void HFUploadLocalFile(DatabaseInstance &db, optional_ptr<FileOpener> opener, co
 		    target.url.ToString(), mode);
 	}
 
-	HFCommit(db, opener, target, {op}, commit_message);
+	HFCommit(db, opener, target, {op}, commit_message, create_repo);
 }
 
 void HFDeletePaths(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,

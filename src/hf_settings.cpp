@@ -4,7 +4,23 @@
 
 #include "duckdb/main/config.hpp"
 
+#include "duckdb/common/file_opener.hpp"
+
 namespace duckdb {
+
+bool HFSettingAsBool(optional_ptr<FileOpener> opener, const char *key, bool fallback) {
+	if (!opener) {
+		return fallback;
+	}
+	// settings have to be read while the opener is still alive: see HFWriteHandle, which caches them for the same
+	// reason, and HFCommit/HFUploadLocalFile, which take the resolved flag rather than looking it up later
+	Value result;
+	FileOpenerInfo info;
+	if (!FileOpener::TryGetCurrentSetting(opener, Identifier(key), result, info) || result.IsNull()) {
+		return fallback;
+	}
+	return result.GetValue<bool>();
+}
 
 static void RequireGlobalScope(SetScope scope, const char *setting) {
 	if (scope == SetScope::SESSION) {

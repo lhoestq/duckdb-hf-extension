@@ -11,6 +11,10 @@ class FileOpener;
 struct FileOpenerInfo;
 
 //! Default endpoint. Overridable through the `hf_endpoint` setting, the `HF_ENDPOINT` env var or a secret.
+//! the release of this extension itself, reported by hf_status() and named in CHANGELOG.md - independent of
+//! the DuckDB version identifier the binary is built for, which has to match the running DuckDB exactly
+static constexpr const char *HF_EXTENSION_VERSION = "0.0.1";
+
 static constexpr const char *HF_DEFAULT_ENDPOINT = "https://huggingface.co";
 
 //! Page size of the Hub tree API listings
@@ -30,6 +34,10 @@ constexpr idx_t HF_MAX_HTTP_ATTEMPTS = 5;
 
 //! a bucket copy needs the hub's own content hash of each file, and a file committed seconds ago is hashed by
 //! the hub in its own time: ask again this many times, waiting HF_COPY_HASH_BACKOFF doubled each round
+// a newly created repository is not writable the instant the create call returns: retry with backoff
+constexpr idx_t HF_REPO_SETTLE_ATTEMPTS = 4;
+constexpr idx_t HF_REPO_SETTLE_BACKOFF = 250; // ms, doubling: 250 + 500 + 1000 + 2000
+
 constexpr idx_t HF_COPY_HASH_ATTEMPTS = 4;
 constexpr idx_t HF_COPY_HASH_BACKOFF = 250; // ms, doubling: 250 + 500 + 1000 + 2000
 //! Single-PUT (non multipart) LFS uploads are capped by S3 at 5GiB
