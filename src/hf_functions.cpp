@@ -3,6 +3,7 @@
 #include "hf_crypto.hpp"
 #include "hf_functions.hpp"
 #include "hf_settings.hpp"
+#include "hf_xet_hash.hpp"
 
 #include "duckdb/common/file_opener.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -1051,6 +1052,64 @@ static void HFBucketCopyFunction(ClientContext &, TableFunctionInput &data, Data
 // Registration
 //===----------------------------------------------------------------------===//
 
+//===----------------------------------------------------------------------===//
+// hf_xet_selftest()
+//===----------------------------------------------------------------------===//
+
+struct HFXetSelfTestBindData : public TableFunctionData {
+	idx_t failures = 0;
+	vector<std::tuple<string, bool, string, string>> results;
+};
+
+struct HFXetSelfTestState : public GlobalTableFunctionState {
+	idx_t cursor = 0;
+
+	idx_t MaxThreads() const override {
+		return 1;
+	}
+};
+
+static unique_ptr<GlobalTableFunctionState> HFXetSelfTestInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<HFXetSelfTestState>();
+}
+
+static unique_ptr<FunctionData> HFXetSelfTestBind(ClientContext &, TableFunctionBindInput &,
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto bind_data = make_uniq<HFXetSelfTestBindData>();
+	// The checks are pure computation over reference vectors compiled into the extension, so they run
+	// at bind time with no connection, token, or network.
+	bind_data->failures = HFXetHashSelfTest(bind_data->results);
+
+	names.push_back(Identifier("check_name"));
+	return_types.push_back(LogicalType::VARCHAR);
+	names.push_back(Identifier("assert_passed"));
+	return_types.push_back(LogicalType::BOOLEAN);
+	names.push_back(Identifier("expected"));
+	return_types.push_back(LogicalType::VARCHAR);
+	names.push_back(Identifier("got"));
+	return_types.push_back(LogicalType::VARCHAR);
+	// repeated on every row so a suite can assert on the whole run without a wrapper query
+	names.push_back(Identifier("assert_no_failures"));
+	return_types.push_back(LogicalType::BOOLEAN);
+	return std::move(bind_data);
+}
+
+static void HFXetSelfTestFunction(ClientContext &, TableFunctionInput &data, DataChunk &output) {
+	auto &bind_data = data.bind_data->Cast<HFXetSelfTestBindData>();
+	auto &state = data.global_state->Cast<HFXetSelfTestState>();
+	idx_t count = 0;
+	while (state.cursor < bind_data.results.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &entry = bind_data.results[state.cursor++];
+		output.SetValue(0, count, Value(std::get<0>(entry)));
+		output.SetValue(1, count, Value(std::get<1>(entry)));
+		output.SetValue(2, count, Value(std::get<2>(entry)));
+		output.SetValue(3, count, Value(std::get<3>(entry)));
+		output.SetValue(4, count, Value(bind_data.failures == 0));
+		count++;
+	}
+	output.SetCardinality(count);
+}
+
 void HFFunctions::Register(ExtensionLoader &loader) {
 	TableFunction hf_ls(Identifier("hf_ls"), {LogicalType::VARCHAR}, HFListFunction, HFListBind, HFListInit);
 	hf_ls.GetSignature().AddKeywordOnly("recursive", LogicalType::BOOLEAN, Value(false));
@@ -1082,6 +1141,10 @@ void HFFunctions::Register(ExtensionLoader &loader) {
 	                             HFCreateRepoBind, HFOnceInit);
 	hf_create_repo.GetSignature().AddKeywordOnly("private", LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	loader.RegisterFunction(hf_create_repo);
+
+	TableFunction hf_xet_selftest(Identifier("hf_xet_selftest"), {}, HFXetSelfTestFunction, HFXetSelfTestBind,
+	                              HFXetSelfTestInit);
+	loader.RegisterFunction(hf_xet_selftest);
 
 	TableFunction hf_status(Identifier("hf_status"), {}, HFStatusFunction, HFStatusBind, HFStatusInit);
 	loader.RegisterFunction(hf_status);

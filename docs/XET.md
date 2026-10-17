@@ -184,3 +184,43 @@ against those on random + real (parquet, csv, binary) inputs in CI-able scripts.
 
 Each milestone lands behind a setting or an internal flag so 0.0.x behaviour never regresses, and the
 git-LFS path stays the default until M5 is proven.
+
+## Where M1 and M2 stand (verified, not assumed)
+
+`src/hf_xet_hash.cpp` and `src/hf_xet_chunk.cpp` implement M1 and M2; `hf_xet_selftest()` (152 checks,
+`scripts/smoke_xet.sh`) replays reference vectors inside the extension. What that caught, and what is
+worth knowing before touching this code:
+
+* **The keys are load-bearing and unvisibly so.** Transcribing one of the two key constants wrongly made
+  every hash wrong and every hash *plausible* - nothing downstream notices until the Hub rejects an
+  upload. The constants now live in one place, and `scripts/xet_oracle.py` regenerates the vectors from
+  xet-core rather than from anything a human typed.
+* **The mask uses the high bits of the gear hash.** `(target - 1) << (target - 1).leading_zeros()`, i.e.
+  `0xFFFF000000000000` for the 64 KiB target. Derived from the low bits instead, the chunker cuts roughly
+  every other byte - and *still reproduces the reference boundaries on constant and tiny inputs*, because
+  the minimum-chunk floor dominates there. Only content with real gear triggers (the splitmix vectors)
+  tells the two apart, which is why the vectors include chunked inputs rather than just small ones.
+* **`hex()` is not the hex of the digest bytes.** Four little-endian words, each printed as 16 digits, so
+  every 8-byte group is byte-reversed. `base64()` is over the raw bytes, URL-safe and unpadded. A port can
+  get the hashes right and the rendering wrong and never see it locally.
+* **An empty chunk list hashes to the zero hash with no salt applied** - `file_hash_with_salt` returns
+  `MerkleHash::default()` before keying, so "empty file" is not "keyed hash of a zero root".
+* Chunk boundaries must be independent of how the bytes arrive. The self-test feeds the same inputs
+  through in deliberately awkward piece sizes (1, 4, 19, …) and requires identical chunk lists, because
+  the write path will feed the chunker from a file cursor, not from a buffer.
+
+The vectors are generated and committed (`src/hf_xet_vectors.cpp`, `scripts/xet_oracle.py`), so CI needs
+no cargo, and `scripts/xet_oracle.py --check` is what notices when a xet-core upgrade changes the format
+under the port. Inputs are reproducible specs - literal bytes, a repeated pattern, splitmix64 - so a
+vector says the same thing on every machine and nothing has to be re-derived by hand.
+
+## M3 checklist (next)
+
+* Chunk serialization inside a xorb, and the compression schemes: `None = 0`, `LZ4 = 1`,
+  `ByteGrouping4LZ4 = 2`, `Auto = 99`. DuckDB vendors LZ4 *block* (`third_party/lz4`) but not lz4frame,
+  so decide between vendoring the frame layer and writing the header by hand.
+* Footer sections `XETBLOB` / `XBLBHSH` / `XBLBBND`, with the nonce excluded from the hash.
+* Limits that bound a single upload: `MAX_XORB_BYTES` 64 MiB, `MAX_XORB_CHUNKS` 8192,
+  `XORB_BLOCK_SIZE` 64 MiB.
+* `examples/xorb-check` has to accept what the port writes, and `xorb_hash` over the port's chunk list
+  must equal the hash the resulting file implies.

@@ -1,0 +1,9 @@
+[package]
+name = "xet-probe"
+version = "0.0.0"
+description = "Reference-output probe used by scripts/xet_oracle.py; never part of the extension build"
+edition = "2021"
+
+[dependencies]
+# the sibling checkout scripts/xet_oracle.py expects; override with `--manifest-path` elsewhere
+xet-core-structures = { path = "../../../xet-core/xet_core_structures" }

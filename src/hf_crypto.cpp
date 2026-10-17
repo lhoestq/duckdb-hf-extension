@@ -129,33 +129,47 @@ string HFSha256::Hex(const_data_ptr_t data, idx_t len) {
 }
 
 static const char *B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+//! URL-safe alphabet (RFC 4648 §5): the Xet/CAS APIs spell 32-byte hashes with it, unpadded
+static const char *B64_ALPHABET_URL_SAFE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-string HFBase64::Encode(const_data_ptr_t data, idx_t len) {
+static string Base64EncodeImpl(const_data_ptr_t data, idx_t len, const char *alphabet, bool pad) {
 	string out;
 	out.reserve(((len + 2) / 3) * 4);
 	idx_t i = 0;
 	while (i + 3 <= len) {
 		auto v = (uint32_t(data[i]) << 16) | (uint32_t(data[i + 1]) << 8) | uint32_t(data[i + 2]);
-		out += B64_ALPHABET[(v >> 18) & 0x3F];
-		out += B64_ALPHABET[(v >> 12) & 0x3F];
-		out += B64_ALPHABET[(v >> 6) & 0x3F];
-		out += B64_ALPHABET[v & 0x3F];
+		out += alphabet[(v >> 18) & 0x3F];
+		out += alphabet[(v >> 12) & 0x3F];
+		out += alphabet[(v >> 6) & 0x3F];
+		out += alphabet[v & 0x3F];
 		i += 3;
 	}
 	auto remaining = len - i;
 	if (remaining == 1) {
 		auto v = uint32_t(data[i]) << 16;
-		out += B64_ALPHABET[(v >> 18) & 0x3F];
-		out += B64_ALPHABET[(v >> 12) & 0x3F];
-		out += "==";
+		out += alphabet[(v >> 18) & 0x3F];
+		out += alphabet[(v >> 12) & 0x3F];
+		if (pad) {
+			out += "==";
+		}
 	} else if (remaining == 2) {
 		auto v = (uint32_t(data[i]) << 16) | (uint32_t(data[i + 1]) << 8);
-		out += B64_ALPHABET[(v >> 18) & 0x3F];
-		out += B64_ALPHABET[(v >> 12) & 0x3F];
-		out += B64_ALPHABET[(v >> 6) & 0x3F];
-		out += '=';
+		out += alphabet[(v >> 18) & 0x3F];
+		out += alphabet[(v >> 12) & 0x3F];
+		out += alphabet[(v >> 6) & 0x3F];
+		if (pad) {
+			out += '=';
+		}
 	}
 	return out;
+}
+
+string HFBase64::Encode(const_data_ptr_t data, idx_t len) {
+	return Base64EncodeImpl(data, len, B64_ALPHABET, true);
+}
+
+string HFBase64::EncodeUrlSafeNoPad(const_data_ptr_t data, idx_t len) {
+	return Base64EncodeImpl(data, len, B64_ALPHABET_URL_SAFE, false);
 }
 
 void HFJsonWriter::EscapeTo(string &out, const string &value) {

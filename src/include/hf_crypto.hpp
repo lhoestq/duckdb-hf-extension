@@ -34,6 +34,8 @@ struct HFBase64 {
 	static string Encode(const string &input) {
 		return Encode(const_data_ptr_cast(input.data()), input.size());
 	}
+	//! URL-safe alphabet, unpadded - how the Xet/CAS endpoints spell a 32-byte hash
+	static string EncodeUrlSafeNoPad(const_data_ptr_t data, idx_t len);
 };
 
 //! JSON helpers: the Hub speaks small, predictable JSON, and depending on the json extension for

@@ -266,7 +266,11 @@ what the 0.0.1 binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
   local repository, both unsigned and signed (signature required, tampered binaries refused)
 * ✔ multipart git-LFS uploads (the Hub switches a blob to `basic multipart` above ~10 MB: one
   presigned PUT per part, then a completion POST with the part etags)
-* ✘ Xet uploads are not implemented yet — the git-LFS transfer is used instead, which the Hub
+* ✔ the Xet *hashing* half (`docs/XET.md`, M1+M2): chunk hashes, file/xorb merkle roots and the
+  content-defined chunker agree byte for byte with `xet-core`, checked by `hf_xet_selftest()` /
+  `scripts/smoke_xet.sh` against vectors generated from the reference implementation.
+* ✘ Xet *uploads* are not implemented yet (M3-M5: xorb format, CAS client, shards) — the git-LFS
+  transfer is used instead, which the Hub
   accepts for every repo type. Chunking + hashing client-side is the 0.0.2 plan, in
   [docs/XET.md](docs/XET.md)
 * ✘ `COPY ... TO 'hf://buckets/...'`: pushing DuckDB's own bytes into a bucket needs an Xet
@@ -289,6 +293,8 @@ src/
                     fetch, budgeted retention beyond the handle, invalidation on commit
   hf_commit.cpp     the write protocol: preupload -> lfs batch -> ndjson commit (+repo mutex)
   hf_write.cpp      write handle: temp file buffering, upload+commit on close
+  hf_xet_hash.cpp   BLAKE3-keyed Xet hashes, mean tree, reference self-test (M1)
+  hf_xet_chunk.cpp  gear-hash content-defined chunking, byte-exact with xet-core (M2)
   hf_functions.cpp  hf_ls / hf_meta / hf_upload / hf_delete / hf_bucket_copy / hf_list_revisions /
                     hf_list_refs / hf_create_repo / hf_status / hf_read_stats / hf_read_cache_clear
   hf_extension.cpp  entry point
