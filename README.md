@@ -548,6 +548,13 @@ HF_REPO=lhoestq/duckdb-hf-extension scripts/publish_extension_repo.py dist/repo-
 as an argument: a repository whose directory does not equal the footer of what it serves is a repository
 nobody can install from, and the footer is the only copy of the truth.
 
+One operational note, from a red run that fixed itself: an `INSTALL` issued seconds after a publish can
+fail with a bare `Failed to install remote extension`, because the dataset holding the tree is itself
+Xet-stored and the `resolve` url for a just-committed file is still being rewired into a CDN redirect.
+Separate publishing from verifying by a few seconds before believing the failure — and note that the
+*signed* install going through a pinned repository while the unsigned one fails says nothing about
+signatures, only about which url was asked first.
+
 Either tree installs over https, and `scripts/test_install.py` takes a url as well as a directory, so
 what gets verified is the tree a client really fetches (a throw-away home directory, and a real query
 afterwards — `INSTALL`, `LOAD`, `SELECT count(*) FROM hf_ls(...)`):
