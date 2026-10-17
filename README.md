@@ -246,7 +246,7 @@ read-ahead prefetch across windows is the remaining known gap, see *Limitations*
 
 Everything below is implemented in this tree; the ✔ marks are verified against the live Hub by the
 suites in [*Testing*](#testing), the ✘ marks are deliberately out of scope. Release notes, including
-what the 0.0.1 binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
+what a given binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
 
 * ✔ `hf://` URL parsing (repo types, `@revision`, short form, buckets)
 * ✔ settings + `huggingface` secrets (`config`, `credential_chain`), shared with httpfs

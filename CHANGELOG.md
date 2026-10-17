@@ -10,7 +10,7 @@ Two version numbers are in play, and they are independent:
   per DuckDB identifier per platform, and rebuilding for a newer DuckDB pre-release is a rebuild,
   not a version bump.
 
-## Unreleased — 0.0.2, the start of Xet
+## 0.0.2-pre1 — the start of Xet
 
 The hashing half of a Xet client, verified against the reference implementation rather than assumed.
 Nothing user-visible can upload through Xet yet; what landed is the part every later stage is built on.
@@ -31,7 +31,7 @@ Nothing user-visible can upload through Xet yet; what landed is the part every l
   committed moments earlier (default 30s, `0` to refuse waiting). Copies of already-hashed files no longer
   pause at all — the wait is decided by what is still missing a hash, not by whether any work remains.
 
-## 0.0.1 — first release## 0.0.1 — first release
+## 0.0.1 — first release
 
 `hf://` behaves like `s3://` for both directions, for every repo type the Hub serves.
 

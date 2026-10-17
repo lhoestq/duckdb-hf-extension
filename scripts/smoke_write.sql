@@ -69,7 +69,7 @@ FROM hf_list_revisions('hf://datasets/lhoestq/playground', max_revisions := 5)
 WHERE title = 'duckdb smoke: hf_upload with message';
 SELECT 'i5 hf_status reads' AS t, endpoint LIKE 'https://%' AS assert_endpoint, user <> '' AS assert_user,
        whoami_error = '' AS assert_no_whoami_error, token_source <> 'none' AS assert_token,
-       hf_version = '0.0.1' AS assert_version
+       hf_version = '0.0.2-pre1' AS assert_version
 FROM hf_status();
 
 -- the read cache has to notice what the write changed
