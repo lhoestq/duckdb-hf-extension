@@ -287,8 +287,15 @@ what a given binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
   `hf_read_cache_clear`
 * ✔ create-on-write: with `hf_create_repo = true` the first write creates the repository (private;
   spaces as `sdk = static`), and a 404 without it explains that rather than only quoting the Hub
-* ✔ distribution: `scripts/make_extension_repo.sh` + `INSTALL hf FROM '<prefix>'` verified against a
-  local repository, both unsigned and signed (signature required, tampered binaries refused)
+* ✔ distribution: a live extension repository on the Hub (`lhoestq/duckdb-hf-extension`) from which
+  `INSTALL hf FROM 'https://huggingface.co/datasets/…/resolve/main/unsigned'` and the signed form
+  (`CREATE EXTENSION REPOSITORY … USING PUBLIC KEY`) are both verified end to end — install, load, and a
+  real query — in a throw-away home directory. Also verified against a local `file://` repository, where
+  the signed run additionally requires a byte-flipped binary to be refused. Only `linux_arm64` is
+  published from this machine; the CI matrix covers the rest (next bullet).
+* ✔ CI: pushes build the linux matrix through DuckDB's own distribution workflow (see
+  `.github/workflows/build.yml` for the two things that had to be fixed to get there), and
+  `test/sql/hf_selftest.test` runs the offline reference checks as part of `make test_release`
 * ✔ multipart git-LFS uploads (the Hub switches a blob to `basic multipart` above ~10 MB: one
   presigned PUT per part, then a completion POST with the part etags)
 * ✔ the Xet *client* halves that are pure computation (`docs/XET.md`, M1-M3): chunk hashes,
@@ -337,6 +344,8 @@ src/
   hf_functions.cpp  hf_ls / hf_meta / hf_upload / hf_delete / hf_bucket_copy / hf_list_revisions /
                     hf_list_refs / hf_create_repo / hf_status / hf_read_stats / hf_read_cache_clear
   hf_extension.cpp  entry point
+test/sql/
+  hf_selftest.test  the offline reference checks as a sqllogictest, run by `make test_release` (CI)
 scripts/
   try.py            the smoke runner: one SQL statement per line, graded (see *Testing*)
   run_all.sh        builds if asked, runs every suite, prints one grade line per suite
@@ -348,9 +357,13 @@ scripts/
   bench.py          times a query with either the `hf` filesystem or plain `httpfs`
   check.sh          compile-only syntax check of every source file (fast feedback)
   make_extension_repo.sh  turn a build into a serveable <version>/<platform>/ repository (+signing)
-  test_install.py   INSTALL + LOAD + query from that repository, unsigned and signed (with a tamper check)
+  publish_extension_repo.py  upload such a tree to a Hub dataset, and print the client recipes
+  test_install.py   INSTALL + LOAD + query from that repository, local or over https, unsigned and signed
+                    (with a tamper check on the local signed run)
 .github/workflows/
   build.yml         calls DuckDB's reusable distribution workflow for the platform matrix
+vcpkg.json          empty manifest: DuckDB's CI images configure with a vcpkg toolchain pointed at the
+                    extension root and refuse to configure without one
 ```
 
 ## Testing
@@ -487,21 +500,57 @@ copies the repository, flips a byte in it, and demands that a fresh DuckDB refus
 
 ### Hosting it on Hugging Face
 
-The repository is a folder of files, so the Hub can serve it — which means the extension can ship
-through the very protocol it implements:
-
-```sql
--- one file per platform, straight from the build machine
-SELECT hf_upload('dist/repo/v2.0.0-alpha47600/linux_arm64/hf.duckdb_extension.gz',
-                 'hf://datasets/me/duckdb-hf-repo/v2.0.0-alpha47600/linux_arm64/hf.duckdb_extension.gz');
-```
+A DuckDB extension repository is a url layout over plain files, so the Hub can serve it — which means
+this extension ships through the protocol it implements. `lhoestq/duckdb-hf-extension` is a live one:
 
 ```bash
-# or the whole tree (every platform + the .well-known metadata) in one commit
-hf upload me/duckdb-hf-repo dist/repo --repo-type dataset --private
+DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" \
+  scripts/make_extension_repo.sh dist/repo-signed          # tree + signature + .well-known key
+scripts/make_extension_repo.sh dist/repo                   # the same tree, unsigned
+HF_REPO=lhoestq/duckdb-hf-extension scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo
 ```
 
-and clients get `INSTALL hf FROM 'https://huggingface.co/datasets/me/duckdb-hf-repo/resolve/main/'`.
+`publish_extension_repo.py` reads the version directory *out of the binary footer* rather than taking it
+as an argument: a repository whose directory does not equal the footer of what it serves is a repository
+nobody can install from, and the footer is the only copy of the truth.
+
+Either tree installs over https, and `scripts/test_install.py` takes a url as well as a directory, so
+what gets verified is the tree a client really fetches (a throw-away home directory, and a real query
+afterwards — `INSTALL`, `LOAD`, `SELECT count(*) FROM hf_ls(...)`):
+
+```sql
+-- signed: pin the key once, and every later install is verified against it
+SET allow_extension_repositories = 'allowed';
+CREATE EXTENSION REPOSITORY hf_repo
+  WITH PREFIX 'https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main'
+  USING PUBLIC KEY 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuHohhNjRcVm5FkdMdbU8fKGFqDRfgELS/HDXsbcaJTZO0/z/syUfbD8RbBXml/Wp0kaLPRci5DQSYxDj4kJtBOEm8HFyMgFm1RlpnDHoM5eFqtRbngW9EtCgpqatDcBH1VB7ubxIJJaIWUwSyMELTY3hv0ZVTLsXMnCO34C9QGiPZ3xKtTh1s6PPELCGctxcsmzjW+pOUboCWlHGJMfLYguK8R3UaqcGSdVbynnbeamNEoc38pvDHEHv2Y36LwGWZWOyj3J7Dgw3Eh81ipC6yPxeW3wgtHXjb/wlnAg89Iz+z+eTJymPB85wpxmb0Y0D0zLusSRLoP/rcArGboa7NwIDAQAB';
+INSTALL hf FROM hf_repo;
+LOAD hf FROM hf_repo;
+```
+
+```sql
+-- unsigned: one setting, no key to pin
+SET allow_unsigned_extensions = true;
+INSTALL hf FROM 'https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main/unsigned';
+LOAD hf;
+```
+
+Both forms are verified in this tree: the signed run connects *without* `allow_unsigned_extensions`,
+checks the fingerprint of the key that signed what landed on disk (`sha256:f007c8016bc2f3a29…`), and the
+local variant then flips a byte in the served binary — in both the plain and the gzipped copy, because
+DuckDB 2.0 sniffs gzip rather than trusting the suffix — and requires a fresh process to refuse it.
+
+Two things to know about the key. It is an RSA-2048 private key kept outside the repository
+(`~/.config/duckdb-hf/signing.pem` on the build machine); losing it does not break clients that already
+installed, but every future build would have to be re-pinned by everyone. And the public key is published
+by the same repository it signs, which is what makes an `INSTALL` from a CDN cache tamper-evident rather
+than a proof of who built the binary — that proof is what DuckDB's own signed extension index does, and
+getting `hf` into it is the step that turns this into `INSTALL hf` with no prefix at all.
+
+The plain binary is above the Hub's LFS threshold (14 MB) and the gzip is not (4.5 MB), so a repository
+holds both kinds of file; `resolve/main` serves either. `hf_upload` can publish it, which is a nice
+recursion and not the recommended path — `publish_extension_repo.py` is idempotent and does not need the
+extension to be built first.
 
 ## Notes / limitations
 

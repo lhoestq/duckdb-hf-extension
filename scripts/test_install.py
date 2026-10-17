@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Verify `INSTALL hf; LOAD hf;` against a locally built extension repository.
 
-    python3 scripts/test_install.py dist/repo            # unsigned build
-    python3 scripts/test_install.py dist/repo-signed --signed   # signature is required
+    python3 scripts/test_install.py dist/repo                      # unsigned build
+    python3 scripts/test_install.py dist/repo-signed --signed      # signature is required
+    python3 scripts/test_install.py 'https://huggingface.co/datasets/me/repo/resolve/main/unsigned/'
+    python3 scripts/test_install.py 'https://huggingface.co/datasets/me/repo/resolve/main/' --signed
 
 Every run uses a throw-away home directory, so it never touches ~/.duckdb. For signed repositories
 the test also flips a byte in the *installed* binary and checks that DuckDB refuses to load it -
@@ -14,9 +16,16 @@ import subprocess
 import sys
 import tempfile
 
-repo = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "dist/repo")
+repo_arg = sys.argv[1] if len(sys.argv) > 1 else "dist/repo"
 signed = "--signed" in sys.argv
-prefix = "file://" + repo.rstrip("/") + "/"
+# A published repository is verified the same way as a local one - which is the point: the tree that
+# passes here is the tree a client will actually fetch. Only the tamper test stays local, since it has
+# to modify the served bytes to prove anything.
+remote = repo_arg.startswith("http://") or repo_arg.startswith("https://")
+repo = repo_arg if remote else os.path.abspath(repo_arg)
+# DuckDB appends "/<version>/<platform>/hf.duckdb_extension" itself, so the prefix must not end in a
+# slash here: file:// tolerates the doubled one, an https host (rightly) answers 404
+prefix = repo.rstrip("/") if remote else "file://" + repo.rstrip("/") + "/"
 
 import duckdb  # noqa: E402
 
@@ -46,8 +55,13 @@ os.makedirs(os.path.join(home, ".duckdb"), exist_ok=True)  # DuckDB will not cre
 common = {"home_directory": home, "autoinstall_known_extensions": True}
 
 if signed:
-    with open(os.path.join(repo, ".well-known", "duckdb-extension-repo.json")) as f:
-        public_keys = json.load(f)["signature_keys"]
+    if remote:
+        import urllib.request
+        with urllib.request.urlopen(prefix.rstrip("/") + "/.well-known/duckdb-extension-repo.json") as f:
+            public_keys = json.load(f)["signature_keys"]
+    else:
+        with open(os.path.join(repo, ".well-known", "duckdb-extension-repo.json")) as f:
+            public_keys = json.load(f)["signature_keys"]
     # deliberately NO allow_unsigned_extensions: the signature has to carry the load
     con = duckdb.connect(config={**common, "allow_extension_repositories": "allowed"})
     # the statement is parsed literally (no bind parameters), List(StringLiteral) is a bare comma
@@ -92,7 +106,7 @@ installed = found[0].replace(home + "/", "")
 assert f"extensions/{version}/" in installed, "installed under the wrong version directory"
 print("installed at    ->", installed)
 
-if signed:
+if signed and not remote:
     # A signature that is never verified is worse than none: copy the repository, flip one byte in the
     # copied binary, and require a fresh DuckDB process to refuse it.
     tampered = tempfile.mkdtemp(prefix="hf-ext-tampered-")

@@ -10,6 +10,29 @@ Two version numbers are in play, and they are independent:
   per DuckDB identifier per platform, and rebuilding for a newer DuckDB pre-release is a rebuild,
   not a version bump.
 
+## Unreleased — installable by someone else
+
+* `INSTALL hf FROM 'https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main/unsigned'`
+  works, and so does the signed form with a pinned key. `scripts/publish_extension_repo.py` builds the
+  tree into a Hub dataset and prints the exact client incantations; it reads the version directory out of
+  the binary footer instead of being told it, because a repository whose directory disagrees with the
+  footer of what it serves is a repository nobody can install from. `scripts/test_install.py` now takes a
+  url as readily as a directory, so what is verified is what a client fetches.
+* The CI matrix builds on push. It had been *running* and failing from the start, and the earlier note
+  here that Actions was unavailable came from reading a 403 on one endpoint (`gh workflow list`) as a
+  verdict on the whole feature instead of opening a job log. Two real causes, both visible only there:
+  * DuckDB's CI images configure with a vcpkg toolchain and `VCPKG_MANIFEST_DIR` at the extension root,
+    and die at `project()` without a manifest — hence `vcpkg.json` with an empty dependency list, which
+    is what the extension actually has (sha256/base64/JSON self-written, blake3/gearhash vendored).
+  * nothing tagged the DuckDB checkout, so binaries would have carried the right code and the wrong
+    version identifier, and every client would have refused to `LOAD` them; `duckdb_tag` is the input
+    that makes `git describe` say `v2.0.0-alpha47600`.
+* `test/sql/hf_selftest.test` puts the 296 offline reference checks and two url-parser refusals behind
+  `make test_release`, so a build with a broken hash port stops the build rather than the user.
+* macOS builds run on tags and manual dispatches rather than every push: this repository is private,
+  where macOS minutes bill at 10x, and every job compiles DuckDB from source because prebuilt DuckDB
+  archives exist only for released versions.
+
 ## 0.0.2-pre2 — a file at the end of the shard
 
 * **`COPY (SELECT …) TO 'hf://buckets/me/playground/x.parquet'` works, and writes through Xet.** A
