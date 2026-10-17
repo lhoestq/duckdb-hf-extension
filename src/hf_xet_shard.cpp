@@ -298,6 +298,17 @@ idx_t HFXetShardSelfTest(vector<std::tuple<string, bool, string, string>> &resul
 		file.file_hash = HFXetFileHash(root_nodes_for_file(chunks));
 		file.segments = segments;
 		file.chunk_hashes = chunk_hashes;
+		if (test.sha256) {
+			// The sha256 travels as a DataHash, and DataHash::from_hex reads the same four little-endian
+			// words as MerkleHash::from_hex does - each group of 16 hex digits becomes one word, `.to_le()`.
+			// Parsing the hex as 32 plain bytes instead still fills 32 bytes, still writes 32 bytes, and
+			// disagrees with the reference on the order of every eighth of them.
+			file.has_sha256 = true;
+			auto parsed = HFXetHash::FromHex(string(test.sha256));
+			for (idx_t i = 0; i < 32; i++) {
+				file.sha256[i] = parsed.bytes[i];
+			}
+		}
 		shard.AddFile(std::move(file));
 
 		// the reference orders its sections by hash, so the expected lists are in that order too
@@ -315,6 +326,16 @@ idx_t HFXetShardSelfTest(vector<std::tuple<string, bool, string, string>> &resul
 		check(name + " shard bytes", test.fingerprint,
 		      HFXetChunkHash(const_data_ptr_cast(bytes.data()), bytes.size()).Hex());
 		check(name + " shard file hash", test.file_hash, file.file_hash.Hex());
+		// the flag is what tells a reader to expect 48 more bytes per file entry; a shard that writes the
+		// extension without saying so (or says so without writing it) is unreadable, and the byte
+		// comparison alone would not name which of the two went wrong
+		uint32_t expected_flags = HF_XET_FILE_FLAG_WITH_VERIFICATION |
+		                          (test.sha256 ? HF_XET_FILE_FLAG_WITH_METADATA_EXT : 0);
+		uint32_t stored_flags = 0;
+		for (idx_t i = 0; i < 4; i++) {
+			stored_flags |= uint32_t(uint8_t(bytes[HF_XET_SHARD_HEADER_SIZE + 32 + i])) << (i * 8);
+		}
+		check(name + " shard file flags", to_string(expected_flags), to_string(stored_flags));
 		check(name + " shard xorb hashes", test.xorb_hashes, FormatHashList(xorb_order));
 		check(name + " shard verification", test.verification_hashes, FormatHashList(verification));
 

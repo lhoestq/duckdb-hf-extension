@@ -55,18 +55,25 @@ INTERNAL_VECTORS = [
 ]
 
 
-# (name, kind, pattern, size, seed, max_xorb_bytes) - shards, i.e. a file described by the xorbs its
-# chunks landed in. max_xorb_bytes is a probe-side override: the real limit is 64 MiB, so without it a
-# test shard would always be a single segment and the interesting part of the format - several
-# segments, several xorbs, the ordering between them - would go unpinned.
+# (name, kind, pattern, size, seed, max_xorb_bytes, sha256) - shards, i.e. a file described by the
+# xorbs its chunks landed in. max_xorb_bytes is a probe-side override: the real limit is 64 MiB, so
+# without it a test shard would always be a single segment and the interesting part of the format -
+# several segments, several xorbs, the ordering between them - would go unpinned. sha256, when set,
+# turns on the file entry's metadata extension, the one place a git-backed repo's file records the
+# sha256 its commit names it by; it is a whole extra 48-byte entry, so it shifts the verification
+# section's position and is pinned one-segment and multi-segment both.
 SHARD_VECTORS = [
-    ('literal "hello shard world"', KIND_LITERAL, "hello shard world", 0, 0, 0),
-    ("empty input", KIND_LITERAL, "", 0, 0, 0),
-    ("one byte", KIND_LITERAL, "a", 0, 0, 0),
-    ("splitmix64 n=300000 seed=7", KIND_SPLITMIX, "", 300000, 7, 0),
-    ("splitmix64 n=300000 seed=7, xorbs of 40000", KIND_SPLITMIX, "", 300000, 7, 40000),
-    ("200000 zero bytes, xorbs of 32768", KIND_REPEAT, "", 200000, 0, 32768),
-    ("splitmix64 n=4000000 seed=11", KIND_SPLITMIX, "", 4000000, 11, 0),
+    ('literal "hello shard world"', KIND_LITERAL, "hello shard world", 0, 0, 0, None),
+    ("empty input", KIND_LITERAL, "", 0, 0, 0, None),
+    ("one byte", KIND_LITERAL, "a", 0, 0, 0, None),
+    ("splitmix64 n=300000 seed=7", KIND_SPLITMIX, "", 300000, 7, 0, None),
+    ("splitmix64 n=300000 seed=7, xorbs of 40000", KIND_SPLITMIX, "", 300000, 7, 40000, None),
+    ("200000 zero bytes, xorbs of 32768", KIND_REPEAT, "", 200000, 0, 32768, None),
+    ("splitmix64 n=4000000 seed=11", KIND_SPLITMIX, "", 4000000, 11, 0, None),
+    ('sha256 extension, "hello shard world"', KIND_LITERAL, "hello shard world", 0, 0, 0,
+     "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+    ("sha256 extension, splitmix64 n=300000 seed=7, xorbs of 40000", KIND_SPLITMIX, "", 300000, 7,
+     40000, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
 ]
 
 
@@ -197,11 +204,13 @@ def build_shards():
     """
     probe = os.path.join(ROOT, "tools", "xet_probe", "target", "release", "xet-probe")
     vectors = []
-    for name, kind, pattern, size, seed, max_xorb_bytes in SHARD_VECTORS:
+    for name, kind, pattern, size, seed, max_xorb_bytes, sha256 in SHARD_VECTORS:
         data = build_input(kind, pattern, size, seed)
-        out = subprocess.run([probe, "shard", str(max_xorb_bytes)], input=data, check=True,
-                             capture_output=True).stdout.decode()
+        out = subprocess.run([probe, "shard", str(max_xorb_bytes), sha256 or ""], input=data,
+                             check=True, capture_output=True).stdout.decode()
         fields = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+        if fields.get("sha256_ext", "") != (sha256 or ""):
+            raise SystemExit("shard probe reported sha256_ext=%r for %r" % (fields.get("sha256_ext"), sha256))
         segments = [line.split() for line in out.splitlines() if line.startswith("segment ")]
         verification = [line.split()[1] for line in out.splitlines() if line.startswith("verification ")]
         stored = [line.split()[1] for line in out.splitlines() if line.startswith("xorb_stored ")]
@@ -209,7 +218,7 @@ def build_shards():
             raise SystemExit("shard probe returned %d segments but %d verification entries"
                              % (len(segments), len(verification)))
         vectors.append((name, kind, pattern, size, seed, max_xorb_bytes, fields["shard_fingerprint"],
-                        fields["file_hex"], int(fields["shard_length"]),
+                        fields["file_hex"], int(fields["shard_length"]), sha256,
                         ",".join(stored),
                         ",".join(seg[1] for seg in segments),
                         ",".join(verification)))
@@ -361,16 +370,17 @@ def main():
     add_shard("")
     add_shard("const vector<HFXetShardVector> &HFXetShardVectors() {")
     add_shard("\tstatic const vector<HFXetShardVector> vectors = {")
-    for (name, kind, pattern, size, seed, max_xorb, fingerprint, file_hash, length, stored, ranges,
-         verification) in shards:
+    for (name, kind, pattern, size, seed, max_xorb, fingerprint, file_hash, length, sha256, stored,
+         ranges, verification) in shards:
         add_shard("\t	// %s: %d bytes uploaded" % (name, length))
         add_shard("\t	{%s, %s, %dULL, %dULL, %s, %dULL," % (c_string(name), kind,
                                                             0 if kind == KIND_LITERAL else size, seed,
                                                             c_string(pattern) if kind != KIND_SPLITMIX else "nullptr",
                                                             max_xorb))
         add_shard("\t	 %s, %s," % (c_string(fingerprint), c_string(file_hash)))
-        add_shard("\t	 %s, %s, %s, %dULL}," % (c_string(stored), c_string(ranges),
-                                                c_string(verification), length))
+        add_shard("\t	 %s, %s, %s, %dULL, %s}," % (c_string(stored), c_string(ranges),
+                                                c_string(verification), length,
+                                                c_string(sha256) if sha256 else "nullptr"))
     add_shard("\t};")
     add_shard("\treturn vectors;")
     add_shard("}")

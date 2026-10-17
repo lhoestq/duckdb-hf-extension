@@ -26,6 +26,7 @@ HFWriteHandle::HFWriteHandle(HFFileSystem &file_system, const string &path, File
 	cache_dir = SettingAsString(opener, "hf_cache_dir", path);
 	commit_message = SettingAsString(opener, "hf_commit_message", path);
 	create_repo = HFSettingAsBool(opener, "hf_create_repo", false);
+	xet_write = HFSettingAsBool(opener, "hf_xet_write", true);
 	if (commit_message.empty()) {
 		commit_message = HFDefaultCommitMessage(target.url);
 	}
@@ -94,7 +95,7 @@ void HFWriteHandle::Close() {
 		} else {
 			auto blob = HFComputeBlobInfo(db, temp_path);
 			// the opener is gone by now, so the flag resolved at open time is the one that counts
-			HFUploadLocalFile(db, nullptr, target, temp_path, blob, commit_message, create_repo);
+			HFUploadLocalFile(db, nullptr, target, temp_path, blob, commit_message, create_repo, xet_write);
 		}
 	} catch (std::exception &) {
 		CleanupTempFile();

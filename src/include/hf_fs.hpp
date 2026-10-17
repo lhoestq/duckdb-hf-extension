@@ -84,9 +84,11 @@ void HFCommit(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTar
               const vector<HFCommitOp> &operations, const string &commit_message, bool create_repo = false);
 
 //! Upload a local file to a repository path (preupload -> blob/LFS upload -> commit)
+//! `xet_write` is the resolved value of `hf_xet_write`: an LFS-sized file's bytes go to the Xet CAS, and
+//! the plain LFS upload becomes the fallback instead of the route. The commit is the same either way.
 void HFUploadLocalFile(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
                        const string &local_path, const HFBlobInfo &blob, const string &commit_message,
-                       bool create_repo = false);
+                       bool create_repo = false, bool xet_write = true);
 
 //! Read a boolean extension setting through an opener, which may be null (then the fallback wins)
 bool HFSettingAsBool(optional_ptr<FileOpener> opener, const char *key, bool fallback);
@@ -436,6 +438,7 @@ private:
 	string cache_dir;
 	string commit_message;
 	bool create_repo = false;
+	bool xet_write = true;
 	unique_ptr<FileHandle> temp_handle;
 	idx_t bytes_written = 0;
 	bool closed = false;

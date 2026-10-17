@@ -183,6 +183,7 @@ against those on random + real (parquet, csv, binary) inputs in CI-able scripts.
 * **M6 — git-backed repos through Xet.** Datasets, models, spaces and kernels: the `metadata_ext` link
   between the LFS pointer's sha256 and the Xet file hash, then deciding when a repo write should prefer
   Xet over git-LFS (which is a cost question, not a correctness one: LFS works today for every type).
+  **Done** - see *M6* at the bottom.
 
 Each milestone lands behind a setting or an internal flag so 0.0.x behaviour never regresses. Git-backed
 writes stayed on git-LFS through M5 deliberately: the Xet path earned its bytes on buckets first, where a
@@ -356,8 +357,48 @@ which is `COPY (SELECT ...) TO 'hf://buckets/...'` end to end: temp file → chu
 230 MB uncompressed file whose chunks land in several xorbs (the Hub assembles the read ranges from the
 shard, so a segment bug shows up as a corrupt read rather than an error).
 
-**Next (M6)**: git-backed repositories. The commit names a file by an LFS pointer (sha256 + size), and a
-Xet-stored file is content the pointer does not describe - the `metadata_ext` (sha256 in the file
-section, `flags | WITH_METADATA_EXT`) is what links them, and huggingface_hub only omits it for buckets
-(`SKIP_SHA256`). Then the polish that stops being excusable: parallel xorb uploads, an upload-side dedup
-query, and LZ4 frames.
+**M6 — git-backed repositories through Xet (done).** A dataset/model/space file is committed as an LFS
+pointer: `{"key":"lfsFile","value":{"path":…, "algo":"sha256","oid":…, "size":…}}`. That pointer names the
+content by sha256, and a Xet file is named by a BLAKE3 merkle root, so the two halves only describe the
+same bytes if something states the relation. That something is the shard's file-level metadata extension:
+`flags | WITH_METADATA_EXT` plus a 32-byte `sha256` in the `FileSequence` entry. `huggingface_hub` omits
+it for buckets (`SKIP_SHA256` - a bucket file is addressed by its xet hash, so nothing has to be joined)
+and sends it for everything else. That is the entire protocol difference: the commit this extension sends
+for `hf://datasets/...` is *the same commit it always sent*, the bytes merely stop visiting the LFS
+endpoint.
+
+What the reference reading of it is worth, in three notes:
+
+* **the sha256 in that extension is hex-parsed as a `DataHash`, which means four 16-hex-digit groups read
+  as little-endian words and then word-swapped** - `Sha256Policy::from_hex` → `DataHash::from_hex`, the
+  same convention as `MerkleHash::from_hex`. Parsing it as 32 ordinary byte pairs still writes 32 bytes,
+  still produces a shard the CAS accepts, and still leaves a file that resolves to nothing. Only a
+  reference vector notices (`scripts/xet_oracle.py` now emits two, one single-segment and one
+  multi-segment, and `hf_xet_selftest()` additionally asserts the stored flags word, since flagging an
+  extension that is not there — or writing one without flagging it — is invisible to a byte diff of a
+  *correct* shard).
+* **nothing on the read side is asked for**: `GET /api/{type}/{repo}/xet-write-token/{revision}` answers
+  with a CAS url and token for datasets, models and spaces, including for a repository created with
+  `"xetEnabled": false` (a probe repo, `lhoestq/hf-ext-nonxet-probe`, whose API info reports
+  `xetEnabled: None`, still handed a token for `cas-server.xethub.hf.co`). The preupload route likewise
+  answers `uploadMode: "lfs"` for a Xet-enabled staging repo. Neither is a gate: the *client* picks the
+  route, exactly as `hf_xet` does, so there is no repo capability to preflight and no reason to wait for
+  one.
+* **fallback is the honest default.** `hf_xet_write` is on; if the CAS upload throws, the same file goes
+  out through `UploadLFSBlob` and the commit is unchanged, so an unreachable content store makes a write
+  slow rather than impossible. If the commit then fails anyway the message names the earlier Xet failure,
+  because "the server rejected the commit" and "the CAS was already down and we sent LFS bytes instead"
+  need different responses from a user. What is *not* covered by a test is the fallback firing: nothing in
+  SQL can make a CAS upload fail, and a test-only seam in the upload path is not something a shipping
+  extension should carry — so the deterministic coverage is the `hf_xet_write = false` route, and the
+  fallback is covered by reading and by the fact that the LFS path is the one every earlier release used.
+
+The live proof is deliberately made of bytes that could not have been served from anywhere else: 6 MB of
+`/dev/urandom`, never uploaded as an LFS blob, written to a Xet-enabled staging repo (`hf_xet_write = true`),
+committed, then read back with `read_blob` and compared by sha256 and size. The tree API does not expose a
+usable `xetHash` for git-backed files, so "a commit accepted for content that exists in no LFS store, and
+reads back identical" is the strongest signal the surface gives.
+
+**Next**: the polish that stops being excusable — parallel xorb uploads, an upload-side dedup query
+(`POST /v1/chunks/…` before hashing work we already paid for elsewhere), LZ4 frames, and a prefetch that
+walks a shard's chunk table on read instead of issuing one range per window.

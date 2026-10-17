@@ -30,6 +30,8 @@ namespace duckdb {
 //! The uploaded shard header: a 32-byte tag, a version, and a footer size that is deliberately zero
 //! because the footer (and the lookup tables before it) are stripped before the bytes are sent.
 constexpr uint64_t HF_XET_SHARD_HEADER_VERSION = 2;
+//! tag(32) + version(8) + footer_size(8): the byte offset the file section starts at
+constexpr idx_t HF_XET_SHARD_HEADER_SIZE = 48;
 //! FileDataSequenceHeader.file_flags. Verification entries follow the segments one per segment; the
 //! metadata extension is a single trailing entry carrying the file's sha256.
 constexpr uint32_t HF_XET_FILE_FLAG_WITH_VERIFICATION = 0x80000000u;
@@ -146,6 +148,10 @@ struct HFXetShardVector {
 	const char *segment_ranges;
 	const char *verification_hashes;
 	uint64_t num_bytes;
+	//! the file entry's sha256 metadata extension, or nullptr for a shard that carries none - which is
+	//! what a bucket upload sends, since a bucket file is addressed by its xet hash and never by a
+	//! sha256 the commit names
+	const char *sha256;
 };
 
 const vector<HFXetShardVector> &HFXetShardVectors();

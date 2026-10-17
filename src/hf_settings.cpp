@@ -71,6 +71,10 @@ void HFSettings::Register(DBConfig &config) {
 	                          Value("Upload files with DuckDB"));
 	config.AddExtensionOption("hf_create_repo", "Create the target repository if it does not exist yet",
 	                          LogicalType::BOOLEAN, Value(false));
+	config.AddExtensionOption("hf_xet_write",
+	                          "Upload files through Xet content-defined chunking (deduplicated, incremental); "
+	                          "falls back to a plain LFS upload when the content store cannot be reached",
+	                          LogicalType::BOOLEAN, Value(true));
 	config.AddExtensionOption("hf_read_buffer_size", "Read-ahead buffer size (in bytes) for hf:// reads",
 	                          LogicalType::UBIGINT, Value::UBIGINT(HF_DEFAULT_READ_BUFFER));
 	config.AddExtensionOption("hf_read_cache_size", "How many fetched bytes a single hf:// file may keep in memory (shared by all readers of that file)",

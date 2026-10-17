@@ -713,7 +713,7 @@ void HFUploadLocalFileToBucket(DatabaseInstance &db, optional_ptr<FileOpener> op
 
 void HFUploadLocalFile(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
                        const string &local_path, const HFBlobInfo &blob, const string &commit_message,
-                       bool create_repo) {
+                       bool create_repo, bool xet_write) {
 	if (target.url.IsBucket()) {
 		// no blob, no preupload: a bucket has neither git objects nor LFS pointers
 		HFUploadLocalFileToBucket(db, opener, target, local_path);
@@ -733,13 +733,34 @@ void HFUploadLocalFile(DatabaseInstance &db, optional_ptr<FileOpener> opener, co
 	HFCommitOp op;
 	op.path = path_in_repo;
 	op.size = blob.size;
+	// why the Xet route was skipped, if it was: only worth carrying as far as the commit, which is the
+	// one place a skipped upload can turn into a confusing error
+	string xet_failure;
 	if (mode == "regular" || mode == "normal") {
 		auto content = ReadLocalFileToString(db, local_path);
 		op.content = HFBase64::Encode(const_data_ptr_cast(content.data()), content.size());
 		op.encoding = "base64";
 		op.is_lfs = false;
 	} else if (mode == "lfs") {
-		UploadLFSBlob(*client, target.url, blob, local_path);
+		// huggingface_hub with hf_xet installed never calls the LFS upload endpoint: it puts the chunks in
+		// the CAS and commits the very same sha256 pointer over them, which the Hub then resolves back to
+		// that content through the shard's metadata extension. Same here - and the commit below is
+		// identical either way, which is what makes the byte upload a plain fallback rather than a
+		// different mode of writing.
+		bool content_in_cas = false;
+		if (xet_write) {
+			try {
+				HFXetUploadFileContents(db, FileSystem::GetLocal(db), opener, target, local_path, &blob.sha256);
+				content_in_cas = true;
+			} catch (std::exception &ex) {
+				// the content is in the CAS or it is not; the blob upload below makes the commit valid
+				// either way, so an unreachable CAS costs a slow write, not a failed one
+				xet_failure = ex.what();
+			}
+		}
+		if (!content_in_cas) {
+			UploadLFSBlob(*client, target.url, blob, local_path);
+		}
 		op.is_lfs = true;
 		op.oid = blob.sha256;
 	} else {
@@ -749,7 +770,19 @@ void HFUploadLocalFile(DatabaseInstance &db, optional_ptr<FileOpener> opener, co
 		    target.url.ToString(), mode);
 	}
 
-	HFCommit(db, opener, target, {op}, commit_message, create_repo);
+	try {
+		HFCommit(db, opener, target, {op}, commit_message, create_repo);
+	} catch (std::exception &ex) {
+		if (!xet_failure.empty()) {
+			// the fallback did its job, so it stays silent - unless the write fails anyway, in which case a
+			// reader needs to know that the CAS was already unreachable and the blob route was tried too
+			string message = ex.what();
+			message += " - the Xet upload for this file had already failed (" + xet_failure +
+			           "), so its bytes were sent as a plain LFS blob";
+			throw IOException("%s", message);
+		}
+		throw;
+	}
 }
 
 void HFDeletePaths(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,

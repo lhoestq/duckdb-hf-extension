@@ -72,8 +72,47 @@ FROM hf_list_revisions('hf://datasets/lhoestq/playground', max_revisions := 5)
 WHERE title = 'duckdb smoke: hf_upload with message';
 SELECT 'i5 hf_status reads' AS t, endpoint LIKE 'https://%' AS assert_endpoint, user <> '' AS assert_user,
        whoami_error = '' AS assert_no_whoami_error, token_source <> 'none' AS assert_token,
-       hf_version = '0.0.2-pre2' AS assert_version
+       hf_version = '0.0.2-pre3' AS assert_version
 FROM hf_status();
+
+-- The two routes an LFS sized file can take. Xet is the default: the bytes go to the content addressable
+-- store as content defined chunks, and the commit is the same sha256 LFS pointer either way - which is
+-- why hf_xet_write changes how the bytes travel, never what the committed file is.
+SET hf_xet_write = false;
+SELECT 'x1 the plain LFS upload route' AS t, size = 20000000 AS assert_size
+FROM hf_upload('/tmp/hf_write_fixture.bin', 'hf://datasets/lhoestq/playground/duckdb/lfs_route.bin');
+RESET hf_xet_write;
+SELECT 'x2 Xet writing is the default' AS t, current_setting('hf_xet_write') AS assert_default_on;
+SELECT 'x3 the Xet upload route' AS t, size = 20000000 AS assert_size
+FROM hf_upload('/tmp/hf_write_fixture.bin', 'hf://datasets/lhoestq/playground/duckdb/xet_route.bin');
+SELECT 'x4 both files, both byte identical' AS t,
+       (SELECT md5(content) FROM read_blob('hf://datasets/lhoestq/playground/duckdb/lfs_route.bin')) =
+       (SELECT md5(content) FROM read_blob('/tmp/hf_write_fixture.bin')) AS assert_lfs_bytes,
+       (SELECT md5(content) FROM read_blob('hf://datasets/lhoestq/playground/duckdb/xet_route.bin')) =
+       (SELECT md5(content) FROM read_blob('/tmp/hf_write_fixture.bin')) AS assert_xet_bytes;
+-- the second upload of the same content is the deduplicated one: its chunks are already in the store, so
+-- only the shard and the commit travel. Nothing observable changes about the file, which is the point.
+SELECT 'x5 the same content committed a second time' AS t, size = 20000000 AS assert_size
+FROM hf_upload('/tmp/hf_write_fixture.bin', 'hf://datasets/lhoestq/playground/duckdb/xet_route_again.bin');
+SELECT 'x6 which reads back identical too' AS t,
+       (SELECT md5(content) FROM read_blob('hf://datasets/lhoestq/playground/duckdb/xet_route_again.bin')) =
+       (SELECT md5(content) FROM read_blob('/tmp/hf_write_fixture.bin')) AS assert_same_bytes;
+-- and the same through a COPY, where the settings were resolved when the handle opened
+COPY (SELECT range::BIGINT AS i, md5(range::VARCHAR) AS h FROM range(400000))
+     TO 'hf://datasets/lhoestq/playground/duckdb/xet_copy.parquet' (FORMAT PARQUET);
+SELECT 'x7 a COPY big enough to be LFS sized' AS t, count(*) = 400000 AS assert_rows,
+       (SELECT size FROM hf_meta('hf://datasets/lhoestq/playground/duckdb/xet_copy.parquet')) > 10000000
+           AS assert_lfs_sized
+FROM 'hf://datasets/lhoestq/playground/duckdb/xet_copy.parquet';
+SELECT 'x8 and it reads back with the right content' AS t, sum(i) = 79999800000 AS assert_sum,
+       (SELECT count(*) FROM 'hf://datasets/lhoestq/playground/duckdb/xet_copy.parquet'
+        WHERE i = 399999 AND h = md5('399999')) = 1 AS assert_last_row
+FROM 'hf://datasets/lhoestq/playground/duckdb/xet_copy.parquet';
+SELECT 'x9 the route files go away again' AS t, count(*) = 4 AS assert_four_deleted
+FROM hf_delete(['hf://datasets/lhoestq/playground/duckdb/lfs_route.bin',
+                'hf://datasets/lhoestq/playground/duckdb/xet_route.bin',
+                'hf://datasets/lhoestq/playground/duckdb/xet_route_again.bin',
+                'hf://datasets/lhoestq/playground/duckdb/xet_copy.parquet']);
 
 -- the read cache has to notice what the write changed
 SELECT 'c0 reset the counters' AS t, count(*) = 1 AS ok FROM hf_read_stats(reset := true);

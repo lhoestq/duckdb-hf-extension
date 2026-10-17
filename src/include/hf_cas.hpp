@@ -116,7 +116,13 @@ struct HFXetUploadResult {
 //! then upload the shard that describes the file. After this call the *content* exists in the CAS and
 //! is reachable *by hash*; naming it as a file in a repository is the caller's business - a bucket
 //! does it with a batch `addFile`, a git-backed repo with an LFS pointer (docs/XET.md, M5).
+//!
+//! `sha256_hex`, when given, is written into the file entry's metadata extension. That field is the
+//! only place where the content's xet hash and the sha256 a git commit names the blob by are stated
+//! together, so a git-backed upload that wants the Hub to see its content as Xet has to pass it, and a
+//! bucket upload must not (a bucket file has no sha256 to be named by).
 HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, optional_ptr<FileOpener> opener,
-                                          const HFTarget &target, const string &path);
+                                          const HFTarget &target, const string &path,
+                                          const string *sha256_hex = nullptr);
 
 } // namespace duckdb

@@ -2,7 +2,53 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-17, ~15:10 UTC)
+## Current position (2026-10-17, ~19:45 UTC)
+
+**M6 is in: a git-backed repository's file content now goes through Xet.** `COPY (…) TO
+'hf://datasets/…'` chunk-stores-then-commits: xorbs + shard to the CAS, and the *same*
+`{"key":"lfsFile","value":{path, algo:sha256, oid, size}}` commit as before. The link between the two hash
+systems is the shard's file-level metadata extension (`flags | WITH_METADATA_EXT` + 32-byte sha256), which
+`huggingface_hub` only omits for buckets. New setting **`hf_xet_write`, default `true`**; a CAS failure
+falls back to `UploadLFSBlob` with an unchanged commit, and if the commit then fails the message names the
+earlier Xet reason. Version bumped to **0.0.2-pre3**, selftest now **325 checks**. `docs/XET.md` has the
+M6 write-up.
+
+* **The hex trap again, in a new place**: the sha256 in that extension is parsed as a `DataHash` - four
+  16-hex-digit groups read as little-endian words, word-swapped, exactly like `MerkleHash::from_hex`. The
+  naive byte-pair parse writes 32 plausible bytes that resolve to nothing. Use
+  `HFXetHash::FromHex(…).bytes`; two oracle vectors (single- and multi-segment) plus a flags-word assertion
+  are what notice.
+* **There is no repo capability to preflight.** `GET api/<type>/<repo>/xet-write-token/<revision>` answers
+  with a valid CAS token for datasets/models/spaces, and also for a repo created `"xetEnabled": false`
+  (probe: `lhoestq/hf-ext-nonxet-probe`, whose info reports `xetEnabled: None`). Preupload says
+  `uploadMode: "lfs"` even for Xet-enabled repos. The client picks the route, as `hf_xet` does.
+* **Live proof method worth keeping**: content that could not possibly exist in an LFS store (6 MB of
+  `/dev/urandom`), written with `hf_xet_write = true`, committed, then read back and compared by
+  `read_blob` sha256 + size. The tree API exposes no usable `xetHash` for git-backed files, so that is the
+  strongest signal the surface gives.
+* **CI fact worth never relearning**: the matrix's test step discovers `test/sql/hf_selftest.test` and
+  *skips* it - `require hf` is only satisfiable by extensions in DuckDB's hardcoded
+  `AUTOLOADABLE_EXTENSIONS` (`src/include/duckdb/main/extension_entries.hpp`), and a skipped file reports
+  success. `duckdb_extension_statically_link(hf)` does **not** help (tried: it puts 815 HF symbols into
+  libduckdb/shell/unittest, and `CheckRequire` still consults the list, not the static loader), and a bare
+  `LOAD hf` line inside a `.test` file is parsed as sqllogictest's `load` *command*, which skips the whole
+  file. Both reverted. What runs the checks instead: **`scripts/ci_selftest.sh`** + a `selftest` job that
+  downloads the `linux_amd64` artifact and uses the `duckdb` binary that artifact ships in
+  `test-support.tar.gz` (`LD_LIBRARY_PATH=…/build/release/src`). It compares numbers: version, check count
+  (read out of the `.test` file, not repeated), `bool_and(assert_passed)`, a parser refusal, a directory-write
+  refusal (needs parquet - say so out loud when absent), registered function count. It found that the
+  skipped file's own last assertion (`LIKE 'hf\_%'`, and LIKE takes the backslash literally) returned 0.
+* **CI matrix state** (run `39052885130`): generate-matrix, `linux_amd64`, `linux_arm64` green, artifacts
+  uploaded; `windows_amd64_mingw` was still running; macOS only on tag/dispatch. Note
+  `linux_arm64` prints "Tests are not supported for linux_arm64" and its artifact carries no
+  `test-support.tar.gz` - arm64 stays locally tested here.
+* Live probes still to sweep: `hf://datasets/lhoestq/hf-smoke-staging/m6/xet-*.bin`, and the
+  `lhoestq/hf-ext-nonxet-probe` repo. Then republish the 0.0.2-pre3 artifacts (`scripts/make_extension_repo.sh`
+  → `scripts/publish_extension_repo.py` → `scripts/test_install.py`).
+* Next ("C", pick by value): upload concurrency + an upload-side dedup query, LZ4 frames, shard-driven read
+  prefetch, or the robustness negatives (>5 GB reads, 429/502, offline).
+
+## Position before this (2026-10-17, ~15:10 UTC)
 
 **M5 is in: `COPY (SELECT …) TO 'hf://buckets/…'` writes through Xet end to end.** The shard writer
 (`src/hf_xet_shard.cpp`) produces the session shard byte-for-byte like `xet-core`, `HFXetCasClient::UploadShard`
@@ -546,3 +592,15 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
 * `14:55` — trailing-slash write refusal (bucket *and* git path; DuckDB local refuses the same statement).
   Full `run_all.sh` green: 174 statements, 9 expected failures, 0 failures. Bucket probe artifacts deleted;
   `lhoestq/playground` bucket is empty again.
+* `16:40` — M6 wiring: oracle + probe learn the sha256 metadata extension (two new shard vectors),
+  `HFXetUploadFileContents` takes an optional sha256, `hf_xet_write` (default true) decides per write, and
+  `hf_commit.cpp` falls back to `UploadLFSBlob` when the CAS throws. Selftest 325.
+* `17:30` — the extension's own sha256-ext self-check was wrong: hex groups are little-endian words
+  (`DataHash::from_hex`), not byte pairs. Same trap as M1, new location; caught by the vector, then by a
+  flags-word assertion added next to it.
+* `18:00` — live: 6 MB of `/dev/urandom` written to the Xet-enabled staging repo with `hf_xet_write = true`,
+  committed, read back identical. Non-xet probe repo (`lhoestq/hf-ext-nonxet-probe`, `xetEnabled: false`)
+  still handed out a CAS token: no gate to wait for.
+* `19:45` — CI verification gap closed the honest way: `scripts/ci_selftest.sh` + the `selftest` job (see
+  the CI fact above; `duckdb_extension_statically_link` and `LOAD hf` in a `.test` file are dead ends, both
+  tried and reverted). Version 0.0.2-pre3.

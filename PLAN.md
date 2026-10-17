@@ -92,10 +92,19 @@ CREATE TABLE x AS SELECT * FROM 'hf://datasets/foo/data.parquet';
 
 ## Phase 5 — Distribution (make it actually usable by others)
 
-- [ ] CI matrix mirroring duckdb's (`linux_amd64/arm64`, `osx_amd64/arm64`, `windows_amd64`, musl) via
-      `extension-ci-tools`; release workflow that uploads to a HF **dataset** acting as an extension repo
-      (`SET custom_extension_repoBase`/`hf_repo`), i.e. self-hosting `hf://` on HF.
-- [ ] `duckdb_extensions()`-visible metadata (`extension_config.cmake`/`extension_packages.json` or `repo.json`).
+- [x] CI matrix mirroring duckdb's (`linux_amd64/arm64`, `osx_amd64/arm64`, `windows_amd64`, musl) via
+      `extension-ci-tools`; release workflow that uploads to a HF **dataset** acting as an extension repo,
+      i.e. self-hosting `hf://` on HF - live at `lhoestq/duckdb-hf-extension`, signed and unsigned, both
+      verified by `scripts/test_install.py`. Deviations, each with a reason in `.github/workflows/build.yml`:
+      musl / windows_arm64 / wasm excluded (no local toolchain to verify them with), macOS built on tags and
+      dispatches only (private repo: 10x minutes, and every job compiles DuckDB from source).
+- [x] A job that verifies the *artifact* rather than a rebuild of it: `selftest` downloads `linux_amd64`
+      and runs `scripts/ci_selftest.sh` with the `duckdb` binary the artifact ships in its
+      `test-support.tar.gz`. Needed because the matrix's own test step cannot load an extension it has not
+      heard of (`require hf` skips, silently, and a skip looks like a pass).
+- [ ] `duckdb_extensions()`-visible metadata: needs a PR to DuckDB's signed extension index (their signing
+      key is what makes a bare `INSTALL hf` work); our repository side is already in place
+      (`.well-known/duckdb-extension-repo.json` + signed trees).
 - [ ] Optional: a thin `pip` wrapper that registers the repo path (not required for the SQL experience).
 - [ ] Upstream/README notes: what needs DuckDB-core or Hub changes (e.g. signed dev builds).
 
@@ -130,10 +139,14 @@ CREATE TABLE x AS SELECT * FROM 'hf://datasets/foo/data.parquet';
       **`COPY … TO 'hf://buckets/…'` works**, `hf_upload` too, and `hf_xet_upload(…, publish := true)` is
       the route by hand; the suites read it back and compare bytes, including a file whose chunks span
       several xorbs - the case that caught the xorb-local vs file-global chunk index bug (docs/XET.md).
-- [ ] M6 git-backed repos through Xet: the shard's `metadata_ext` (sha256 + `WITH_METADATA_EXT`) is what
-      links an LFS pointer to Xet content, and `huggingface_hub` sets it for every repo type except
-      buckets (`SKIP_SHA256`). Buckets needed none of it, so this is unvalidated; then decide when a repo
-      write should prefer Xet over git-LFS, which is a cost question - git-LFS works for all five types.
+- [x] M6 git-backed repos through Xet: the bytes go to the CAS, the commit stays the `lfsFile` pointer
+      commit, and the shard's file-level `metadata_ext` (sha256 + `WITH_METADATA_EXT`) is the link between
+      the sha256 the commit names and the xet hash the shard stores. Two things this taught: that sha256 is
+      hex-parsed as a `DataHash` (four word-swapped little-endian groups), *not* as 32 bytes; and that no
+      server-side gate exists to preflight - the write-token route answers even for a repo created
+      `xetEnabled: false`, and preupload says `uploadMode: "lfs"` for Xet-enabled repos, so the client
+      chooses (as `hf_xet` does). `hf_xet_write` defaults to on with the LFS upload as its fallback.
+      What is left in this area is judgement, not unknowns: the next box.
 - [ ] The upload polish that is now a performance matter rather than a correctness one: xorb uploads
       through the reference's adaptive concurrency (today sequential, ~76 MB in ~6 s), an upload-side dedup
       query (today nothing is reused across files, `inserted` shows it), and LZ4 frames (an uncompressed

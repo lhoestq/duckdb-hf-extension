@@ -530,7 +530,8 @@ void HFFileSystem::MoveFile(const string &source, const string &target_path, opt
 	}
 	try {
 		auto blob = HFComputeBlobInfo(db, temp_path);
-		HFUploadLocalFile(db, opener, to, temp_path, blob, "Move to " + to.url.path + " with DuckDB");
+		HFUploadLocalFile(db, opener, to, temp_path, blob, "Move to " + to.url.path + " with DuckDB", false,
+		                  HFSettingAsBool(opener, "hf_xet_write", true));
 		HFDeletePaths(db, opener, from, {from.url.path}, {}, "Moved away with DuckDB");
 	} catch (...) {
 		local.TryRemoveFile(temp_path, nullptr);

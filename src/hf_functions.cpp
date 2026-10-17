@@ -681,7 +681,8 @@ static void HFUploadFunction(ClientContext &context, TableFunctionInput &data, D
 	}
 	auto blob = HFComputeBlobInfo(db, bind_data.local_path);
 	HFUploadLocalFile(db, &file_opener, bind_data.target, bind_data.local_path, blob, bind_data.commit_message,
-	                  HFSettingAsBool(&file_opener, "hf_create_repo", false));
+	                  HFSettingAsBool(&file_opener, "hf_create_repo", false),
+	                  HFSettingAsBool(&file_opener, "hf_xet_write", true));
 
 	output.data[0].SetValue(0, Value(bind_data.target.url.ToString()));
 	output.data[1].SetValue(0, Value::UBIGINT(blob.size));

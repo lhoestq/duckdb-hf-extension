@@ -2,6 +2,14 @@
 # description: the Xet hash / chunker / xorb / shard port, replayed against vectors generated from xet-core
 # group: [hf]
 
+# `require hf` rather than a bare LOAD, so a build without the extension skips this file instead of
+# erroring on every line. Know that it therefore *does* get skipped by `make test_release` and by the CI
+# matrix's own test step: DuckDB only autoloads extensions listed in its compiled-in
+# AUTOLOADABLE_EXTENSIONS (src/include/duckdb/main/extension_entries.hpp), a third-party name can never
+# get on it, and with the default autoloading mode `require` reports MISSING and skips - silently, as a
+# passing line. The job `selftest` in .github/workflows/build.yml runs these same checks for real (it
+# loads the built artifact with the duckdb binary that artifact ships), via scripts/ci_selftest.sh, which
+# fails on a skip because it compares counts and answers rather than trusting the runner's verdict.
 require hf
 
 # Every check below is pure computation over reference bytes compiled into the extension: no token, no
@@ -19,11 +27,13 @@ SELECT bool_and(assert_passed) FROM hf_xet_selftest()
 query I
 SELECT count(*) FROM hf_xet_selftest()
 ----
-296
+325
 
-# url parsing happens before any request, so refusals are testable offline too
+# url parsing happens before any request, so refusals are testable offline too. hf_ls rather than
+# FROM '<path>': a bare path in FROM goes through a format's replacement scan, and a format is an
+# extension in DuckDB 2.0 - without one loaded the error is about formats, not about our parser
 statement error
-SELECT * FROM 'hf://datasets/lhoestq';
+SELECT * FROM hf_ls('hf://datasets/lhoestq');
 ----
 expected 'hf://<repo_type>/<namespace>/<name>/<path>'
 
@@ -36,6 +46,6 @@ does not contain a file name
 # every table function is registered by the load, which is what the suites above and scripts/smoke_*.sql
 # lean on; counted here so a function that stops registering shows up as a smaller number
 query I
-SELECT count(*) >= 12 FROM duckdb_functions() WHERE function_name LIKE 'hf\_%'
+SELECT count(*) >= 12 FROM duckdb_functions() WHERE starts_with(function_name, 'hf_')
 ----
 1

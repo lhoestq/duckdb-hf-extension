@@ -132,7 +132,7 @@ void HFXetCasClient::UploadShard(const string &shard_bytes, string &shard_hash, 
 }
 
 HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, optional_ptr<FileOpener> opener,
-                                         const HFTarget &target, const string &path) {
+                                         const HFTarget &target, const string &path, const string *sha256_hex) {
 	HFXetUploadResult result;
 
 	// The token route is per repository, so the file being uploaded has to live in one - which is also
@@ -241,11 +241,17 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 	shard_file.file_hash = result.file_hash;
 	shard_file.segments = segments;
 	shard_file.chunk_hashes = chunk_hashes;
-	// No sha256 metadata extension. A bucket names a file by its xet hash, so there is nothing for the
-	// extra field to point at, and huggingface_hub uploads bucket adds the same way (SKIP_SHA256). A
-	// git-backed repository is the case that needs it: there the commit names the blob by sha256, and
-	// the extension is the only place the two hashes meet.
-	shard_file.has_sha256 = false;
+	// The sha256 metadata extension is what ties this content to the sha256 a git-backed commit will
+	// name it by, so a git upload passes it and a bucket upload does not (huggingface_hub uploads bucket
+	// adds the same way, with SKIP_SHA256). It travels as a DataHash, which parses hex as four
+	// little-endian words - the same convention as every other hash in the shard, and not the naive one.
+	if (sha256_hex && !sha256_hex->empty()) {
+		shard_file.has_sha256 = true;
+		auto parsed = HFXetHash::FromHex(*sha256_hex);
+		for (idx_t i = 0; i < 32; i++) {
+			shard_file.sha256[i] = parsed.bytes[i];
+		}
+	}
 
 	HFXetShardBuilder shard;
 	for (auto &xorb : shard_xorbs) {

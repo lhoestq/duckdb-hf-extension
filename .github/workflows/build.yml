@@ -40,3 +40,41 @@ jobs:
       # prebuilt DuckDB archives only exist for released versions).
       exclude_archs: "windows_amd64;windows_arm64;linux_amd64_musl;linux_arm64_musl;wasm_mvp;wasm_eh;wasm_threads${{ github.event_name == 'push' && ';osx_amd64;osx_arm64' || '' }}"
       skip_tests: false
+
+  # The matrix does run a test step, but it cannot run test/sql/hf_selftest.test: that file starts with
+  # `require hf`, and DuckDB only autoloads extensions on its own compiled-in AUTOLOADABLE_EXTENSIONS
+  # list, which a third-party name can never join - so the runner reports "require hf: 1" and skips the
+  # file, and a skipped file reports success. This job runs the same reference checks for real, through
+  # the plain shell, against the artifact another job built (a build artifact carries a matching duckdb
+  # binary + libduckdb in test-support.tar.gz precisely so tests can be run against it elsewhere). The
+  # bytes verified here are therefore the bytes a client downloads.
+  selftest:
+    name: reference checks on the built artifact (linux_amd64)
+    needs: distribution
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hf-*-extension-linux_amd64
+          path: artifact
+          merge-multiple: true
+      - name: unpack the duckdb binary the build shipped with
+        run: |
+          set -euo pipefail
+          support=$(find artifact -name test-support.tar.gz | head -1)
+          if [[ -z "$support" ]]; then
+            echo "::error::the artifact carries no test-support.tar.gz - it is only produced when the matrix builds with tests enabled"
+            find artifact -type f | head -40
+            exit 1
+          fi
+          mkdir -p build && tar -xzf "$support" -C build
+          ext=$(find artifact -name hf.duckdb_extension | head -1)
+          if [[ -z "$ext" ]]; then echo "::error::no hf.duckdb_extension in the artifact"; find artifact -type f | head -40; exit 1; fi
+          echo "EXT=$ext" >> "$GITHUB_ENV"
+          echo "DuckDB binary to test with:" && ./build/release/duckdb --version || true
+      - name: load it and run every offline check
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$PWD/build/release/src${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          DUCKDB=./build/release/duckdb bash scripts/ci_selftest.sh "$EXT"

@@ -18,7 +18,7 @@
 //                    format's real limit. Prints the bytes a session would send to `POST /v1/shards`.
 use xet_core_structures::metadata_shard::chunk_verification::range_hash_from_chunks;
 use xet_core_structures::metadata_shard::file_structs::{
-    FileDataSequenceEntry, FileDataSequenceHeader, FileVerificationEntry, MDBFileInfo,
+    FileDataSequenceEntry, FileDataSequenceHeader, FileMetadataExt, FileVerificationEntry, MDBFileInfo,
 };
 use xet_core_structures::metadata_shard::shard_format::MDBShardFileFooter;
 use xet_core_structures::metadata_shard::shard_in_memory::MDBInMemoryShard;
@@ -29,7 +29,7 @@ use std::fs::File;
 use std::ops::Deref;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use xet_core_structures::merklehash::{
-    compute_data_hash, compute_internal_node_hash, file_hash, xorb_hash, MerkleHash,
+    compute_data_hash, compute_internal_node_hash, file_hash, xorb_hash, DataHash, MerkleHash,
 };
 use xet_core_structures::xorb_object::xorb_format_test_utils::serialize_xorb_to_stream_reference;
 use xet_core_structures::xorb_object::{deserialize_chunks, CompressionScheme, XorbObject};
@@ -178,6 +178,13 @@ fn main() {
             .unwrap_or_else(|| "0".to_string())
             .parse()
             .expect("probe shard <max_xorb_bytes>");
+        // A third argument turns the file entry's metadata extension on, which is where a git-backed
+        // repo's file records the sha256 its commit names it by. Empty means no extension, which is
+        // what a bucket upload sends (huggingface_hub passes SKIP_SHA256 there).
+        let sha256_hex: Option<String> = std::env::args().nth(3).filter(|s| !s.is_empty());
+        let metadata_ext = sha256_hex
+            .as_ref()
+            .map(|hex| FileMetadataExt::new(DataHash::from_hex(hex).expect("probe shard <sha256> must be 64 hex digits")));
         use xet_data::deduplication::constants::{MAX_XORB_BYTES, MAX_XORB_CHUNKS};
         // config-overridable at runtime in the reference, hence the derefs; the defaults are what a
         // plain session uses and what the C++ constants hard-code
@@ -257,10 +264,10 @@ fn main() {
             mdb.add_xorb_block(info).expect("reference rejected the xorb block");
         }
         mdb.add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash, segments.len(), true, false),
+            metadata: FileDataSequenceHeader::new(file_hash, segments.len(), true, metadata_ext.is_some()),
             segments,
             verification: verification.iter().map(|hash| FileVerificationEntry::new(*hash)).collect(),
-            metadata_ext: None,
+            metadata_ext: metadata_ext.clone(),
         })
         .expect("reference rejected the file info");
 
@@ -280,6 +287,12 @@ fn main() {
         println!("shard_length={}", uploaded.len());
         println!("shard_full_length={}", full.len());
         println!("shard_file_lookup_offset={}", footer.file_lookup_offset);
+        println!(
+            "sha256_ext={}",
+            metadata_ext
+                .map(|ext| ext.sha256.hex())
+                .unwrap_or_default()
+        );
         println!("file_hex={}", file_hash.hex());
         println!("stored_bytes={stored_bytes}");
         println!("num_xorbs={}", xorb_hashes.len());

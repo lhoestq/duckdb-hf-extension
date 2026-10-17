@@ -10,8 +10,25 @@ Two version numbers are in play, and they are independent:
   per DuckDB identifier per platform, and rebuilding for a newer DuckDB pre-release is a rebuild,
   not a version bump.
 
-## Unreleased — installable by someone else
+## 0.0.2-pre3 — installable by someone else, and a git repo written through Xet
 
+* **Writing to a git-backed repository now puts the content in Xet.** `COPY (…) TO
+  'hf://datasets/you/thing/data.parquet'` chunks the file, stores its xorbs and its metadata shard, and
+  then sends *the same* `lfsFile {path, algo: sha256, oid, size}` commit it always sent — it just stops
+  uploading the bytes to the LFS endpoint, because the shard's file entry now carries the sha256 as its
+  metadata extension, the one place where the content's xet hash and the sha256 the commit names it by
+  are stated together. Proven live on a fresh 6 MB of `/dev/urandom` (a blob no LFS store had ever seen):
+  commit accepted, file readable at its url, bytes identical.
+* `hf_xet_write` (default on) is the switch, and the plain LFS upload is its fallback rather than a
+  second mode: if the content store cannot be reached the bytes go the old way and the commit is still
+  the same one, so an unreachable CAS costs a slow write, not a failed one. If the write fails anyway the
+  error says the Xet upload had already failed and why.
+* That sha256 is parsed as a `DataHash` — four little-endian words, the same convention every other hash
+  in the shard uses, *not* 32 plain bytes. The wrong reading still produces 32 bytes and a valid-looking
+  shard, so nothing short of a reference vector notices: two of them (`xet_oracle.py`) now pin the
+  extension one-segment and multi-segment, and `hf_xet_selftest()` checks the file entry's flags word too,
+  since a shard that writes the extension without flagging it (or flags it without writing it) is
+  unreadable in a way a byte comparison alone would not name.
 * `INSTALL hf FROM 'https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main/unsigned'`
   works, and so does the signed form with a pinned key. `scripts/publish_extension_repo.py` builds the
   tree into a Hub dataset and prints the exact client incantations; it reads the version directory out of
@@ -27,8 +44,18 @@ Two version numbers are in play, and they are independent:
   * nothing tagged the DuckDB checkout, so binaries would have carried the right code and the wrong
     version identifier, and every client would have refused to `LOAD` them; `duckdb_tag` is the input
     that makes `git describe` say `v2.0.0-alpha47600`.
-* `test/sql/hf_selftest.test` puts the 296 offline reference checks and two url-parser refusals behind
-  `make test_release`, so a build with a broken hash port stops the build rather than the user.
+* `test/sql/hf_selftest.test` holds the offline reference checks and two url-parser refusals, and it is no
+  longer the only place they can run. They could not run where they were: the file opens with `require hf`,
+  DuckDB autoloads only extensions on its compiled-in `AUTOLOADABLE_EXTENSIONS` list, a third-party name
+  cannot get onto it, so `make test_release` and the matrix's test step both answered `require hf: 1` and
+  moved on — and **a skipped sqllogictest file reports success**, which is how a suite of reference
+  vectors sat there testing nothing while looking green. `scripts/ci_selftest.sh` now loads a built
+  `hf.duckdb_extension` into the duckdb binary that build's own `test-support.tar.gz` ships and compares
+  answers and counts itself, and a new `selftest` job runs it on the artifact other jobs produced — the
+  bytes a client downloads, verified by something that cannot mistake a skip for a pass. Opening that
+  file was worth doing for its own sake: its last line counted `hf_*` functions with
+  `LIKE 'hf\_%'`, and DuckDB's `LIKE` takes the backslash literally — it asserted `>= 12` about a query
+  that returns 0, in a file no run had ever executed.
 * macOS builds run on tags and manual dispatches rather than every push: this repository is private,
   where macOS minutes bill at 10x, and every job compiles DuckDB from source because prebuilt DuckDB
   archives exist only for released versions.
