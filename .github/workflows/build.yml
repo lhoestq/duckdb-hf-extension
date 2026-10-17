@@ -4,9 +4,11 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths-ignore: ["**/*.md"]
+    # every job here compiles DuckDB from source, so a build is only worth starting when something a
+    # build consumes changed. scripts/ is tooling that runs *on* the artifact, never to produce it
+    paths-ignore: ["**/*.md", "scripts/**"]
   pull_request:
-    paths-ignore: ["**/*.md"]
+    paths-ignore: ["**/*.md", "scripts/**"]
 
 permissions:
   contents: read
