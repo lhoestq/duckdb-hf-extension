@@ -16,11 +16,14 @@ SELECT check_name, expected, got FROM hf_xet_selftest() WHERE NOT assert_passed 
 
 -- A floor rather than an exact count, so adding vectors is never a reason to edit this file. The
 -- breakdown is: leaf/file/xorb hashes per input vector, chunk boundaries per input, mean-tree
--- vectors from xet-core's own correctness table, interior node hashes, hex/base64 renderings.
+-- vectors from xet-core's own correctness table, interior node hashes, hex/base64 renderings, and the
+-- serialized xorb objects the reference writer produces.
 SELECT count(*) >= 150 AS assert_vectors_run,
        count(*) FILTER (WHERE NOT assert_passed) = 0 AS assert_nothing_failed,
        count(*) FILTER (WHERE check_name LIKE '%chunk boundaries%') >= 8 AS assert_chunking_covered,
-       count(*) FILTER (WHERE check_name LIKE '%file hash%') >= 40 AS assert_tree_covered
+       count(*) FILTER (WHERE check_name LIKE '%file hash%') >= 40 AS assert_tree_covered,
+       -- every xorb we would upload, pinned byte for byte against the reference writer's output
+       count(*) FILTER (WHERE check_name LIKE '%xorb bytes%') >= 7 AS assert_xorb_serialization_covered
 FROM hf_xet_selftest();
 
 -- the self-test is pure computation, so it must be safe to call repeatedly, and must coexist with

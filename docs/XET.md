@@ -214,13 +214,52 @@ no cargo, and `scripts/xet_oracle.py --check` is what notices when a xet-core up
 under the port. Inputs are reproducible specs - literal bytes, a repeated pattern, splitmix64 - so a
 vector says the same thing on every machine and nothing has to be re-derived by hand.
 
-## M3 checklist (next)
+## M3 xorb writer (done, for the uncompressed scheme)
 
-* Chunk serialization inside a xorb, and the compression schemes: `None = 0`, `LZ4 = 1`,
-  `ByteGrouping4LZ4 = 2`, `Auto = 99`. DuckDB vendors LZ4 *block* (`third_party/lz4`) but not lz4frame,
-  so decide between vendoring the frame layer and writing the header by hand.
-* Footer sections `XETBLOB` / `XBLBHSH` / `XBLBBND`, with the nonce excluded from the hash.
-* Limits that bound a single upload: `MAX_XORB_BYTES` 64 MiB, `MAX_XORB_CHUNKS` 8192,
-  `XORB_BLOCK_SIZE` 64 MiB.
-* `examples/xorb-check` has to accept what the port writes, and `xorb_hash` over the port's chunk list
-  must equal the hash the resulting file implies.
+`src/hf_xet_xorb.cpp` writes a complete serialized xorb: a chunk section of
+`<8-byte header><chunk bytes>` per chunk, then the V1 footer - `XETBLOB` + version + xorb hash, the
+`XBLBHSH` hash section, the `XBLBBND` section carrying both boundary lists (physical offsets with
+headers included, uncompressed offsets without), `num_chunks` repeated three times in total, the two
+section offsets, a 16-byte reserved buffer whose first 4 bytes carry the per-upload nonce, and the
+footer's own length. Everything little-endian, hashes as raw bytes, the 3-byte lengths of the chunk
+header as-is.
+
+What the format demands that is easy to get quietly wrong:
+
+* **The two section offsets count back from the end of the footer *struct*, which excludes the
+  trailing length u32.** A reader takes the last 4 bytes, seeks back `4 + info_length`, and finds
+  the first section; the second and third are found by those offsets. Off-by-four is a xorb that
+  serializes fine and cannot be read back.
+* **The nonce is excluded from the xorb hash on purpose.** The hash covers chunk contents only, so
+  the reserved buffer is the one field a client can randomize to make two identical uploads
+  distinguishable on the wire without changing what they are. The vectors pin the all-zero nonce;
+  uploads will fill it in.
+* **Physical and unpacked boundaries are different lists.** One is offsets in the serialized object
+  (header included), the other is cumulative uncompressed lengths; both are `u32` per chunk and both
+  end at the total of their own space. Swapping them produces a xorb that reads back with the wrong
+  chunk sizes while hashing correctly.
+* **The size limits are on uncompressed bytes (64 MiB) and chunk count (8192)**, not on serialized
+  size, because the CAS addresses a xorb by the hash of its chunks and does not know our layout.
+* The self-test follows the footer's own offsets and checks the section identifiers are where the
+  footer claims, rather than re-deriving them - trusting the arithmetic that produced them would
+  test nothing.
+
+Compression is `None` for now, which is a legal scheme rather than a stub: the hash covers
+uncompressed content, so an uncompressed xorb is as valid as a compressed one, and `CompressionScheme`
+is refused in the constructor with a pointer here rather than silently writing bytes the Hub cannot
+decode. LZ4 (scheme 1) needs the *frame* format - DuckDB vendors LZ4 block only - and byte-for-byte
+equality with the reference's `lz4_flex` output is not required, since any valid frame decodes to the
+same chunk and the hash is over the chunk; what is required is that the reference reader gets the
+original bytes back. BG4 (scheme 2) is a byte-regrouping permutation on top of that. Both are
+upload-size optimizations and can land after the write path works.
+
+## M4 checklist (next)
+
+* Token exchange: the refresh-route endpoint returns the CAS endpoint and a CAS-scoped token from a
+  HF token; that is the only place the CAS URL comes from, so it is fetched per session, not baked in.
+* `PUT {cas}/v1/xorbs/{prefix}/{xorb_hash}` with the xorb bytes; `POST /v1/exist/...` (batch) to skip
+  chunks and xorbs the CAS already has, which is the entire deduplication story.
+* Retries: distinguish retryable (429/5xx/connection) from terminal, with the reference's backoff,
+  and a bounded number of in-flight uploads.
+* Test against the in-tree simulation server (`xet_client/src/cas_client/simulation`) before pointing
+  any of it at the production Hub.

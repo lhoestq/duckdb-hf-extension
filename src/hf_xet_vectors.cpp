@@ -2,6 +2,7 @@
 // Regenerate with `scripts/xet_oracle.py`; `--check` fails when the port's stored vectors
 // no longer match what the reference implementation produces.
 #include "hf_xet_hash.hpp"
+#include "hf_xet_xorb.hpp"
 
 namespace duckdb {
 
@@ -39,6 +40,40 @@ const vector<HFXetHashVector> &HFXetHashVectors() {
 		{"splitmix64 n=4000000 seed=11", HFXetTestInput::SPLITMIX, nullptr, 4000000ULL, 11ULL,
 		 "330bbc88f0d9744432e78eaaf2772d9ad5f4a04c8cc7539a2be74fe88bb26b1f", "RHTZ8Ii8CzOaLXfyqo7nMppTx4xMoPTVH2uyi-hP5ys", "4474d9f088bc0b339a2d77f2aa8ee7329a53c78c4ca0f4d51f6bb28be84fe72b", "85114,77441,43731,131072,73231,131072,54073,41919,28652,23054,85628,8535,33619,104081,89084,67936,36314,15517,45984,9793,105858,43958,55527,10519,61595,114959,63199,33240,120052,131072,131072,125698,22904,42486,11019,84134,35020,36828,22669,51024,89927,51910,123799,61254,41772,85230,59912,111431,15785,55788,74241,55074,21327,131072,131072,71371,36610,95729,30838,13525,131072,22578",
 		 "a5dcb93b0b7a9ac069a5cafa927b59195c47a380ffda51e87b9eb0b4a5b8ee6f", "5a6d5e62d33fc459b5045ddf4f09155b45ee3bca8744673cfee6d53ffe326e03"},
+	};
+	return vectors;
+}
+
+const vector<HFXetXorbVector> &HFXetXorbVectors() {
+	static const vector<HFXetXorbVector> vectors = {
+		// literal "hello world": 1 chunks, 155 bytes serialized
+		{"literal \"hello world\"", HFXetTestInput::LITERAL, 0ULL, 0ULL, "hello world", HFXetCompressionScheme::NONE,
+		 1, 155, "4e39378b9d359f118190557a1f44130219a54e5fcfa07bd96cf50b466fe651b1", "8654fed87a5fe0183f7a455459c2b19a8c2e276656e7b20d7884ba7b9d5927e1",
+		 "11", "19"},
+		// empty input: 0 chunks, 96 bytes serialized
+		{"empty input", HFXetTestInput::LITERAL, 0ULL, 0ULL, "", HFXetCompressionScheme::NONE,
+		 0, 96, "0000000000000000000000000000000000000000000000000000000000000000", "80e0a18173fc8d7eabb727d2cdc2f2bea5ce84a7bf42fb60c452046199394b7d",
+		 "", ""},
+		// one byte: 1 chunks, 145 bytes serialized
+		{"one byte", HFXetTestInput::LITERAL, 0ULL, 0ULL, "a", HFXetCompressionScheme::NONE,
+		 1, 145, "a4d4ed80fcb2fe5177fc59321d3e6f90faf23e35a48d58303114bf073f34178a", "32501448419df7a44dc1357456e30f36404d2126d7796541c5fccaa84922e615",
+		 "1", "9"},
+		// 200000 zero bytes: 2 chunks, 200192 bytes serialized
+		{"200000 zero bytes", HFXetTestInput::REPEAT, 200000ULL, 0ULL, "", HFXetCompressionScheme::NONE,
+		 2, 200192, "aecf4fdd5e8dba6b31d83158642b4f8ec9aad4bfe260e01e12d8a027345053d3", "23481804dead0f125564f37193dff37fcf2e50962a674477d460eb2bba523f8d",
+		 "131072,68928", "131080,200016"},
+		// 120000 bytes of repeated sentence: 1 chunks, 120144 bytes serialized
+		{"120000 bytes of repeated sentence", HFXetTestInput::REPEAT, 120000ULL, 0ULL, "the quick brown fox jumps over the lazy dog\n", HFXetCompressionScheme::NONE,
+		 1, 120144, "9f418a4d19a0e6684521e528fea44fe9bc36deb304e18321f629c177cfc04220", "22aa545044ce954dbb151717d8e38c4d209811d1fbd472e967b4dfd2bfb0286a",
+		 "120000", "120008"},
+		// splitmix64 n=1000 seed=1: 1 chunks, 1144 bytes serialized
+		{"splitmix64 n=1000 seed=1", HFXetTestInput::SPLITMIX, 1000ULL, 1ULL, nullptr, HFXetCompressionScheme::NONE,
+		 1, 1144, "d2a5ca151e5ee0acde106d5ad0d1e63d61b9afd681b526c0688ede2681aca2eb", "8cc43c8aa80129082365a6371db52b5ab175d6af68ced20a52e0a2f6a2d47b3f",
+		 "1000", "1008"},
+		// splitmix64 n=300000 seed=7: 6 chunks, 300384 bytes serialized
+		{"splitmix64 n=300000 seed=7", HFXetTestInput::SPLITMIX, 300000ULL, 7ULL, nullptr, HFXetCompressionScheme::NONE,
+		 6, 300384, "d471e16e73f4e7df662d465ce13a3b27a820b9f8b2c0e36fbe2bfffb6b75ec48", "28e11e3e68d4f1f0fccb5c9870d0caeb4e552f13ad288f95cdc551d8d3f90f5c",
+		 "22353,16397,131072,68533,34138,27507", "22361,38766,169846,238387,272533,300048"},
 	};
 	return vectors;
 }

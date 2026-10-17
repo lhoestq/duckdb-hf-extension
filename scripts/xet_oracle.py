@@ -41,6 +41,11 @@ INPUT_VECTORS = [
     ("splitmix64 n=4000000 seed=11", KIND_SPLITMIX, "", 4000000, 11),
 ]
 
+# inputs serialized into xorbs by the reference writer (scheme: none). The 4 MB vector is left out:
+# a xorb is capped at 64 MiB / 8192 chunks, so splitting is the upload session's business (M5), and
+# the self-test would spend its time rebuilding a file it already covers
+XORB_VECTORS = [v for v in INPUT_VECTORS if v[3] < 1000000 or v[3] == 0]
+
 # inputs for the interior-node hash, which hashes pre-formatted "hex : size\n" text
 INTERNAL_VECTORS = [
     ("single node", "0" * 64 + " : 0\n"),
@@ -129,6 +134,43 @@ def build_reference(bin_dir):
     return vectors
 
 
+def build_xorbs():
+    """Serialize each input with xet-core's writer, and pin the result with the reference's own hashes.
+
+    The whole object is fingerprinted with `probe data` over the serialized bytes: the xorb hash is a
+    merkle root over chunk *contents*, so a footer can be misaligned and still hash correctly. Only a
+    digest of the byte stream tells a layout bug apart from a correct hash.
+    """
+    probe = os.path.join(ROOT, "tools", "xet_probe", "target", "release", "xet-probe")
+    vectors = []
+    with tempfile.TemporaryDirectory() as work:
+        path = os.path.join(work, "input.bin")
+        for name, kind, pattern, size, seed in XORB_VECTORS:
+            data = build_input(kind, pattern, size, seed)
+            with open(path, "wb") as f:
+                f.write(data)
+            out = subprocess.run([probe, "xorb", "none", path + ".xorb"], input=data, check=True,
+                                 capture_output=True).stdout.decode()
+            fields = dict(line.split("=", 1) for line in out.splitlines() if not line.startswith("chunk "))
+            chunk_lines = [line.split()[1:] for line in out.splitlines() if line.startswith("chunk ")]
+            xorb = open(path + ".xorb", "rb").read()
+            # the fingerprint is the same keyed hash the port already implements and tests
+            fingerprint = dict(line.split("=", 1) for line in
+                               subprocess.run([probe, "data"], input=xorb, check=True,
+                                              capture_output=True).stdout.decode().splitlines())["hex"]
+            # physical boundaries are cumulative, which is what the footer stores
+            physical, running = [], 0
+            for chunk_hex, chunk_size in chunk_lines:
+                running += 8 + int(chunk_size)
+                physical.append(running)
+            vectors.append((name, kind, pattern, size, seed, "none",
+                            int(fields["num_chunks"]), int(fields["length"]),
+                            fields["xorb_hex"], fingerprint,
+                            ",".join(s for _, s in chunk_lines),
+                            ",".join(str(p) for p in physical)))
+    return vectors
+
+
 def build_internal():
     rows = []
     for name, text in INTERNAL_VECTORS:
@@ -179,6 +221,7 @@ def main():
     revision = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=XET_CORE,
                               capture_output=True, text=True).stdout.strip()
     inputs = build_reference(bin_dir)
+    xorbs = build_xorbs()
     internal = build_internal()
     renderings = build_renderings()
     trees = build_tree_vectors()
@@ -189,6 +232,7 @@ def main():
     add("// Regenerate with `scripts/xet_oracle.py`; `--check` fails when the port's stored vectors")
     add("// no longer match what the reference implementation produces.")
     add('#include "hf_xet_hash.hpp"')
+    add('#include "hf_xet_xorb.hpp"')
     add("")
     add("namespace duckdb {")
     add("")
@@ -203,6 +247,22 @@ def main():
         add("\t\t %s, %s, %s, %s," % (c_string(chunk), c_string(b64), c_string(plain),
                                       c_string(chunk_sizes)))
         add("\t\t %s, %s}," % (c_string(file_hash), c_string(xorb_hash)))
+    add("\t};")
+    add("\treturn vectors;")
+    add("}")
+    add("")
+    scheme_id = {"none": "HFXetCompressionScheme::NONE", "lz4": "HFXetCompressionScheme::LZ4"}
+    add("const vector<HFXetXorbVector> &HFXetXorbVectors() {")
+    add("\tstatic const vector<HFXetXorbVector> vectors = {")
+    for (name, kind, pattern, size, seed, scheme, num_chunks, length, xorb_hash, fingerprint,
+         chunk_sizes, physical) in xorbs:
+        add("\t	// %s: %d chunks, %d bytes serialized" % (name, num_chunks, length))
+        add("\t	{%s, %s, %dULL, %dULL, %s, %s," % (c_string(name), kind,
+                                                    0 if kind == KIND_LITERAL else size, seed,
+                                                    c_string(pattern) if kind != KIND_SPLITMIX else "nullptr",
+                                                    scheme_id[scheme]))
+        add("\t	 %d, %d, %s, %s," % (num_chunks, length, c_string(xorb_hash), c_string(fingerprint)))
+        add("\t	 %s, %s}," % (c_string(chunk_sizes), c_string(physical)))
     add("\t};")
     add("\treturn vectors;")
     add("}")
@@ -254,8 +314,9 @@ def main():
         return 1
     with open(OUT, "w") as f:
         f.write(text)
-    print("wrote src/hf_xet_vectors.cpp: %d input vectors, %d tree vectors, %d internal, %d rendering"
-          % (len(inputs), len(trees), len(internal), len(renderings)))
+    print("wrote src/hf_xet_vectors.cpp: %d input vectors, %d xorb vectors, %d tree vectors, "
+          "%d internal, %d rendering"
+          % (len(inputs), len(xorbs), len(trees), len(internal), len(renderings)))
     return 0
 
 

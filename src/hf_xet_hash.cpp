@@ -264,24 +264,24 @@ HFXetHash HFXetFileHash(const vector<HFXetHashNode> &chunks) {
 // self-test
 //===----------------------------------------------------------------------===//
 
-string HFXetVectorInput(const HFXetHashVector &test) {
-	switch (test.kind) {
+string HFXetTestInputBytes(HFXetTestInput kind, uint64_t size, uint64_t seed, const char *pattern) {
+	switch (kind) {
 	case HFXetTestInput::LITERAL:
-		return string(test.pattern ? test.pattern : "");
+		return string(pattern ? pattern : "");
 	case HFXetTestInput::REPEAT: {
-		string pattern = (test.pattern && *test.pattern) ? test.pattern : string(1, '\0');
+		string repeated = (pattern && *pattern) ? pattern : string(1, '\0');
 		string out;
-		while (out.size() < test.size) {
-			out += pattern;
+		while (out.size() < size) {
+			out += repeated;
 		}
-		out.resize(test.size);
+		out.resize(size);
 		return out;
 	}
 	case HFXetTestInput::SPLITMIX: {
 		// xet_data's create_random_data: splitmix64, little-endian words, truncated to size
 		string out;
-		uint64_t state = test.seed;
-		while (out.size() < test.size) {
+		uint64_t state = seed;
+		while (out.size() < size) {
 			state += 0x9E3779B97F4A7C15ULL;
 			uint64_t z = state;
 			z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -291,12 +291,16 @@ string HFXetVectorInput(const HFXetHashVector &test) {
 				out += char((z >> (8 * i)) & 0xFF);
 			}
 		}
-		out.resize(test.size);
+		out.resize(size);
 		return out;
 	}
 	default:
 		return string();
 	}
+}
+
+string HFXetVectorInput(const HFXetHashVector &test) {
+	return HFXetTestInputBytes(test.kind, test.size, test.seed, test.pattern);
 }
 
 idx_t HFXetHashSelfTest(vector<std::tuple<string, bool, string, string>> &results) {

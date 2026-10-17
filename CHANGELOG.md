@@ -10,6 +10,15 @@ Two version numbers are in play, and they are independent:
   per DuckDB identifier per platform, and rebuilding for a newer DuckDB pre-release is a rebuild,
   not a version bump.
 
+## Unreleased — the Xet write path
+
+* The extension can serialize a xorb — the object the CAS stores — byte for byte identically to the
+  reference client: chunk headers, the `XETBLOB`/`XBLBHSH`/`XBLBBND` footer, its section offsets and
+  its per-upload nonce. `hf_xet_selftest()` now pins 226 checks, including the whole serialized byte
+  stream of seven reference xorbs (empty input, one chunk, many chunks). Chunks are stored
+  uncompressed for now, which is a scheme of the format rather than a stub: a xorb hashes over its
+  uncompressed contents, so an uncompressed xorb is as valid as a compressed one.
+
 ## 0.0.2-pre1 — the start of Xet
 
 The hashing half of a Xet client, verified against the reference implementation rather than assumed.

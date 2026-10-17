@@ -267,13 +267,12 @@ what a given binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
   local repository, both unsigned and signed (signature required, tampered binaries refused)
 * ✔ multipart git-LFS uploads (the Hub switches a blob to `basic multipart` above ~10 MB: one
   presigned PUT per part, then a completion POST with the part etags)
-* ✔ the Xet *hashing* half (`docs/XET.md`, M1+M2): chunk hashes, file/xorb merkle roots and the
-  content-defined chunker agree byte for byte with `xet-core`, checked by `hf_xet_selftest()` /
+* ✔ the Xet *client* halves that are pure computation (`docs/XET.md`, M1-M3): chunk hashes,
+  file/xorb merkle roots, the content-defined chunker, and the serialized xorb itself - each one
+  byte-for-byte identical to what `xet-core` produces, checked by `hf_xet_selftest()` (226 checks) /
   `scripts/smoke_xet.sh` against vectors generated from the reference implementation.
-* ✘ Xet *uploads* are not implemented yet (M3-M5: xorb format, CAS client, shards) — the git-LFS
-  transfer is used instead, which the Hub
-  accepts for every repo type. Chunking + hashing client-side is the 0.0.2 plan, in
-  [docs/XET.md](docs/XET.md)
+* ✘ Xet *uploads* are not implemented yet (M4-M5: the CAS client, then metadata shards and the commit)
+  — the git-LFS transfer is used instead, which the Hub accepts for every repo type.
 * ✘ `COPY ... TO 'hf://buckets/...'`: pushing DuckDB's own bytes into a bucket needs an Xet
   `xetHash`, which only `hf_xet` computes; the extension refuses with a message pointing at
   `hf buckets cp` and `hf_bucket_copy`. The same reason makes a `hf_bucket_copy` of a file the Hub

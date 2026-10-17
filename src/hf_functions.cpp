@@ -4,6 +4,7 @@
 #include "hf_functions.hpp"
 #include "hf_settings.hpp"
 #include "hf_xet_hash.hpp"
+#include "hf_xet_xorb.hpp"
 
 #include "duckdb/common/file_opener.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -1100,6 +1101,7 @@ static unique_ptr<FunctionData> HFXetSelfTestBind(ClientContext &, TableFunction
 	// The checks are pure computation over reference vectors compiled into the extension, so they run
 	// at bind time with no connection, token, or network.
 	bind_data->failures = HFXetHashSelfTest(bind_data->results);
+	bind_data->failures += HFXetXorbSelfTest(bind_data->results);
 
 	names.push_back(Identifier("check_name"));
 	return_types.push_back(LogicalType::VARCHAR);

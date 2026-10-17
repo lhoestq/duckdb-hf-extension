@@ -168,6 +168,9 @@ const vector<HFXetRenderingVector> &HFXetRenderingVectors();
 const vector<HFXetTreeVector> &HFXetTreeVectors();
 
 //! Reproduce a vector's input bytes.
+//! Materialize a vector's input bytes from its reproducible spec - shared by the hash and xorb
+//! self-tests, so both run the same bytes the oracle ran.
+string HFXetTestInputBytes(HFXetTestInput kind, uint64_t size, uint64_t seed, const char *pattern);
 string HFXetVectorInput(const HFXetHashVector &vector);
 
 //! Check every stored vector. One row per check: (name, passed, expected, got). Surfaced by the

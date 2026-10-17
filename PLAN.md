@@ -110,8 +110,10 @@ CREATE TABLE x AS SELECT * FROM 'hf://datasets/foo/data.parquet';
       xet-core (input/file/xorb hashes, chunk size lists, the mean-tree table from xet-core's own
       correctness test, hex/base64 renderings), `hf_xet_selftest()` replays it inside the extension,
       `scripts/smoke_xet.sh` is the 152-check suite. `--check` notices xet-core drifting.
-- [ ] M3 xorb writer: chunk serialization, compression (none, lz4 frame, bg4+lz4), footer with
-      `XBLBHSH` / `XBLBBND` + nonce (nonce excluded from the hash); `examples/xorb-check` accepts it.
+- [x] M3 xorb writer: chunk serialization + V1 footer (`XETBLOB` / `XBLBHSH` / `XBLBBND` + nonce,
+      nonce excluded from the hash), uncompressed chunks; `src/hf_xet_xorb.cpp`, vectors generated the
+      same way, and the whole serialized object fingerprinted - the port's bytes equal the reference
+      writer's. LZ4/BG4 compression is deferred (docs/XET.md), and is an upload-size matter only.
 - [ ] M4 CAS client: refresh-route token exchange, `PUT {cas}/v1/xorbs/{key}`, exists checks, retried
       against the in-tree simulation server before the real Hub.
 - [ ] M5 shard + commit: upload the session shard, commit with the file hash. First target is

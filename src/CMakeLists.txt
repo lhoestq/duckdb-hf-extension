@@ -12,6 +12,7 @@ set(HF_SOURCES
     hf_functions.cpp
     hf_xet_chunk.cpp
     hf_xet_hash.cpp
+    hf_xet_xorb.cpp
     hf_xet_vectors.cpp)
 
 set(HF_THIRD_PARTY ${CMAKE_CURRENT_SOURCE_DIR}/../third_party)

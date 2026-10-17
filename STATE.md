@@ -2,7 +2,41 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-17, ~09:40 UTC)
+## Current position (2026-10-17, ~10:55 UTC)
+
+**Milestone: M3, the xorb writer, is in and byte-exact. `hf_xet_selftest()` is 226 checks (was 152),
+all passing; the extension's serialized xorbs are bit-identical to what xet-core's writer produces,
+including the empty-input case. Tagged `v0.0.2-pre1` before this; nothing uploads through Xet yet -
+M4 (CAS client) is next.**
+
+* `src/hf_xet_xorb.cpp`: `HFXetXorbBuilder` accumulates chunks (hashing them with M1's leaf hash as
+  they arrive), tracks the footer's physical and unpacked boundary lists, and `Finish()` writes the V1
+  footer - `XETBLOB`+version+xorb hash, `XBLBHSH` hash section, `XBLBBND` boundaries, three copies of
+  `num_chunks`, the two section offsets, the 16-byte reserved buffer (first 4 = per-upload nonce,
+  excluded from the hash by design), and the footer length. Little-endian throughout, 3-byte lengths in
+  the 8-byte chunk header. Limits are uncompressed bytes (64 MiB) and chunk count (8192), asserted in
+  `AddChunk`, because the CAS names a xorb by its chunk hash and never sees our layout.
+* Verification for a writer needs a reader, and the format's own reader is the one that matters:
+  `tools/xet_probe` gained `xorb <scheme> <out>` (chunk + serialize with the reference, using
+  xet-core's own `xorb_format_test_utils`) and `xorb-read <path>` (parse a xorb back with
+  `XorbObject::deserialize`, follow its footer offsets, recompute every chunk hash from the bytes the
+  footer points at). The probe now depends on `xet-data` as well as `xet-core-structures`; still
+  dev-only, `.gitignore`d build output.
+* Byte-exactness is pinned by fingerprint: each xorb vector stores `HFXetChunkHash` over the *entire*
+  serialized object, so a footer byte out of place fails a check instead of quietly producing a xorb
+  that hashes right and cannot be read. The self-test also follows the offsets we write and asserts the
+  section identifiers sit where the footer claims - the reader's view, not the writer's arithmetic.
+  Two failures on the first run were both in the test, not the writer (a footer length that excludes
+  its own u32, and comparing each section's ident against `XETBLOB`); the fingerprints passed first.
+* Compression stays `None`: legal, and honest. LZ4 needs the *frame* format (DuckDB vendors LZ4 block
+  only), and its output does not have to match `lz4_flex` byte for byte - the hash covers uncompressed
+  chunk data, so any valid frame is fine as long as the reference reader recovers the bytes. Both LZ4
+  and BG4 are upload-size work, after the write path exists. The constructor refuses other schemes
+  with a pointer to `docs/XET.md` rather than emitting bytes the Hub cannot decode.
+* Also this session, before the tag: `hf_bucket_copy(..., hash_wait := n)` for the hub's async hashing,
+  and `v0.0.2-pre1` tagged (extension version string, write-suite assertion, CHANGELOG entry).
+
+## Previous position (2026-10-17, ~09:40 UTC)
 
 **Milestone: Xet M1 + M2 are in and byte-exact. `hf_xet_selftest()` is 152 checks against vectors
 generated from xet-core, all green, and `scripts/smoke_xet.sh` runs them as a fifth suite (`run_all.sh`:
