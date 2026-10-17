@@ -38,8 +38,12 @@ constexpr idx_t HF_MAX_HTTP_ATTEMPTS = 5;
 constexpr idx_t HF_REPO_SETTLE_ATTEMPTS = 4;
 constexpr idx_t HF_REPO_SETTLE_BACKOFF = 250; // ms, doubling: 250 + 500 + 1000 + 2000
 
-constexpr idx_t HF_COPY_HASH_ATTEMPTS = 4;
-constexpr idx_t HF_COPY_HASH_BACKOFF = 250; // ms, doubling: 250 + 500 + 1000 + 2000
+//! A bucket copy needs the hub's own content hash of each source file, and a file committed seconds ago is
+//! hashed by the hub in its own time. Ask again for up to this long, backing off each round; a file still
+//! unhashed afterwards is reported as skipped rather than waited on forever.
+constexpr int64_t HF_COPY_HASH_WAIT_MS = 30000;
+constexpr idx_t HF_COPY_HASH_BACKOFF = 250;    // ms
+constexpr idx_t HF_COPY_HASH_MAX_BACKOFF = 4000;
 //! Single-PUT (non multipart) LFS uploads are capped by S3 at 5GiB
 constexpr idx_t HF_MAX_SINGLE_UPLOAD_SIZE = 5ULL * 1024 * 1024 * 1024;
 

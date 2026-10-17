@@ -2,7 +2,34 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-16, ~23:14 UTC)
+## Current position (2026-10-17, ~09:40 UTC)
+
+**Milestone: Xet M1 + M2 are in and byte-exact. `hf_xet_selftest()` is 152 checks against vectors
+generated from xet-core, all green, and `scripts/smoke_xet.sh` runs them as a fifth suite (`run_all.sh`:
+xet 4 + read 55 + write 45 +5 refusals + models 24 + buckets 18 +3 refusals). Bucket copies got a
+`hash_wait` parameter for the hashing race. Nothing uploads through Xet yet - M3 (xorb format) is next.**
+
+* What the port is: `src/hf_xet_hash.cpp` (BLAKE3 keyed leaf/interior hashes, `hex()`/`base64()`, the mean
+  tree, file/xorb/salted-file hashes), `src/hf_xet_chunk.cpp` (streaming gear-hash chunker, 64 KiB target /
+  8 KiB min / 128 KiB max), `third_party/blake3` (vendored C, all SIMD disabled so all six CI platforms
+  build one way), `third_party/gearhash/gearhash_table.hpp` (generated from the crate's own table).
+* Verification is generated, never hand-written: `scripts/xet_oracle.py` runs xet-core's `chunk`/`hash`
+  examples plus a small Rust probe (`tools/xet_probe`) and writes `src/hf_xet_vectors.cpp` - leaf/file/xorb
+  hashes and chunk-size lists for 8 reproducible inputs, 36 mean-tree vectors lifted from xet-core's own
+  `test_correctness` table, interior-node hashes, hex/base64 renderings. `--check` re-derives and diffs.
+  Inputs are specs (literal, repeated pattern, splitmix64), not blobs, so vectors are machine-portable.
+* Two bugs the vectors caught, both silent: the DATA/INTERNAL key constants were transcribed wrong (every
+  hash wrong, all plausible), and the chunk mask was built over the gear hash's *low* bits instead of
+  `mask << mask.leading_zeros()` - that chunks nearly every byte and *still* matches the reference on
+  constant and tiny inputs, so only the splitmix vectors expose it. Both are written up in `docs/XET.md`.
+* The oracle needs cargo and a `xet-core` checkout, and only to regenerate vectors; the vectors are
+  committed, so CI and the smoke suite need neither. `cargo build --release -p xet-data --examples` - the
+  `hash` example panics in debug (clap asserts on the `-h` collision).
+* `hf_bucket_copy(…, hash_wait := n)`: was sleeping on every call because the pending set was pruned only
+  after the first sleep; now the wait is bounded by a time budget, decided by what still lacks a hash, and
+  configurable (default 30s, 0 disables). This is what the buckets suite flakiness really needed.
+
+## Previous position (2026-10-16, ~23:14 UTC) — 0.0.1
 
 **Milestone: 0.0.1 is packaged. All four live suites are green (`scripts/run_all.sh`: read 55, write 45 +5
 expected refusals, models 24, buckets 16 +2 expected refusals), the extension reports its own version

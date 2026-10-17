@@ -16,3 +16,6 @@ __pycache__/
 .tmp/
 logs/
 compile_flags.txt
+
+# the xet reference probe is a cargo build of xet-core, never part of the extension
+tools/*/target/

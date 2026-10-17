@@ -101,11 +101,15 @@ CREATE TABLE x AS SELECT * FROM 'hf://datasets/foo/data.parquet';
 
 ## Phase 6 — Xet client (0.0.2), research in `docs/XET.md`
 
-- [ ] M1 hashing: BLAKE3 keyed hashes (two fixed keys), the byte-swapped-per-word hex rendering,
+- [x] M1 hashing: BLAKE3 keyed hashes (two fixed keys), the byte-swapped-per-word hex rendering,
       the mean-tree rule (cut when `hash[3] % 4 == 0`, groups of 2..9, parent hashed over
-      `"{hex} : {size}\n"` lines), then file / xorb / range hashes.
-- [ ] M2 chunking: Gear hash + high-bit mask, 64 KiB target / 8 KiB min / 128 KiB max, boundaries and
-      chunk hashes identical to the reference `examples/chunk`.
+      `"{hex} : {size}\n"` lines), then file / xorb hashes. `src/hf_xet_hash.cpp`, vendored blake3.
+- [x] M2 chunking: Gear hash + high-bit mask, 64 KiB target / 8 KiB min / 128 KiB max, boundaries and
+      chunk hashes identical to the reference `examples/chunk`. `src/hf_xet_chunk.cpp`.
+- [x] The verification itself: `scripts/xet_oracle.py` generates `src/hf_xet_vectors.cpp` from
+      xet-core (input/file/xorb hashes, chunk size lists, the mean-tree table from xet-core's own
+      correctness test, hex/base64 renderings), `hf_xet_selftest()` replays it inside the extension,
+      `scripts/smoke_xet.sh` is the 152-check suite. `--check` notices xet-core drifting.
 - [ ] M3 xorb writer: chunk serialization, compression (none, lz4 frame, bg4+lz4), footer with
       `XBLBHSH` / `XBLBBND` + nonce (nonce excluded from the hash); `examples/xorb-check` accepts it.
 - [ ] M4 CAS client: refresh-route token exchange, `PUT {cas}/v1/xorbs/{key}`, exists checks, retried

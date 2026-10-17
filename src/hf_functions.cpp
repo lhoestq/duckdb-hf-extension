@@ -819,6 +819,8 @@ static void HFDeleteFunction(ClientContext &, TableFunctionInput &data, DataChun
 struct HFBucketCopyBindData : public TableFunctionData {
 	HFTarget source;
 	HFTarget bucket;
+	//! how long to wait for the hub to finish hashing a freshly committed source file
+	int64_t hash_wait_ms = HF_COPY_HASH_WAIT_MS;
 };
 
 struct HFCopyRow {
@@ -856,6 +858,12 @@ static unique_ptr<FunctionData> HFBucketCopyBind(ClientContext &context, TableFu
 		                      "as destination",
 		                      StringValue::Get(input.inputs[1]), bind_data->bucket.url.repo_type);
 	}
+	auto hash_wait_seconds = NamedArgumentOr(input, "hash_wait", HF_COPY_HASH_WAIT_MS / 1000);
+	if (hash_wait_seconds < 0) {
+		throw BinderException("hf_bucket_copy's hash_wait takes a non-negative number of seconds, got %lld",
+		                      hash_wait_seconds);
+	}
+	bind_data->hash_wait_ms = hash_wait_seconds * 1000;
 	if (bind_data->source.url.endpoint != bind_data->bucket.url.endpoint) {
 		throw BinderException("hf_bucket_copy copies inside one Hub - '%s' and '%s' are on different endpoints",
 	                          bind_data->source.url.ToString(), bind_data->bucket.url.ToString());
@@ -946,15 +954,9 @@ static unique_ptr<GlobalTableFunctionState> HFBucketCopyInit(ClientContext &cont
 		}
 	};
 	fetch_hashes(paths);
-	// a file committed a moment ago is hashed by the hub in its own time: ask again, backing off, before
-	// believing a file really is outside Xet (some never are, and they are reported as skipped below)
-	for (idx_t attempt = 0; attempt < HF_COPY_HASH_ATTEMPTS && !pending_hash.empty(); attempt++) {
-		HFClient::SleepMs(HF_COPY_HASH_BACKOFF * (1 << attempt));
-		vector<string> missing;
-		for (auto &path : pending_hash) {
-			missing.push_back(path);
-		}
-		fetch_hashes(missing);
+	// what is still missing an xetHash decides whether any waiting happens at all, so prune before the
+	// first sleep rather than after it - a copy of already hashed files should not pause
+	const auto prune_pending = [&]() {
 		for (auto it = pending_hash.begin(); it != pending_hash.end();) {
 			auto found = hashes.find(*it);
 			if (found != hashes.end() && !found->second.xet_hash.empty()) {
@@ -963,6 +965,25 @@ static unique_ptr<GlobalTableFunctionState> HFBucketCopyInit(ClientContext &cont
 				++it;
 			}
 		}
+	};
+	prune_pending();
+	// A file committed a moment ago is hashed by the hub in its own time. Waiting is the difference
+	// between "copied" and a confusing refusal for content the user wrote seconds earlier, so ask again,
+	// backing off, until the budget runs out - files genuinely outside Xet are then reported skipped.
+	idx_t waited_ms = 0;
+	idx_t backoff = HF_COPY_HASH_BACKOFF;
+	while (!pending_hash.empty() && int64_t(waited_ms) < bind_data.hash_wait_ms) {
+		auto remaining = idx_t(bind_data.hash_wait_ms) - waited_ms;
+		auto pause = MinValue<idx_t>(backoff, remaining);
+		HFClient::SleepMs(pause);
+		waited_ms += pause;
+		backoff = MinValue<idx_t>(backoff * 2, HF_COPY_HASH_MAX_BACKOFF);
+		vector<string> missing;
+		for (auto &path : pending_hash) {
+			missing.push_back(path);
+		}
+		fetch_hashes(missing);
+		prune_pending();
 	}
 
 	string dest_prefix = strip(bind_data.bucket.url.path);
@@ -1120,6 +1141,8 @@ void HFFunctions::Register(ExtensionLoader &loader) {
 
 	TableFunction hf_bucket_copy(Identifier("hf_bucket_copy"), {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                             HFBucketCopyFunction, HFBucketCopyBind, HFBucketCopyInit);
+	// how long a copy of a just-committed file waits for the hub to finish hashing it
+	hf_bucket_copy.GetSignature().AddKeywordOnly("hash_wait", LogicalType::BIGINT, Value::BIGINT(30));
 	loader.RegisterFunction(hf_bucket_copy);
 
 	TableFunction hf_upload(Identifier("hf_upload"), {LogicalType::VARCHAR, LogicalType::VARCHAR}, HFUploadFunction,

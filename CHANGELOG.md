@@ -10,7 +10,28 @@ Two version numbers are in play, and they are independent:
   per DuckDB identifier per platform, and rebuilding for a newer DuckDB pre-release is a rebuild,
   not a version bump.
 
-## 0.0.1 — first release
+## Unreleased — 0.0.2, the start of Xet
+
+The hashing half of a Xet client, verified against the reference implementation rather than assumed.
+Nothing user-visible can upload through Xet yet; what landed is the part every later stage is built on.
+
+* `hf_xet_selftest()` — 152 checks that the extension's Xet hash and chunking agree, byte for byte, with
+  `xet-core`: leaf/chunk hashes, file and xorb merkle roots, chunk boundary lists, mean-tree shapes taken
+  from xet-core's own correctness table (including 100-node trees and salted file hashes), interior-node
+  hashes, and the `hex()`/`base64()` renderings with their round trips. Pure computation, so it needs no
+  token and no network. `scripts/smoke_xet.sh` runs it as a suite.
+* The reference vectors are generated (`scripts/xet_oracle.py`, writing `src/hf_xet_vectors.cpp`), never
+  hand-written, and are committed so CI can check the port without cargo. `scripts/xet_oracle.py --check`
+  fails when a newer xet-core disagrees with what is stored.
+* Two silent bugs, and both were caught only by the generated vectors: a key constant transcribed
+  incorrectly (every hash wrong, all of them plausible), and the chunker's mask built from the low bits of
+  the gear hash instead of the high ones — which chunks at almost every byte, and still reproduces the
+  reference boundaries on constant input. Neither is visible from a write that "works".
+* `hf_bucket_copy(…, hash_wait := n)`: how long a copy waits for the Hub to finish hashing a source file
+  committed moments earlier (default 30s, `0` to refuse waiting). Copies of already-hashed files no longer
+  pause at all — the wait is decided by what is still missing a hash, not by whether any work remains.
+
+## 0.0.1 — first release## 0.0.1 — first release
 
 `hf://` behaves like `s3://` for both directions, for every repo type the Hub serves.
 

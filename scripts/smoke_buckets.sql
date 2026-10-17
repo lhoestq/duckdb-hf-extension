@@ -9,7 +9,7 @@ SELECT 'copy one file onto an exact name' AS t,
        status = 'copied' AS assert_copied,
        xet_hash <> '' AS assert_hash_is_shown
 FROM hf_bucket_copy('hf://datasets/lhoestq/hf-smoke-staging/data/one.parquet',
-                    'hf://buckets/lhoestq/playground/duckdb/copied.parquet');
+                    'hf://buckets/lhoestq/playground/duckdb/copied.parquet', hash_wait := 90);
 SELECT 'the copy reads back' AS t, count(*) = 2 AS assert_rows, sum(answer) = 85 AS assert_values
 FROM read_parquet('hf://buckets/lhoestq/playground/duckdb/copied.parquet');
 SELECT 'copy a folder, structure mirrored under it' AS t,
@@ -57,3 +57,15 @@ SELECT * FROM hf_upload('/tmp/hf_bucket_probe.csv', 'hf://buckets/lhoestq/playgr
 SELECT 'cleanup' AS t, count(*) >= 1 AS assert_deleted FROM hf_delete('hf://buckets/lhoestq/playground/duckdb');
 SELECT 'nothing left behind' AS t, count(*) = 0 AS assert_empty
 FROM hf_ls('hf://buckets/lhoestq/playground', recursive := true) WHERE path LIKE 'duckdb%';
+
+-- the hub decides a file's xetHash after the commit returns, so a copy of content written seconds ago is
+-- a race the caller has to be allowed to wait out; refusing to wait is a bug, waiting forever is one too
+SELECT 'hash_wait is a bounded knob' AS t,
+       count(*) = 1 AS assert_copied_with_a_short_wait
+FROM hf_bucket_copy('hf://datasets/lhoestq/hf-smoke-staging/data/two.parquet',
+                    'hf://buckets/lhoestq/playground/duckdb/waited.parquet', hash_wait := 0);
+-- expect-fail: non-negative
+SELECT * FROM hf_bucket_copy('hf://datasets/lhoestq/hf-smoke-staging/data/two.parquet',
+                             'hf://buckets/lhoestq/playground/duckdb/nope.parquet', hash_wait := -1);
+SELECT 'the wait test cleans up after itself' AS t, count(*) >= 1 AS assert_deleted
+FROM hf_delete('hf://buckets/lhoestq/playground/duckdb', missing_ok := true);

@@ -76,7 +76,7 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | `hf_meta(path)` | `url, exists, size, etag, repo_type, repository, revision` |
 | `hf_upload(local_path, hf_path, message := ...)` | `url, size, sha256` |
 | `hf_delete(path)` / `hf_delete([...], missing_ok := false)` | `url` (one commit per repository in the list) |
-| `hf_bucket_copy(source, target)` | `source, url, path, size, xet_hash, status` - moves files that are already on the Hub into a bucket |
+| `hf_bucket_copy(source, target[, hash_wait := n])` | `source, url, path, size, xet_hash, status` - moves files that are already on the Hub into a bucket; `hash_wait` is how long to wait (default 30s) for the Hub to finish hashing a file committed moments ago |
 | `hf_list_revisions(path, max_revisions := 20)` | `repository, revision, title, author, date` |
 | `hf_list_refs(path)` | `repository, kind, name, ref, target_commit` |
 | `hf_create_repo(path, private := true)` | `url, created` (`created = false` when it already existed) |
@@ -162,7 +162,8 @@ SELECT * FROM hf_bucket_copy('hf://buckets/me/playground/exports/out.parquet',
 
 One row per source file, with the `xet_hash` it was registered under and a `status`. Two things are
 worth knowing: a file committed seconds earlier is being hashed by the Hub in its own time (the copy
-asks again a few times before believing otherwise), and a file the Hub keeps outside Xet - a plain
+waits up to `hash_wait` seconds for it (default 30, `hash_wait := 0` to refuse waiting), and a file the
+Hub keeps outside Xet - a plain
 git blob, which is how small files sometimes land - has no hash to reference and comes back as
 `skipped: ...` rather than an error, because a bucket simply cannot point at it.
 
