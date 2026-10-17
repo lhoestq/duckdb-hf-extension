@@ -12,6 +12,7 @@ set(HF_SOURCES
     hf_functions.cpp
     hf_xet_chunk.cpp
     hf_xet_hash.cpp
+    hf_cas.cpp
     hf_xet_xorb.cpp
     hf_xet_vectors.cpp)
 

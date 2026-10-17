@@ -3,6 +3,7 @@
 #include "hf_crypto.hpp"
 #include "hf_functions.hpp"
 #include "hf_settings.hpp"
+#include "hf_cas.hpp"
 #include "hf_xet_hash.hpp"
 #include "hf_xet_xorb.hpp"
 
@@ -1075,6 +1076,97 @@ static void HFBucketCopyFunction(ClientContext &, TableFunctionInput &data, Data
 //===----------------------------------------------------------------------===//
 
 //===----------------------------------------------------------------------===//
+// hf_xet_upload
+//===----------------------------------------------------------------------===//
+
+struct HFXetUploadBindData : public TableFunctionData {
+	HFTarget target;
+	string path;
+};
+
+struct HFXetUploadState : public GlobalTableFunctionState {
+	//! The uploads, done on the first call rather than at bind time and kept here rather than in the
+	//! bind data: planning a query should not put content into a CAS, and bind data is const by then.
+	vector<HFXetXorbUpload> uploads;
+	idx_t next = 0;
+	bool done = false;
+
+	idx_t MaxThreads() const override {
+		return 1;
+	}
+};
+
+static unique_ptr<FunctionData> HFXetUploadBind(ClientContext &context, TableFunctionBindInput &input,
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
+	if (input.inputs.empty() || input.inputs[0].IsNull()) {
+		throw BinderException("hf_xet_upload takes the file whose content to upload, for example "
+		                      "hf_xet_upload('hf://buckets/my-user/my-bucket/data.parquet')");
+	}
+	ClientContextFileOpener file_opener(context);
+	auto bind_data = make_uniq<HFXetUploadBindData>();
+	auto content_path = StringValue::Get(input.inputs[0]);
+	// A CAS token is scoped to a repository, so uploading needs one even when the bytes being uploaded
+	// are not in a repository at all - which is exactly what a COPY TO does: DuckDB fills a local temp
+	// file, and the target repo names the scope its content is uploaded under.
+	auto scope_path = NamedArgumentOr(input, "scope", content_path);
+	if (scope_path.empty()) {
+		scope_path = content_path;
+	}
+	// checked before resolving, so the message is about the argument rather than about url syntax
+	if (!StringUtil::StartsWith(scope_path, "hf://")) {
+		throw BinderException("hf_xet_upload's scope must be an hf:// url - it names the repository whose "
+		                      "CAS token the content is uploaded against, got '%s'",
+		                      scope_path);
+	}
+	bind_data->target = HFResolveTarget(scope_path, &file_opener, DatabaseInstance::GetDatabase(context));
+	// the url as written, not the target's: the file to open is the whole path, not the repository
+	bind_data->path = content_path;
+
+	names.emplace_back("xorb");
+	return_types.push_back(LogicalType::VARCHAR);
+	names.emplace_back("num_chunks");
+	return_types.push_back(LogicalType::BIGINT);
+	names.emplace_back("bytes");
+	return_types.push_back(LogicalType::BIGINT);
+	names.emplace_back("uncompressed_bytes");
+	return_types.push_back(LogicalType::BIGINT);
+	names.emplace_back("inserted");
+	return_types.push_back(LogicalType::BOOLEAN);
+	return std::move(bind_data);
+}
+
+static unique_ptr<GlobalTableFunctionState> HFXetUploadInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<HFXetUploadState>();
+}
+
+static void HFXetUploadFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &bind_data = data.bind_data->Cast<HFXetUploadBindData>();
+	auto &state = data.global_state->Cast<HFXetUploadState>();
+	if (state.done) {
+		return;
+	}
+	ClientContextFileOpener file_opener(context);
+	if (state.uploads.empty() && state.next == 0) {
+		state.uploads = HFXetUploadFileContents(DatabaseInstance::GetDatabase(context),
+		                                        FileSystem::GetFileSystem(context), &file_opener,
+		                                        bind_data.target, bind_data.path);
+	}
+
+	idx_t count = 0;
+	while (state.next < state.uploads.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &uploaded = state.uploads[state.next++];
+		output.data[0].SetValue(count, Value(uploaded.hash.Hex()));
+		output.data[1].SetValue(count, Value::BIGINT(uploaded.num_chunks));
+		output.data[2].SetValue(count, Value::BIGINT(uploaded.bytes));
+		output.data[3].SetValue(count, Value::BIGINT(uploaded.uncompressed_bytes));
+		output.data[4].SetValue(count, Value::BOOLEAN(uploaded.inserted));
+		count++;
+	}
+	state.done = state.next >= state.uploads.size();
+	output.SetChildCardinality(count);
+}
+
+//===----------------------------------------------------------------------===//
 // hf_xet_selftest()
 //===----------------------------------------------------------------------===//
 
@@ -1170,6 +1262,15 @@ void HFFunctions::Register(ExtensionLoader &loader) {
 	TableFunction hf_xet_selftest(Identifier("hf_xet_selftest"), {}, HFXetSelfTestFunction, HFXetSelfTestBind,
 	                              HFXetSelfTestInit);
 	loader.RegisterFunction(hf_xet_selftest);
+
+	// The Xet content path without the metadata: chunk a file the way Xet does and put its xorbs where
+	// the CAS stores them. The content becomes addressable but unreadable - nothing refers to it until
+	// a session shard is committed (docs/XET.md, M5) - which makes this the way to look at a file's
+	// xorb layout, and the way this upload path is tested.
+	TableFunction hf_xet_upload(Identifier("hf_xet_upload"), {LogicalType::VARCHAR}, HFXetUploadFunction,
+	                            HFXetUploadBind, HFXetUploadInit);
+	hf_xet_upload.GetSignature().AddKeywordOnly("scope", LogicalType::VARCHAR, Value(""));
+	loader.RegisterFunction(std::move(hf_xet_upload));
 
 	TableFunction hf_status(Identifier("hf_status"), {}, HFStatusFunction, HFStatusBind, HFStatusInit);
 	loader.RegisterFunction(hf_status);

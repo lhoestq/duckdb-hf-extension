@@ -6,6 +6,7 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/common/file_opener.hpp"
 
+#include <cctype>
 #include <chrono>
 #include <thread>
 
@@ -226,6 +227,82 @@ void HFJson::ForEachMember(const string &obj, const std::function<void(const str
 		}
 		i = next + 1;
 	}
+}
+
+string HFJson::GetRaw(const string &json, const string &key, bool &found) {
+	found = false;
+	string needle = "\"" + key + "\"";
+	auto pos = json.find(needle);
+	if (pos == string::npos) {
+		return "";
+	}
+	pos += needle.size();
+	SkipJSONWS(json, pos);
+	if (json[pos] != ':') {
+		// the key appeared as a value or a substring rather than as a member - keep looking
+		return pos + 1 < json.size() ? GetRaw(json.substr(pos + 1), key, found) : "";
+	}
+	pos++;
+	SkipJSONWS(json, pos);
+	if (pos >= json.size()) {
+		return "";
+	}
+	if (json[pos] == '"') {
+		// the quoted form, quotes kept: HFJson::AsString takes it apart the same way everywhere else
+		auto start = pos;
+		pos++;
+		while (pos < json.size()) {
+			if (json[pos] == '\\') {
+				pos += 2;
+				continue;
+			}
+			if (json[pos] == '"') {
+				pos++;
+				break;
+			}
+			pos++;
+		}
+		found = true;
+		return json.substr(start, pos - start);
+	}
+	if (json[pos] == '{' || json[pos] == '[') {
+		// a nested value: hand back the whole object or array, whose own keys are then read the same way
+		auto start = pos;
+		idx_t depth = 0;
+		bool in_string = false;
+		for (; pos < json.size(); pos++) {
+			auto c = json[pos];
+			if (in_string) {
+				if (c == '\\') {
+					pos++;
+				} else if (c == '"') {
+					in_string = false;
+				}
+			} else if (c == '"') {
+				in_string = true;
+			} else if (c == '{' || c == '[') {
+				depth++;
+			} else if (c == '}' || c == ']') {
+				if (--depth == 0) {
+					pos++;
+					break;
+				}
+			}
+		}
+		found = depth == 0;
+		return json.substr(start, pos - start);
+	}
+	// a number, a boolean or null: the scalar runs to the next separator
+	auto start = pos;
+	while (pos < json.size() && json[pos] != ',' && json[pos] != '}' && json[pos] != ']' && json[pos] != '\n') {
+		pos++;
+	}
+	auto end = pos;
+	while (end > start && isspace(static_cast<unsigned char>(json[end - 1]))) {
+		end--;
+	}
+	found = end > start;
+	return json.substr(start, end - start);
 }
 
 string HFJson::AsString(const string &raw) {
@@ -591,8 +668,9 @@ unique_ptr<HTTPResponse> HFClient::Head(const string &url, const HTTPHeaders &he
 	});
 }
 
-unique_ptr<HTTPResponse> HFClient::Post(const string &url, const string &body, const HTTPHeaders &headers) {
-	HTTPHeaders final_headers = WithAuth(headers);
+unique_ptr<HTTPResponse> HFClient::Post(const string &url, const string &body, const HTTPHeaders &headers,
+                                        bool with_auth) {
+	HTTPHeaders final_headers = with_auth ? WithAuth(headers) : headers;
 	PostRequestInfo post(url, final_headers, *params, const_data_ptr_cast(body.data()), body.size());
 	post.try_request = true;
 	return SendRequest(post);

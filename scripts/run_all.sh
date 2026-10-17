@@ -46,6 +46,7 @@ run() { # name, command...
 }
 
 run xet bash scripts/smoke_xet.sh
+run xet_upload bash scripts/smoke_xet_upload.sh
 run read bash scripts/smoke_read.sh
 run write bash scripts/smoke_write.sh
 run models bash scripts/smoke_models.sh

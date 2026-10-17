@@ -114,10 +114,17 @@ CREATE TABLE x AS SELECT * FROM 'hf://datasets/foo/data.parquet';
       nonce excluded from the hash), uncompressed chunks; `src/hf_xet_xorb.cpp`, vectors generated the
       same way, and the whole serialized object fingerprinted - the port's bytes equal the reference
       writer's. LZ4/BG4 compression is deferred (docs/XET.md), and is an upload-size matter only.
-- [ ] M4 CAS client: refresh-route token exchange, `PUT {cas}/v1/xorbs/{key}`, exists checks, retried
-      against the in-tree simulation server before the real Hub.
-- [ ] M5 shard + commit: upload the session shard, commit with the file hash. First target is
-      `COPY … TO 'hf://buckets/…'`, the one write 0.0.1 refuses; git-LFS stays the default elsewhere.
+- [x] M4 CAS client: write-token exchange derived from the url (`api/{type}/{id}/xet-write-token`,
+      `/{revision}` for git-backed types, none for buckets), CAS-scoped bearer with the HF token left
+      off, `POST {cas}/v1/xorbs/{prefix}/{hash}`, the reference's retry policy and 30s-before-expiry
+      refresh, xorb splitting at the uncompressed 64 MiB / 8192 chunk limits. `hf_xet_upload()` exposes
+      it; `scripts/smoke_xet_upload.sh` runs it against the production CAS, which recomputes every hash.
+      No exists-check: the url is the content, and `was_inserted` is the dedup answer.
+- [ ] M5 shard + commit: serialize a session shard (protobuf, by hand), `POST {cas}/v1/shards`, then
+      commit with the resulting `xetHash`. First target is `COPY … TO 'hf://buckets/…'`, the one write
+      0.0.1 refuses, read back through `hf://` as the suite; git-LFS stays the default elsewhere.
+      M4's `scope` argument is the seam this plugs into: a `COPY` uploads a local temp file against the
+      target repo's token.
 - [ ] Every stage diff-tested against `xet-core`'s own examples (`chunk`, `hash`, `xorb-check`) - the
       reference implementation is the oracle, since hash/format bugs are silent failures.
 

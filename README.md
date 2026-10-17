@@ -83,6 +83,8 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | `hf_status()` | `hf_version, duckdb_version, endpoint, token_source, user, fullname, whoami_error, http_transport, hf_read_buffer_size, hf_read_cache_size, hf_read_max_parallel_requests, hf_read_cache_total_size, hf_max_per_page, hf_create_repo, hf_cache_dir` |
 | `hf_read_stats(reset := false)` | `files_opened, range_hits, coalesced_waits, window_fetches, part_requests, straddling_fetches, evictions, bytes_fetched, invalidations, retained_bytes, retained_files` |
 | `hf_read_cache_clear()` | `cleared_bytes, cleared_files` (drops everything the read cache retained) |
+| `hf_xet_upload(path[, scope := 'hf://…'])` | `xorb, num_chunks, bytes, uncompressed_bytes, inserted` — chunks the file and stores each xorb in the content addressable storage; `inserted` is the CAS's dedup answer. `scope` names the repository whose token the bytes go up against, needed when the file is local. Stores content; does not yet make a file readable (docs/XET.md, M5) |
+| `hf_xet_selftest()` | `check_name, assert_passed, expected, got, assert_no_failures` — the Xet port checked against reference vectors generated from `xet-core`: hashes, chunk boundaries, merkle roots, and whole serialized xorbs. Offline, no token |
 
 `hf_read_stats()` is the read path's dashboard: `bytes_fetched / <file size>` is the download
 amplification (a scan of one file should be exactly 1.0), `evictions` says the per-file cache is too
@@ -271,8 +273,13 @@ what a given binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
   file/xorb merkle roots, the content-defined chunker, and the serialized xorb itself - each one
   byte-for-byte identical to what `xet-core` produces, checked by `hf_xet_selftest()` (226 checks) /
   `scripts/smoke_xet.sh` against vectors generated from the reference implementation.
-* ✘ Xet *uploads* are not implemented yet (M4-M5: the CAS client, then metadata shards and the commit)
-  — the git-LFS transfer is used instead, which the Hub accepts for every repo type.
+* ✔ Xet *uploads* (`docs/XET.md`, M4): `hf_xet_upload(path [, scope := …])` chunks a file, serializes
+  each xorb and stores it in the real content addressable storage - write-token exchange, the CAS's own
+  bearer token, its retry policy, splitting at the format's size limits, and its dedup answer. Verified
+  by `scripts/smoke_xet_upload.sh` against the production CAS, which validates every xorb hash itself.
+  Content is stored, not yet *reachable*: a file needs a metadata shard that names its chunks.
+* ✘ Xet-backed *writes* (`COPY … TO 'hf://…'`, uploads of DuckDB's own bytes) still go over git-LFS,
+  which the Hub accepts for every repo type; switching them to Xet is the shard + commit milestone (M5).
 * ✘ `COPY ... TO 'hf://buckets/...'`: pushing DuckDB's own bytes into a bucket needs an Xet
   `xetHash`, which only `hf_xet` computes; the extension refuses with a message pointing at
   `hf buckets cp` and `hf_bucket_copy`. The same reason makes a `hf_bucket_copy` of a file the Hub
@@ -295,6 +302,8 @@ src/
   hf_write.cpp      write handle: temp file buffering, upload+commit on close
   hf_xet_hash.cpp   BLAKE3-keyed Xet hashes, mean tree, reference self-test (M1)
   hf_xet_chunk.cpp  gear-hash content-defined chunking, byte-exact with xet-core (M2)
+  hf_xet_xorb.cpp   serialized xorb: chunk section + V1 footer, byte-exact with xet-core (M3)
+  hf_cas.{hpp,cpp}  CAS client: write-token exchange, xorb upload, retries, dedup (M4)
   hf_functions.cpp  hf_ls / hf_meta / hf_upload / hf_delete / hf_bucket_copy / hf_list_revisions /
                     hf_list_refs / hf_create_repo / hf_status / hf_read_stats / hf_read_cache_clear
   hf_extension.cpp  entry point
@@ -320,12 +329,16 @@ The suites run against the **live Hub** — they write to scratch repositories a
 themselves, so they need a token with write access (`~/.cache/huggingface/token`, or `HF_TOKEN`).
 
 ```bash
-scripts/run_all.sh --build    # build once, then all four suites
-bash scripts/smoke_read.sh    # or one suite on its own: smoke_read / smoke_write / smoke_models
+scripts/run_all.sh --build    # build once, then every suite
+bash scripts/smoke_read.sh    # or one suite on its own
 bash scripts/smoke_models.sh  # each .sh makes its own fixtures and cleans up after itself
 ```
 
 ```
+--- xet
+    xet: 4 passed, 0 expected failures, 0 failed          # offline: 226 reference checks
+--- xet_upload
+    xet_upload: 8 passed, 1 expected failures, 0 failed   # against the production CAS
 --- read
     read: 55 passed, 0 expected failures, 0 failed
 --- write
@@ -333,8 +346,11 @@ bash scripts/smoke_models.sh  # each .sh makes its own fixtures and cleans up af
 --- models
     models: 24 passed, 0 expected failures, 0 failed
 --- buckets
-    buckets: 16 passed, 2 expected failures, 0 failed
+    buckets: 18 passed, 3 expected failures, 0 failed
 ```
+
+`xet` is the only suite that runs without a token or a network. `xet_upload` is the one that cannot pass
+on a wrong byte: it uploads to the real CAS, which re-hashes every xorb it receives.
 
 `scripts/try.py` is the runner. It takes a `.sql` file, executes **one statement per line-group**
 (semicolon separated), and grades the result:

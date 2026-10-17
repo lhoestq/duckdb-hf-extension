@@ -40,8 +40,11 @@ public:
 	                       const HTTPHeaders &headers = HTTPHeaders());
 	//! HEAD a resource; returns the response (never throws on 404, callers inspect the status)
 	unique_ptr<HTTPResponse> Head(const string &url, const HTTPHeaders &headers = HTTPHeaders());
-	//! POST a body. Returns the raw response (no throw).
-	unique_ptr<HTTPResponse> Post(const string &url, const string &body, const HTTPHeaders &headers = HTTPHeaders());
+	//! POST a body. Returns the raw response (no throw). `with_auth = false` is for endpoints that
+	//! authenticate some other way - the Xet CAS carries its own token, and sending the Hub one too
+	//! gets the request refused.
+	unique_ptr<HTTPResponse> Post(const string &url, const string &body, const HTTPHeaders &headers = HTTPHeaders(),
+	                              bool with_auth = true);
 	//! PUT a buffer. Returns the raw response (no throw). Presigned urls (git-LFS) must be PUT with
 	//! `with_auth = false`: the signature in the url authenticates the request, an extra Authorization header
 	//! makes S3 reject it.
@@ -117,6 +120,12 @@ private:
 //! use a tiny tolerant scanner (the same approach httpfs uses for its listings).
 struct HFJson {
 	//! First "key":"value" string occurrence, `found` set accordingly
+	//! The value of `key` exactly as it appears - quotes included for a string, bare for a number,
+//! `true`/`false`, or `null` - to feed AsString/AsInt/AsBool. GetString above only matches quoted
+//! values, which is all the Hub's git routes return; the Xet routes answer with booleans and unix
+//! timestamps, where reading a missing key as "absent" and defaulting it is how a token silently
+//! stops being refreshed.
+	static string GetRaw(const string &json, const string &key, bool &found);
 	static string GetString(const string &json, const string &key, idx_t from, idx_t &end, bool &found);
 	static string GetString(const string &json, const string &key, bool &found);
 	//! Parse a `Link` header into a continuation url

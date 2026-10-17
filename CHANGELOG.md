@@ -12,6 +12,24 @@ Two version numbers are in play, and they are independent:
 
 ## Unreleased — the Xet write path
 
+* `hf_xet_upload(path [, scope := …])` — chunks a file the way Xet does, serializes each xorb, and
+  uploads it to the real content addressable storage: the write-token exchange, the CAS-scoped bearer
+  token (never alongside the HF token), the reference's retry policy, and its token refresh 30s before
+  expiry. One row per xorb: `xorb, num_chunks, bytes, uncompressed_bytes, inserted`, where `inserted`
+  is the CAS's own dedup answer — content already stored is not sent twice, and there is nothing to
+  check first because a xorb's url *is* its content. `scope` names the repository whose token the bytes
+  are uploaded against, for content that is not in a repository at all (a local temp file, which is how
+  a `COPY TO` will work). Nothing is readable through this yet: a file exists once a metadata shard
+  refers to its chunks, which is the next milestone.
+* `scripts/smoke_xet_upload.sh` — a suite against the production CAS, and the only one that can fail if
+  the serialization is wrong: the CAS recomputes every xorb hash itself. Fresh content on each run, so
+  "was this already stored?" is answered for the right reason; the chunking layout is asserted to be
+  deterministic across re-uploads.
+* Content past the 64 MiB xorb limit splits into several xorbs. Two bugs hid there, both invisible in a
+  small file: `Finish()` reset the chunk list but not the byte counter, so the second xorb of a big file
+  was born full; and flushing on "is it full yet" let an object finish one chunk over the limit. The
+  builder is now asked before a chunk is added, and the limits are applied to uncompressed bytes — the
+  only bytes the hash covers and the only ones the format measures.
 * The extension can serialize a xorb — the object the CAS stores — byte for byte identically to the
   reference client: chunk headers, the `XETBLOB`/`XBLBHSH`/`XBLBBND` footer, its section offsets and
   its per-upload nonce. `hf_xet_selftest()` now pins 226 checks, including the whole serialized byte

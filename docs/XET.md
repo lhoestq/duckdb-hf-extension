@@ -253,13 +253,58 @@ same chunk and the hash is over the chunk; what is required is that the referenc
 original bytes back. BG4 (scheme 2) is a byte-regrouping permutation on top of that. Both are
 upload-size optimizations and can land after the write path works.
 
-## M4 checklist (next)
+## M4 the CAS client (done)
 
-* Token exchange: the refresh-route endpoint returns the CAS endpoint and a CAS-scoped token from a
-  HF token; that is the only place the CAS URL comes from, so it is fetched per session, not baked in.
-* `PUT {cas}/v1/xorbs/{prefix}/{xorb_hash}` with the xorb bytes; `POST /v1/exist/...` (batch) to skip
-  chunks and xorbs the CAS already has, which is the entire deduplication story.
-* Retries: distinguish retryable (429/5xx/connection) from terminal, with the reference's backoff,
-  and a bounded number of in-flight uploads.
-* Test against the in-tree simulation server (`xet_client/src/cas_client/simulation`) before pointing
-  any of it at the production Hub.
+`src/hf_cas.cpp`. The CAS URL is not a constant and the token is not the HF token: every upload starts
+with a write-token exchange against the repository, which answers with `{casUrl, exp, accessToken}`.
+The route is derived from the url the user typed -
+`{endpoint}/api/{repo_type}/{repo_id}/xet-write-token`, plus a `/{revision}` path segment for the
+git-backed repo types and none for buckets. Buckets and datasets get the same CAS and the same upload
+call; the token just says which repository the content belongs to.
+
+* **The CAS request carries the CAS token and nothing else.** Attaching the HF `Authorization` header
+  alongside it is refused, exactly as with presigned LFS PUTs, so `HFClient::Post` grew the same
+  `with_auth` switch `Put` has.
+* **`{cas}/v1/xorbs/{prefix}/{hash}` with `POST`** (not PUT - the reference posts), prefix `default`,
+  hash the swizzled hex that Rust's `{:x}` prints for a `Key`. The answer is `{"was_inserted": bool}`.
+* **There is no exists-check to call.** Content addressing *is* the deduplication: the url is the
+  content, so re-posting is idempotent and `was_inserted: false` is how the CAS says "already had it".
+  The reference's session-level chunk/xorb filtering exists to skip work, not to preserve correctness.
+* **Retries**: 5 attempts, 3s base exponential, 6 minute total budget, retrying 5xx/408/429/timeout/
+  connection errors and stopping on everything else - the reference's policy, transcribed. Uploads are
+  sequential for now; concurrency is a throughput feature, not a correctness one.
+* **Tokens are cached per client and refreshed 30s before expiry**, the reference's buffer. An `exp` we
+  cannot read is treated as already expired - refreshing too often is dull, uploading against a dead
+  token is not.
+
+`hf_xet_upload(path [, scope := 'hf://...'])` exposes all of it as a table function, one row per xorb:
+`xorb, num_chunks, bytes, uncompressed_bytes, inserted`. The `scope` names the repository whose token
+the content is uploaded against, needed when the bytes are not in a repository at all - which is what a
+`COPY TO` will look like: DuckDB fills a local temp file, the target repo supplies the scope. M5 builds
+on exactly that shape.
+
+What the production CAS proved about M3, unprompted: it recomputes the xorb hash from the bytes it
+receives. A deliberately wrong hash came back as `400 BadRequest: xorb hash mismatch: expected fc79…,
+got 4bf3…`. So every accepted upload is an independent confirmation that the serialization parses, from
+the other side of the wire, on a machine running code we did not write.
+
+Two bugs the first 70 MiB file found, both invisible below the xorb size limit:
+
+* `Finish()` cleared the chunk list but not the byte counter, so the *second* xorb of a large file was
+  born "full" and threw. A builder that has handed over its bytes now reports empty in every respect.
+* Flushing on `IsFull()` - asking after the fact - let an object end up one chunk over the format's
+  64 MiB. The builder now answers `WouldOverflow(len)` first, and the loop closes a xorb before the
+  chunk that does not fit. The limits are on *uncompressed* bytes, which is why the function reports
+  both byte counts: 1026 chunks / 67,076,687 uncompressed bytes is legal at a serialized 67,126,031.
+
+## M5 checklist (next)
+
+* Serialize a session metadata shard: the protobuf wire format by hand (no protobuf dependency), one
+  entry per file: its chunk list, its (salted) file hash, path, size.
+* `POST {cas}/v1/shards` with the shard, taking `{shard_hash, result}` back; the shard is what makes
+  content reachable.
+* Commit through the Hub's commit route with the `xetHash` = the file hash the CAS knows, so a bucket
+  or repo entry can point at the content - `COPY ... TO 'hf://buckets/...'` end to end.
+* Read the result back through `hf://` and make it a suite: the round trip is the milestone, not the
+  upload.
+* Then the polish that stops being excusable: LZ4 frames, parallel xorb uploads.

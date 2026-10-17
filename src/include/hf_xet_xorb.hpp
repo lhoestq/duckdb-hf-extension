@@ -56,6 +56,10 @@ public:
 	explicit HFXetXorbBuilder(HFXetCompressionScheme scheme = HFXetCompressionScheme::NONE);
 
 	bool IsFull() const;
+	//! Whether a chunk of `len` bytes still fits. The limits are per object, so a writer that keeps
+	//! adding until IsFull turns true produces a xorb one chunk too large; asking first is what keeps
+	//! every object within the format.
+	bool WouldOverflow(idx_t len) const;
 	//! Hash the chunk and append it. Throws if the caller kept going past a xorb's limits, rather
 	//! than silently producing an object the CAS will refuse.
 	void AddChunk(const_data_ptr_t data, idx_t len);

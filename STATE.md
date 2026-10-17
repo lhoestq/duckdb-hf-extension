@@ -2,7 +2,49 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-17, ~10:55 UTC)
+## Current position (2026-10-17, ~11:55 UTC)
+
+**Milestone: M4, the CAS client, is in and works against the production Hub. `hf_xet_upload()` chunks a
+file, serializes each xorb (M3) and stores it in the real CAS - token exchange, retries, splitting, and
+the CAS's own dedup answer. `scripts/run_all.sh`: xet 4, xet_upload 8 (+1 refusal), read 55, write 45
+(+5), models 24, buckets 18 (+3). Nothing is readable through Xet yet: content becomes a file when a
+metadata shard names its chunks, which is M5.**
+
+* `src/hf_cas.{hpp,cpp}`: `HFXetCasClient` (write-token exchange + cached token refreshed 30s before
+  expiry, `UploadXorb` with the reference's retry policy), `HFXetUploadFileContents` (read a file, chunk
+  it, fill a builder, upload each finished xorb). The token route is *derived* from the url the user
+  typed - `api/{repo_type}/{repo_id}/xet-write-token`, with a `/{revision}` segment for git-backed repo
+  types and none for buckets; both were confirmed against the live API, and a bucket-scoped token uploads
+  exactly like a dataset-scoped one.
+* The CAS call carries the CAS token *and nothing else*: `HFClient::Post` grew the same `with_auth=false`
+  switch `Put` has, for the same reason presigned LFS PUTs do not take the HF token.
+* No exists-check exists. The xorb url is its content, so re-posting is idempotent and
+  `{"was_inserted": false}` is the dedup signal. Getting this parsed right needed
+  `HFJson::GetRaw()` - `GetString` only matches *quoted* values, so a `true` or a unix timestamp read as
+  "absent": every upload reported `inserted: true`, and an `exp` of 0 would have refreshed the token on
+  every call. A number or boolean silently defaulting is the failure mode this whole milestone kept
+  hitting; the fix is a scalar-aware reader, not a default.
+* `hf_xet_upload(path [, scope := 'hf://...'])`, one row per xorb:
+  `xorb, num_chunks, bytes, uncompressed_bytes, inserted`. `scope` is the repository whose token the
+  bytes are uploaded against - required when the content is a local file, which is precisely what a
+  `COPY TO` will hand over: DuckDB fills a temp file, the target repo supplies the scope. M5 attaches to
+  that seam.
+* The production CAS is an independent reader of M3's output, and it complains when the bytes disagree:
+  a deliberately wrong hash came back `400 BadRequest: xorb hash mismatch: expected fc79…, got 4bf3…`.
+  Every accepted upload therefore re-proves the serialization from the other side of the wire.
+* The first file over the 64 MiB xorb limit found two bugs that a small file cannot see: `Finish()`
+  cleared the chunk list but not `uncompressed_bytes`, so a file's *second* xorb was born full and threw
+  `xorb is full after 0 chunks`; and flushing on `IsFull()` - asking after the fact - let an object end
+  one chunk past the limit. `WouldOverflow(len)` is asked before adding, `Finish()` resets everything, and
+  the function reports both byte counts, because the format's limits are on *uncompressed* bytes
+  (1026 chunks / 67,076,687 raw bytes is legal at 67,126,031 serialized).
+* `scripts/smoke_xet_upload.{sql,sh}` - a new suite, wired into `run_all.sh`, against the production CAS.
+  Its fixture is random on every run because half of what it asks is "was this already stored?", and a
+  deterministic fixture would answer that for the wrong reason forever. It also asserts the chunking
+  layout is identical across re-uploads.
+
+## Position before this (2026-10-17, ~10:55 UTC)
+
 
 **Milestone: M3, the xorb writer, is in and byte-exact. `hf_xet_selftest()` is 226 checks (was 152),
 all passing; the extension's serialized xorbs are bit-identical to what xet-core's writer produces,

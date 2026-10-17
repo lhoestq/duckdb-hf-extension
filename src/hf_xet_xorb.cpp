@@ -59,6 +59,10 @@ bool HFXetXorbBuilder::IsFull() const {
 	return chunks.size() >= HF_XET_MAX_XORB_CHUNKS || uncompressed_bytes >= HF_XET_MAX_XORB_BYTES;
 }
 
+bool HFXetXorbBuilder::WouldOverflow(idx_t len) const {
+	return chunks.size() + 1 > HF_XET_MAX_XORB_CHUNKS || uncompressed_bytes + len > HF_XET_MAX_XORB_BYTES;
+}
+
 void HFXetXorbBuilder::AddChunk(const_data_ptr_t data, idx_t len) {
 	if (len > HF_XET_MAX_CHUNK_SIZE) {
 		throw InternalException("Xet chunk of %llu bytes exceeds the %llu byte maximum", len,
@@ -69,9 +73,13 @@ void HFXetXorbBuilder::AddChunk(const_data_ptr_t data, idx_t len) {
 		// naming if those two ever stop agreeing
 		throw InternalException("Xet chunk of %llu bytes does not fit a 3-byte chunk header length", len);
 	}
-	if (IsFull()) {
-		throw InternalException("Xet xorb is full after %llu chunks / %llu bytes", chunks.size(),
-		                        uncompressed_bytes);
+	if (WouldOverflow(len)) {
+		// the caller is expected to check, and a xorb that silently exceeds the limits is one the CAS
+		// refuses without telling us which of its own numbers we broke
+		throw InternalException("Xet xorb cannot take a %llu byte chunk after %llu chunks / %llu bytes "
+		                        "(limits: %llu chunks, %llu bytes)",
+		                        len, chunks.size(), uncompressed_bytes, HF_XET_MAX_XORB_CHUNKS,
+		                        uint64_t(HF_XET_MAX_XORB_BYTES));
 	}
 	// The reference falls back to storing a chunk uncompressed when compressing it did not pay; with
 	// only the None scheme that decision is already taken, and `len` is both lengths.
@@ -147,8 +155,12 @@ HFXetXorb HFXetXorbBuilder::Finish(const uint8_t *nonce) {
 	xorb.bytes += footer;
 	AppendU32(xorb.bytes, uint32_t(footer.size()));
 
+	// the builder is single-use by convention, but an object that has handed over its bytes has to
+	// report itself empty in every respect - a stale byte count reads as "full" to the next caller
 	chunks.clear();
 	nodes.clear();
+	body.clear();
+	uncompressed_bytes = 0;
 	return xorb;
 }
 
