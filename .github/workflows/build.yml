@@ -12,12 +12,10 @@ permissions:
   contents: read
 
 jobs:
-  # Builds the extension for the DuckDB distribution matrix with DuckDB's own CI images and uploads
-  # one artifact per platform (<ext>-<duckdb-version>-extension-<arch>). The reusable workflow checks
-  # duckdb out next to this repo (./duckdb), which the Makefile prefers over ../vendor as well.
-  #
-  # NOTE: not yet executed on GitHub - the matrix, and in particular alpha/dev DuckDB builds, still
-  # needs a first green run.
+  # Builds the extension for the DuckDB distribution matrix with DuckDB's own CI images and uploads one
+  # artifact per platform (<ext>-<duckdb-version>-extension-<arch>). The reusable workflow clones duckdb
+  # into ./duckdb itself (the Makefile prefers that over the ../vendor checkout used locally), and the
+  # root vcpkg.json satisfies the manifest its CI images point VCPKG_MANIFEST_DIR at.
   distribution:
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@4a5752ce7689b547344a91067bddb2b2b5395fac
     with:
@@ -29,6 +27,14 @@ jobs:
       # duckdb that will load the extension, and dev wheels carry a generated v2.0.0-alphaNNNNN that
       # no upstream tag provides (see README "The version identifier has to match").
       duckdb_version: d4355d01c59362d57036ad377735dd5340276a5b
-      # windows and wasm are not exercised locally, musl needs an extra toolchain
-      exclude_archs: "windows_amd64;windows_arm64;linux_amd64_musl;linux_arm64_musl;wasm_mvp;wasm_eh;wasm_threads"
+      # ...and name that commit with the identifier the dev wheel reports, because that is what
+      # `git describe` in the duckdb checkout becomes, which is what gets baked into the binary. Without
+      # this the artifacts are built against the right *code* and a wrong *version tag*, and every
+      # client refuses to LOAD them ("extension was built from a different version").
+      duckdb_tag: v2.0.0-alpha47600
+      # windows and wasm are not exercised locally, musl needs an extra toolchain. macOS builds are
+      # only run on a tag or a manual dispatch: this repository is private, where GitHub charges macOS
+      # minutes at 10x against a monthly quota, and every job here compiles DuckDB from source (the
+      # prebuilt DuckDB archives only exist for released versions).
+      exclude_archs: "windows_amd64;windows_arm64;linux_amd64_musl;linux_arm64_musl;wasm_mvp;wasm_eh;wasm_threads${{ github.event_name == 'push' && ';osx_amd64;osx_arm64' || '' }}"
       skip_tests: false

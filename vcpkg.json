@@ -1,0 +1,6 @@
+{
+  "description": "Vcpkg manifest for the hf extension. The extension itself has no external dependency: sha256, base64 and the JSON reader/writer are self-contained, and blake3/gearhash are vendored in third_party. The manifest exists because DuckDB's CI images configure with a vcpkg toolchain and point VCPKG_MANIFEST_DIR at the extension root, which fails the configure step outright when there is no manifest to read - so an empty dependency list is the honest answer, not a stub to fill in later. Compare duckdb-httpfs, whose manifest lists openssl and curl because it actually needs them.",
+  "homepage": "https://github.com/lhoestq/duckdb-hf-extension",
+  "license": "Apache-2.0",
+  "dependencies": []
+}
