@@ -249,17 +249,6 @@ void HFWhoami(DatabaseInstance &db, optional_ptr<FileOpener> opener, const strin
 	}
 }
 
-void HFRefuseBucketWrite(const HFUrl &url, const string &action) {
-	if (!url.IsBucket()) {
-		return;
-	}
-	throw IOException("Writing to Hugging Face buckets is not supported yet: bucket uploads ('%s') go through Xet "
-	                  "storage, whose `xetHash` only the `hf_xet` client computes - use `hf buckets cp` (or `hf "
-	                  "buckets sync`) for bytes on a local disk, or `hf_bucket_copy(...)` to move what the Hub "
-	                  "already stores into the bucket. Reading and deleting buckets through hf://buckets/ works.",
-	                  action);
-}
-
 string HFFileSystem::GetHFUrl(const HFUrl &dir, const string &entry_path) {
 	HFUrl result = dir;
 	result.path = "/" + entry_path;
@@ -275,7 +264,15 @@ unique_ptr<FileHandle> HFFileSystem::OpenFile(const string &path, FileOpenFlags 
 	auto target = HFResolveTarget(path, opener, db);
 	if (flags.OpenForWriting() || flags.CreateFileIfNotExists() || flags.OverwriteExistingFile() ||
 	    flags.OpenForAppending()) {
-		HFRefuseBucketWrite(target.url, path);
+		// A trailing slash means the caller meant a directory. URL parsing drops it - correctly, for a
+		// read - so writing would create a file named `dir` beside it, which is why this is checked on the
+		// path as written. `COPY ... TO 'dir'` (PARTITION_BY ...) writes into a directory without one.
+		if (!path.empty() && path.back() == '/') {
+			throw IOException("'%s' does not contain a file name - a trailing slash names a directory. "
+			                  "Write one file as 'hf://.../dir/file.parquet', or partition into a directory "
+			                  "with (FORMAT PARQUET, PARTITION_BY ...) and no trailing slash",
+			                  path);
+		}
 		return make_uniq<HFWriteHandle>(*this, path, flags, std::move(target), opener);
 	}
 	return make_uniq<HFReadHandle>(*this, path, flags, std::move(target), opener);

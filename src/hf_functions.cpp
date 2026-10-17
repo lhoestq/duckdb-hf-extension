@@ -6,6 +6,7 @@
 #include "hf_cas.hpp"
 #include "hf_xet_hash.hpp"
 #include "hf_xet_xorb.hpp"
+#include "hf_xet_shard.hpp"
 
 #include "duckdb/common/file_opener.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -1082,12 +1083,16 @@ static void HFBucketCopyFunction(ClientContext &, TableFunctionInput &data, Data
 struct HFXetUploadBindData : public TableFunctionData {
 	HFTarget target;
 	string path;
+	//! the path inside the scope's repository that the content becomes, when publishing
+	string publish_path;
+	bool publish = false;
 };
 
 struct HFXetUploadState : public GlobalTableFunctionState {
-	//! The uploads, done on the first call rather than at bind time and kept here rather than in the
+	//! The upload, done on the first call rather than at bind time and kept here rather than in the
 	//! bind data: planning a query should not put content into a CAS, and bind data is const by then.
-	vector<HFXetXorbUpload> uploads;
+	HFXetUploadResult result;
+	bool published = false;
 	idx_t next = 0;
 	bool done = false;
 
@@ -1122,6 +1127,28 @@ static unique_ptr<FunctionData> HFXetUploadBind(ClientContext &context, TableFun
 	// the url as written, not the target's: the file to open is the whole path, not the repository
 	bind_data->path = content_path;
 
+	// `publish` is what turns an upload into a file. Without it the content sits in the CAS addressable
+	// by hash and nothing names it, which is a useful thing to be able to test on its own.
+	bind_data->publish = NamedArgumentOr(input, "publish", false);
+	if (bind_data->publish) {
+		if (!bind_data->target.url.IsBucket()) {
+			throw BinderException("hf_xet_upload can only publish into a bucket: a git-backed repository "
+			                      "names a file by an LFS pointer, not by its Xet hash (got '%s')",
+			                      scope_path);
+		}
+		// the scope url's own path wins; a bare repository url falls back to the file's name, since a
+		// local /tmp path has no meaningful directory on the Hub
+		bind_data->publish_path = bind_data->target.url.path;
+		if (bind_data->publish_path.empty()) {
+			auto slash = bind_data->path.find_last_of('/');
+			bind_data->publish_path = slash == string::npos ? bind_data->path : bind_data->path.substr(slash + 1);
+		}
+		if (bind_data->publish_path.empty()) {
+			throw BinderException("hf_xet_upload has nothing to publish as - give the scope a path, like "
+			                      "'hf://buckets/my-user/my-bucket/data.csv'");
+		}
+	}
+
 	names.emplace_back("xorb");
 	return_types.push_back(LogicalType::VARCHAR);
 	names.emplace_back("num_chunks");
@@ -1131,6 +1158,19 @@ static unique_ptr<FunctionData> HFXetUploadBind(ClientContext &context, TableFun
 	names.emplace_back("uncompressed_bytes");
 	return_types.push_back(LogicalType::BIGINT);
 	names.emplace_back("inserted");
+	return_types.push_back(LogicalType::BOOLEAN);
+	//! The last four describe the upload as a whole, so they repeat on every row.
+	names.emplace_back("xet_hash");
+	return_types.push_back(LogicalType::VARCHAR);
+	names.emplace_back("shard_bytes");
+	return_types.push_back(LogicalType::BIGINT);
+	//! The CAS names a shard by its own re-serialized hash, so this is what it chose to call the shard
+	//! rather than a hash of the bytes that were sent.
+	names.emplace_back("shard_hash");
+	return_types.push_back(LogicalType::VARCHAR);
+	names.emplace_back("shard_result");
+	return_types.push_back(LogicalType::VARCHAR);
+	names.emplace_back("published");
 	return_types.push_back(LogicalType::BOOLEAN);
 	return std::move(bind_data);
 }
@@ -1146,23 +1186,47 @@ static void HFXetUploadFunction(ClientContext &context, TableFunctionInput &data
 		return;
 	}
 	ClientContextFileOpener file_opener(context);
-	if (state.uploads.empty() && state.next == 0) {
-		state.uploads = HFXetUploadFileContents(DatabaseInstance::GetDatabase(context),
-		                                        FileSystem::GetFileSystem(context), &file_opener,
-		                                        bind_data.target, bind_data.path);
+	auto &db = DatabaseInstance::GetDatabase(context);
+	if (state.next == 0 && !state.published) {
+		state.result = HFXetUploadFileContents(db, FileSystem::GetFileSystem(context), &file_opener,
+		                                       bind_data.target, bind_data.path);
+		if (bind_data.publish) {
+			HFBucketAddOp add;
+			add.path = bind_data.publish_path;
+			add.xet_hash = state.result.XetHash();
+			HFAddFilesToBucket(db, &file_opener, bind_data.target, {add});
+			state.published = true;
+		}
 	}
 
 	idx_t count = 0;
-	while (state.next < state.uploads.size() && count < STANDARD_VECTOR_SIZE) {
-		auto &uploaded = state.uploads[state.next++];
-		output.data[0].SetValue(count, Value(uploaded.hash.Hex()));
-		output.data[1].SetValue(count, Value::BIGINT(uploaded.num_chunks));
-		output.data[2].SetValue(count, Value::BIGINT(uploaded.bytes));
-		output.data[3].SetValue(count, Value::BIGINT(uploaded.uncompressed_bytes));
-		output.data[4].SetValue(count, Value::BOOLEAN(uploaded.inserted));
+	// An empty file is a file: it has no xorbs, but the shard was still uploaded and the bucket still
+	// got an entry, so the answer is one row saying so rather than no rows at all.
+	auto total = state.result.xorbs.empty() ? idx_t(1) : state.result.xorbs.size();
+	while (state.next < total && count < STANDARD_VECTOR_SIZE) {
+		if (state.next < state.result.xorbs.size()) {
+			auto &uploaded = state.result.xorbs[state.next];
+			output.data[0].SetValue(count, Value(uploaded.hash.Hex()));
+			output.data[1].SetValue(count, Value::BIGINT(uploaded.num_chunks));
+			output.data[2].SetValue(count, Value::BIGINT(uploaded.bytes));
+			output.data[3].SetValue(count, Value::BIGINT(uploaded.uncompressed_bytes));
+			output.data[4].SetValue(count, Value::BOOLEAN(uploaded.inserted));
+		} else {
+			output.data[0].SetValue(count, Value());
+			output.data[1].SetValue(count, Value::BIGINT(0));
+			output.data[2].SetValue(count, Value::BIGINT(0));
+			output.data[3].SetValue(count, Value::BIGINT(0));
+			output.data[4].SetValue(count, Value::BOOLEAN(false));
+		}
+		output.data[5].SetValue(count, Value(state.result.XetHash()));
+		output.data[6].SetValue(count, Value::BIGINT(state.result.shard_bytes));
+		output.data[7].SetValue(count, state.result.shard_hash.empty() ? Value() : Value(state.result.shard_hash));
+		output.data[8].SetValue(count, Value(state.result.shard_result));
+		output.data[9].SetValue(count, Value::BOOLEAN(state.published));
+		state.next++;
 		count++;
 	}
-	state.done = state.next >= state.uploads.size();
+	state.done = state.next >= total;
 	output.SetChildCardinality(count);
 }
 
@@ -1194,6 +1258,7 @@ static unique_ptr<FunctionData> HFXetSelfTestBind(ClientContext &, TableFunction
 	// at bind time with no connection, token, or network.
 	bind_data->failures = HFXetHashSelfTest(bind_data->results);
 	bind_data->failures += HFXetXorbSelfTest(bind_data->results);
+	bind_data->failures += HFXetShardSelfTest(bind_data->results);
 
 	names.push_back(Identifier("check_name"));
 	return_types.push_back(LogicalType::VARCHAR);
@@ -1270,6 +1335,7 @@ void HFFunctions::Register(ExtensionLoader &loader) {
 	TableFunction hf_xet_upload(Identifier("hf_xet_upload"), {LogicalType::VARCHAR}, HFXetUploadFunction,
 	                            HFXetUploadBind, HFXetUploadInit);
 	hf_xet_upload.GetSignature().AddKeywordOnly("scope", LogicalType::VARCHAR, Value(""));
+	hf_xet_upload.GetSignature().AddKeywordOnly("publish", LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	loader.RegisterFunction(std::move(hf_xet_upload));
 
 	TableFunction hf_status(Identifier("hf_status"), {}, HFStatusFunction, HFStatusBind, HFStatusInit);

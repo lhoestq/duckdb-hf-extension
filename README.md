@@ -83,7 +83,7 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | `hf_status()` | `hf_version, duckdb_version, endpoint, token_source, user, fullname, whoami_error, http_transport, hf_read_buffer_size, hf_read_cache_size, hf_read_max_parallel_requests, hf_read_cache_total_size, hf_max_per_page, hf_create_repo, hf_cache_dir` |
 | `hf_read_stats(reset := false)` | `files_opened, range_hits, coalesced_waits, window_fetches, part_requests, straddling_fetches, evictions, bytes_fetched, invalidations, retained_bytes, retained_files` |
 | `hf_read_cache_clear()` | `cleared_bytes, cleared_files` (drops everything the read cache retained) |
-| `hf_xet_upload(path[, scope := 'hf://…'])` | `xorb, num_chunks, bytes, uncompressed_bytes, inserted` — chunks the file and stores each xorb in the content addressable storage; `inserted` is the CAS's dedup answer. `scope` names the repository whose token the bytes go up against, needed when the file is local. Stores content; does not yet make a file readable (docs/XET.md, M5) |
+| `hf_xet_upload(path[, scope := 'hf://…'][, publish := bool])` | `xorb, num_chunks, bytes, uncompressed_bytes, inserted, xet_hash, shard_bytes, shard_hash, shard_result, published` — the Xet write path as a table function: chunks the file, stores each xorb, then stores the metadata shard that makes them a file. `inserted` and `shard_result` are the CAS's dedup answers. `scope` names the repository whose token the bytes go up against (needed for a local file), and `publish` registers the result as a file in a bucket. `COPY … TO 'hf://buckets/…'` is this, automated |
 | `hf_xet_selftest()` | `check_name, assert_passed, expected, got, assert_no_failures` — the Xet port checked against reference vectors generated from `xet-core`: hashes, chunk boundaries, merkle roots, and whole serialized xorbs. Offline, no token |
 
 `hf_read_stats()` is the read path's dashboard: `bytes_fetched / <file size>` is the download
@@ -144,11 +144,17 @@ SELECT * FROM hf_upload('out.parquet', 'hf://datasets/me/demo/out.parquet',
 SELECT * FROM hf_delete(['hf://datasets/me/demo/old.parquet', 'hf://models/me/demo/partitioned']);
 ```
 
-Buckets are readable and deletable, and they take new data through `hf_bucket_copy`: a bucket upload
-(`addFile`) requires a Xet `xetHash`, which only the `hf_xet` client computes, so DuckDB cannot push
-bytes into one. What it *can* do is ask the Hub to point a bucket path at content it already stores -
-from a dataset, model, space, kernel or another bucket - which is a server-side copy: no bytes go
-through DuckDB, and the size does not matter.
+Buckets read, delete, and take new data two ways: a plain write of your own bytes, and `hf_bucket_copy`
+for content the Hub already holds.
+
+A bucket file *is* Xet content - there is no pointer, no branch, no commit behind it - so a write means
+chunking the file, storing the chunks, storing the metadata shard that describes them as that file, and
+registering it. All four happen on a `COPY`, which is why this works like any other `COPY`:
+
+```sql
+COPY (SELECT * FROM large_table) TO 'hf://buckets/me/playground/export.parquet' (FORMAT PARQUET);
+COPY (SELECT * FROM events) TO 'hf://buckets/me/playground/events/' (FORMAT PARQUET, PARTITION_BY (day));
+```
 
 ```sql
 -- one file, onto an exact name
@@ -169,21 +175,36 @@ Hub keeps outside Xet - a plain
 git blob, which is how small files sometimes land - has no hash to reference and comes back as
 `skipped: ...` rather than an error, because a bucket simply cannot point at it.
 
-A direct write is still refused, and says so:
+`hf_bucket_copy` is the other way in, and it is free: asking the Hub to point a bucket path at content it
+already stores - from a dataset, model, space, kernel or another bucket - moves no bytes through DuckDB,
+so the size does not matter.
+
+The upload can also be driven by hand, which is what `scripts/smoke_xet_upload.sql` does:
 
 ```sql
-COPY (SELECT 1) TO 'hf://buckets/me/playground/x.parquet';
--- IO Error: Writing to Hugging Face buckets is not supported yet: bucket uploads (...) go through
--- Xet storage, whose `xetHash` only the `hf_xet` client computes - use `hf buckets cp` or
--- `hf_bucket_copy(...)` (...)
+SELECT * FROM hf_xet_upload('/tmp/export.parquet',
+                            scope := 'hf://buckets/me/playground/export.parquet', publish := true);
+-- xorb                              num_chunks  bytes  uncompressed_bytes  inserted  xet_hash  ...
+-- 4bf38b7e9ff6bf5b479263bf0f36151c… 1          5144   5000                true      0aea24e8…
 ```
+
+Without `publish` the content ends up in the content addressable storage, addressable by hash but not
+named as a file - useful for testing a writer on its own. `hf_upload(local, 'hf://buckets/…')` takes the
+same route as a `COPY`.
+
+What a write does *not* do is delete the old content: rewriting a path publishes the new file hash over
+the old one, and the chunks the previous version used stay in the CAS, which is what content addressable
+storage is for.
+
 ```bash
-hf buckets cp out.parquet hf://buckets/lhoestq/playground/duckdb/out.parquet   # bytes from a local disk
+hf buckets cp out.parquet hf://buckets/lhoestq/playground/duckdb/out.parquet   # the CLI's equivalent
 ```
 
 Verified end to end in `scripts/smoke_buckets.sh`: fixtures are written by DuckDB into a staging
-dataset repository (which also covers create-on-write), copied into a bucket, read back through
-`hf://`, deleted again, and both refusal paths are exercised.
+dataset repository (which also covers create-on-write), copied into a bucket, written into one directly,
+read back through `hf://`, deleted again, and the refusal paths are exercised. `scripts/smoke_xet_upload.sh`
+adds the byte-level proof: a published file is compared `md5`-for-`md5` with the bytes that went in, and a
+file whose chunks span several xorbs is rebuilt by the Hub from the shard that describes it.
 
 ## Reading performance
 
@@ -259,8 +280,9 @@ what a given binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
 * ✔ `hf_upload`, `hf_delete` (single path, list of paths, mixed repositories, recursive directories)
 * ✔ model / space / kernel repos end to end (writes, nested paths, `**` globs, LFS and git-tracked
   files verified byte-identical with `md5(read_blob(...))`)
-* ✔ bucket reads, bucket deletes (`hf://buckets/...`) and bucket writes through `hf_bucket_copy`
-  (server-side copies of anything already on the Hub: files, folders, globs, bucket to bucket)
+* ✔ bucket reads, bucket deletes (`hf://buckets/...`), server-side copies into buckets
+  (`hf_bucket_copy`: files, folders, globs, bucket to bucket) **and** direct writes -
+  `COPY (SELECT …) TO 'hf://buckets/…'` goes through Xet end to end (see the M5 entry below)
 * ✔ `hf_list_revisions`, `hf_list_refs`, `hf_create_repo`, `hf_status`, `hf_read_stats`,
   `hf_read_cache_clear`
 * ✔ create-on-write: with `hf_create_repo = true` the first write creates the repository (private;
@@ -278,12 +300,19 @@ what a given binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
   bearer token, its retry policy, splitting at the format's size limits, and its dedup answer. Verified
   by `scripts/smoke_xet_upload.sh` against the production CAS, which validates every xorb hash itself.
   Content is stored, not yet *reachable*: a file needs a metadata shard that names its chunks.
-* ✘ Xet-backed *writes* (`COPY … TO 'hf://…'`, uploads of DuckDB's own bytes) still go over git-LFS,
-  which the Hub accepts for every repo type; switching them to Xet is the shard + commit milestone (M5).
-* ✘ `COPY ... TO 'hf://buckets/...'`: pushing DuckDB's own bytes into a bucket needs an Xet
-  `xetHash`, which only `hf_xet` computes; the extension refuses with a message pointing at
-  `hf buckets cp` and `hf_bucket_copy`. The same reason makes a `hf_bucket_copy` of a file the Hub
-  keeps as a plain git blob come back `skipped` - there is no hash for a bucket to point at
+* ✔ the metadata shard, and a file at the end of it (`docs/XET.md`, M5): `hf_xet_shard.cpp` writes the
+  shard a session uploads - header, file section with per-segment verification hashes, xorb section, cut
+  short at `file_lookup_offset` with `footer_size` rewritten to 0 - byte-for-byte identical to what
+  `xet-core` produces (70 of the self-test's checks, one of them a 7-xorb file). Uploading it to
+  `POST /v1/shards` and registering the result with a bucket's batch `addFile` is what
+  `COPY … TO 'hf://buckets/…'` now does, and the suites read such a file back and compare it byte for
+  byte with what was written - including one whose chunks live in several xorbs.
+* ✘ git-backed repositories (datasets, models, spaces, kernels) keep being written over git-LFS. That is
+  no longer a missing piece of the client but a missing piece of the *commit*: the Hub identifies the
+  file by sha256 in the LFS pointer, so a Xet write there has to carry the shard's `metadata_ext` link
+  between the two hashes, which is unvalidated against the live Hub (docs/XET.md, M6).
+* ✘ a `hf_bucket_copy` of a file the Hub keeps as a plain git blob comes back `skipped` - a bucket can
+  only point at Xet content, and a git blob has no hash for it to point at.
 
 ## Layout
 
@@ -299,11 +328,12 @@ src/
   hf_read.cpp       per-file range cache: aligned window grid, shared + coalesced, parallel window
                     fetch, budgeted retention beyond the handle, invalidation on commit
   hf_commit.cpp     the write protocol: preupload -> lfs batch -> ndjson commit (+repo mutex)
-  hf_write.cpp      write handle: temp file buffering, upload+commit on close
+  hf_write.cpp      write handle: temp file buffering, upload+commit (or Xet publish) on close
   hf_xet_hash.cpp   BLAKE3-keyed Xet hashes, mean tree, reference self-test (M1)
   hf_xet_chunk.cpp  gear-hash content-defined chunking, byte-exact with xet-core (M2)
   hf_xet_xorb.cpp   serialized xorb: chunk section + V1 footer, byte-exact with xet-core (M3)
-  hf_cas.{hpp,cpp}  CAS client: write-token exchange, xorb upload, retries, dedup (M4)
+  hf_cas.{hpp,cpp}  CAS client: write-token exchange, xorb + shard upload, retries, dedup (M4, M5)
+  hf_xet_shard.{hpp,cpp} metadata shard: sections, verification hashes, the footer-less uploaded form
   hf_functions.cpp  hf_ls / hf_meta / hf_upload / hf_delete / hf_bucket_copy / hf_list_revisions /
                     hf_list_refs / hf_create_repo / hf_status / hf_read_stats / hf_read_cache_clear
   hf_extension.cpp  entry point
@@ -336,21 +366,23 @@ bash scripts/smoke_models.sh  # each .sh makes its own fixtures and cleans up af
 
 ```
 --- xet
-    xet: 4 passed, 0 expected failures, 0 failed          # offline: 226 reference checks
+    xet: 4 passed, 0 expected failures, 0 failed          # offline: 296 reference checks
 --- xet_upload
-    xet_upload: 8 passed, 1 expected failures, 0 failed   # against the production CAS
+    xet_upload: 24 passed, 1 expected failures, 0 failed  # against the production CAS
 --- read
     read: 55 passed, 0 expected failures, 0 failed
 --- write
-    write: 45 passed, 5 expected failures, 0 failed
+    write: 45 passed, 6 expected failures, 0 failed
 --- models
     models: 24 passed, 0 expected failures, 0 failed
 --- buckets
-    buckets: 18 passed, 3 expected failures, 0 failed
+    buckets: 22 passed, 2 expected failures, 0 failed
 ```
 
 `xet` is the only suite that runs without a token or a network. `xet_upload` is the one that cannot pass
-on a wrong byte: it uploads to the real CAS, which re-hashes every xorb it receives.
+on a wrong byte: it uploads to the real CAS, which re-hashes every xorb it receives and re-derives the
+verification hash of every segment of every shard it is sent - which is how a shard that indexed chunks
+by their file-wide position rather than their position inside their xorb was caught.
 
 `scripts/try.py` is the runner. It takes a `.sql` file, executes **one statement per line-group**
 (semicolon separated), and grades the result:
@@ -473,9 +505,19 @@ and clients get `INSTALL hf FROM 'https://huggingface.co/datasets/me/duckdb-hf-r
 
 ## Notes / limitations
 
-* Writes buffer to a local temp file first (the commit API needs the sha256 + size up front), then
-  upload + commit happen on `Close()`. One commit per file, serialised per repository within a
-  process; concurrent writers are handled by the Hub's own conflict detection.
+* Writes buffer to a local temp file first (the commit API needs the sha256 + size up front; a bucket
+  write needs the file on disk for the same reason - chunking reads it back), then
+  upload + commit - or the Xet publish - happen on `Close()`. One commit per file, serialised per
+  repository within a process; concurrent writers are handled by the Hub's own conflict detection.
+* A bucket write uploads its xorbs **sequentially**. The reference client runs them through an adaptive
+  concurrency limiter, and ~76 MB in ~6 s is respectable, but a folder of files and a big single file
+  both have room to go; the parallelism is a client-side policy, not a format question (docs/XET.md).
+* Uploads do not *query* for deduplication: a file that shares 90% of its chunks with something already
+  in the CAS is re-sent whole, and the CAS refuses the duplicate work chunk-for-xorb rather than
+  reusing it. `inserted` in `hf_xet_upload` is the visible symptom. The reconstruction-side dedup query
+  is the missing counterpart, and it costs bytes rather than correctness.
+* A Xet upload is **per file, per statement**: `COPY` publishes when the file closes, so a partitioned
+  write publishes one file at a time, each with its own shard.
 * Files ≤ the Hub's inline threshold are sent as base64 in the commit payload; larger ones use
   git-LFS transfer: *basic* (one presigned PUT, the file is held in memory once) or, above the
   Hub's ~10 MB threshold, *basic multipart* (parts streamed from disk one at a time). The

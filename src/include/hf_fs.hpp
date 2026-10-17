@@ -124,6 +124,27 @@ struct HFBucketCopyOp {
 void HFCopyIntoBucket(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &bucket,
                       const vector<HFBucketCopyOp> &operations);
 
+//! One `addFile` operation of the bucket batch endpoint: a path, and the Xet content it points at.
+//! Nothing else about a bucket file is supplied by the client - not the size, not a sha256 - because
+//! the Hub reads all of that back out of the CAS from the hash alone.
+struct HFBucketAddOp {
+	string path; //!< path inside the bucket
+	string xet_hash; //!< the file hash, in the Hub's hex form
+	//! served as the file's content type when set; otherwise the Hub guesses from the extension
+	string content_type;
+};
+
+//! Publish content that is already in the CAS as files in a bucket. This is the step that makes an
+//! upload visible: xorbs and shards in the CAS are addressable but nameless until something points at
+//! them, and for a bucket that something is one ndjson line.
+void HFAddFilesToBucket(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &bucket,
+                        const vector<HFBucketAddOp> &operations);
+
+//! Put a local file's content into Xet storage and register it as a file in a bucket. This is what a
+//! write to `hf://buckets/...` does, whichever door it comes through: `COPY`, `hf_upload`, ...
+void HFUploadLocalFileToBucket(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &bucket,
+                               const string &local_path);
+
 //! sha256/size/sample of a local file
 HFBlobInfo HFComputeBlobInfo(DatabaseInstance &db, const string &local_path);
 
@@ -162,9 +183,6 @@ bool HFCreateRepo(DatabaseInstance &db, optional_ptr<FileOpener> opener, const H
 void HFWhoami(DatabaseInstance &db, optional_ptr<FileOpener> opener, const string &path, string &user,
               string &fullname, bool &is_pro, string &error);
 
-//! Buckets are Xet-backed, and only the `hf_xet` client can compute the `xetHash` that `addFile` requires, so
-//! every write path (COPY, hf_upload, ...) refuses them with the same explanation
-void HFRefuseBucketWrite(const HFUrl &url, const string &action);
 
 //! Default commit message when `hf_commit_message` is not set
 string HFDefaultCommitMessage(const HFUrl &url);

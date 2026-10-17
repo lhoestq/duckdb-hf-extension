@@ -6,9 +6,13 @@
 -- new. Nothing here is stubbed or simulated, and nothing here can pass with a writer that produces
 -- bytes the real service cannot read (docs/XET.md, M3 + M4).
 --
--- What it does not do is make a file readable: content only becomes a file when a metadata shard
--- refers to it, which is the next milestone. So this suite deletes its git-side fixture afterwards -
--- the chunks stay in the CAS, which is what content-addressed storage is for.
+-- The suite also covers the other half: the metadata shard that turns chunks back into a file, and the
+-- bucket batch call that names that file at a path. That combination is `COPY ... TO 'hf://buckets/...'`,
+-- and it is checked the only way that settles the question - by reading the file back through `hf://`
+-- and comparing bytes with what went in.
+--
+-- Everything here is deleted again at the end; the chunks themselves stay in the CAS, which is what
+-- content addressable storage is for.
 
 SET hf_create_repo = true;
 
@@ -54,3 +58,65 @@ SELECT * FROM hf_xet_upload('/tmp/hf_xet_upload_probe.csv', scope := '/tmp');
 
 SELECT count(*) AS deleted FROM hf_delete('hf://datasets/lhoestq/hf-smoke-staging/xet_upload_probe.csv',
                                           missing_ok := true);
+
+-- Publishing: content in the CAS is addressable but nameless; a shard describes it as a file, and a
+-- bucket's `addFile` gives that file a path.
+
+-- random() again, so that the *first* publish of a run really inserts and the second really does not
+COPY (SELECT md5((i * random())::VARCHAR) AS a, random()::VARCHAR AS b FROM range(5000) t(i))
+     TO '/tmp/hf_xet_bucket_probe.csv' (FORMAT CSV);
+
+SELECT bool_and(published) AS assert_published,
+       bool_and(len(xet_hash) = 64) AS assert_hash_is_a_xet_hash,
+       bool_and(inserted) AS assert_content_is_new,
+       bool_and(shard_bytes > 0) AS assert_shard_was_uploaded,
+       bool_and(shard_result IN ('exists', 'sync performed')) AS assert_shard_answered
+FROM hf_xet_upload('/tmp/hf_xet_bucket_probe.csv',
+                   scope := 'hf://buckets/lhoestq/playground/duckdb/xet_upload.csv', publish := true);
+
+SELECT 'p1 a published file reads back byte for byte' AS t,
+       md5(content) = (SELECT md5(content) FROM read_blob('/tmp/hf_xet_bucket_probe.csv')) AS assert_same_bytes
+FROM read_blob('hf://buckets/lhoestq/playground/duckdb/xet_upload.csv');
+
+-- The same content a second time must be refused work rather than duplicated, both in the chunks and in
+-- the shard: this is the property that makes re-uploading a directory cheap.
+SELECT bool_and(NOT inserted) AS assert_repeat_is_deduplicated,
+       bool_and(shard_result = 'exists') AS assert_shard_is_already_there
+FROM hf_xet_upload('/tmp/hf_xet_bucket_probe.csv',
+                   scope := 'hf://buckets/lhoestq/playground/duckdb/xet_upload_twice.csv', publish := true);
+
+-- `COPY ... TO 'hf://buckets/...'` is the same pipeline with DuckDB filling the temp file.
+COPY (SELECT md5((i * random())::VARCHAR) AS a FROM range(7000) t(i))
+     TO 'hf://buckets/lhoestq/playground/duckdb/xet_copy.csv' (FORMAT CSV);
+SELECT 'p2 COPY TO a bucket writes through Xet' AS t, count(*) = 7000 AS assert_rows,
+       count(DISTINCT a) = 7000 AS assert_content_is_there
+FROM read_csv('hf://buckets/lhoestq/playground/duckdb/xet_copy.csv');
+
+-- rewriting a path publishes the new content under the old name
+COPY (SELECT i AS a FROM range(3) t(i))
+     TO 'hf://buckets/lhoestq/playground/duckdb/xet_copy.csv' (FORMAT CSV, HEADER false);
+SELECT 'p3 rewriting a bucket path replaces the file' AS t, count(*) = 3 AS assert_rows,
+       min(a) = 0 AS assert_min, max(a) = 2 AS assert_max
+FROM read_csv('hf://buckets/lhoestq/playground/duckdb/xet_copy.csv', header := false, columns := {'a': 'BIGINT'});
+
+-- More than one xorb, which means the metadata shard has to describe a file whose segments live in
+-- several objects - and the Hub has to agree, since it is the one assembling the read ranges.
+COPY (SELECT repeat(md5((i * random())::VARCHAR), 12) AS b FROM range(200000) t(i))
+     TO 'hf://buckets/lhoestq/playground/duckdb/xet_big.parquet' (FORMAT PARQUET, COMPRESSION UNCOMPRESSED);
+SELECT 'p4 a file spanning several xorbs is rebuilt' AS t, count(*) = 200000 AS assert_rows,
+       sum(length(b)) = 76800000 AS assert_bytes, count(DISTINCT b) > 190000 AS assert_no_corruption
+FROM 'hf://buckets/lhoestq/playground/duckdb/xet_big.parquet';
+
+-- A copy asks the Hub for the xetHash of a file *this extension* wrote: if the shard had described the
+-- content in a way the Hub could not read back, the hash would never arrive.
+SELECT 'p5 the hub sees a xet-written file as xet content' AS t,
+       bool_and(status = 'copied') AS assert_copied,
+       bool_and(len(xet_hash) = 64) AS assert_hashed
+FROM hf_bucket_copy('hf://buckets/lhoestq/playground/duckdb/xet_upload.csv',
+                    'hf://buckets/lhoestq/playground/duckdb/xet_copied.csv');
+
+SELECT count(*) AS cleaned FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_upload.csv');
+SELECT count(*) AS cleaned_again FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_upload_twice.csv');
+SELECT count(*) AS cleaned_again FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_copy.csv');
+SELECT count(*) AS cleaned_again FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_big.parquet');
+SELECT count(*) AS cleaned_again FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_copied.csv');

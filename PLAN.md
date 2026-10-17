@@ -120,13 +120,29 @@ CREATE TABLE x AS SELECT * FROM 'hf://datasets/foo/data.parquet';
       refresh, xorb splitting at the uncompressed 64 MiB / 8192 chunk limits. `hf_xet_upload()` exposes
       it; `scripts/smoke_xet_upload.sh` runs it against the production CAS, which recomputes every hash.
       No exists-check: the url is the content, and `was_inserted` is the dedup answer.
-- [ ] M5 shard + commit: serialize a session shard (protobuf, by hand), `POST {cas}/v1/shards`, then
-      commit with the resulting `xetHash`. First target is `COPY … TO 'hf://buckets/…'`, the one write
-      0.0.1 refuses, read back through `hf://` as the suite; git-LFS stays the default elsewhere.
-      M4's `scope` argument is the seam this plugs into: a `COPY` uploads a local temp file against the
-      target repo's token.
-- [ ] Every stage diff-tested against `xet-core`'s own examples (`chunk`, `hash`, `xorb-check`) - the
-      reference implementation is the oracle, since hash/format bugs are silent failures.
+- [x] M5 shard + publish: a session shard is **not protobuf** - `metadata_shard/` hand-rolls
+      little-endian, so `src/hf_xet_shard.cpp` hand-rolls it too, byte-identical to `xet-core` over 11
+      generated shards (one file across 7 xorbs, the dedup flags, the bookends). The uploaded form is the
+      shard **truncated at `file_lookup_offset`** with `footer_size` rewritten to 0, which is why re-sending
+      identical content reports `exists`: the timestamp is in the dropped footer. `POST {cas}/v1/shards`
+      takes it; the bucket then registers the file with a batch `addFile` carrying `xetHash` - the
+      word-swapped hex of the file hash, verified by reproducing a file already on the Hub.
+      **`COPY … TO 'hf://buckets/…'` works**, `hf_upload` too, and `hf_xet_upload(…, publish := true)` is
+      the route by hand; the suites read it back and compare bytes, including a file whose chunks span
+      several xorbs - the case that caught the xorb-local vs file-global chunk index bug (docs/XET.md).
+- [ ] M6 git-backed repos through Xet: the shard's `metadata_ext` (sha256 + `WITH_METADATA_EXT`) is what
+      links an LFS pointer to Xet content, and `huggingface_hub` sets it for every repo type except
+      buckets (`SKIP_SHA256`). Buckets needed none of it, so this is unvalidated; then decide when a repo
+      write should prefer Xet over git-LFS, which is a cost question - git-LFS works for all five types.
+- [ ] The upload polish that is now a performance matter rather than a correctness one: xorb uploads
+      through the reference's adaptive concurrency (today sequential, ~76 MB in ~6 s), an upload-side dedup
+      query (today nothing is reused across files, `inserted` shows it), and LZ4 frames (an uncompressed
+      xorb is valid, just bigger on the wire).
+- [x] Every stage diff-tested against `xet-core`'s own tooling (`chunk`, `hash`, `xorb`, `xorb-read`,
+      `shard`) - the reference implementation is the oracle, since hash/format bugs are silent failures.
+      The one lesson worth keeping: **offline byte-equality is necessary and not sufficient**. The shard
+      passed every generated vector and the production CAS still rejected the first multi-xorb file,
+      because a vector with one xorb cannot distinguish xorb-local from file-global chunk indices.
 
 ## ## Known unknowns (resolve in order)
 

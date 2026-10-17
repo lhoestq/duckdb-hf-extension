@@ -2,7 +2,38 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-17, ~11:55 UTC)
+## Current position (2026-10-17, ~15:10 UTC)
+
+**M5 is in: `COPY (SELECT …) TO 'hf://buckets/…'` writes through Xet end to end.** The shard writer
+(`src/hf_xet_shard.cpp`) produces the session shard byte-for-byte like `xet-core`, `HFXetCasClient::UploadShard`
+posts it to `POST {cas}/v1/shards`, and `HFAddFilesToBucket` registers the result with the bucket's batch
+`addFile` + `xetHash`. `hf_xet_upload(..., publish := true)` is the same route by hand; `hf_upload` and the
+write handle take it too. `scripts/run_all.sh`: xet 4, xet_upload 24 (+1), read 55, write 45 (+6), models 24,
+buckets 22 (+2) — all green. Selftest 296 checks. Committed as `873b0a2`, tagged `v0.0.2-pre2`.
+
+* **The two coordinate systems, since this is the trap**: a file segment's serialized
+  `chunk_index_start/end` are **xorb-local** (the reader resolves the xorb by hash, then slices that xorb's
+  chunk list), while the segment's *verification hash* is a keyed blake3 over a **file-global** range of the
+  file's chunk list. `HFXetShardSegment` therefore carries both (`chunk_index_*` serialized,
+  `file_chunk_*` not). Single-xorb files cannot tell the difference; the production CAS caught it on the
+  first multi-xorb upload (`HTTP 400 (19) invalid shard failed to verify file`).
+* **`xetHash` = `MerkleHash::hex()`, the word-swapped hex** — confirmed by reproducing a real Hub file
+  (`xet_probe.parquet` → `1b14d820…444d9f`, equal to the tree API's `xetHash`), not inferred.
+* Bucket `addFile` needs the **repository-relative** path: HFUrl keeps the leading slash, the Hub rejects it
+  (`422 Path must not start with '/'`), so `PathInRepo()` strips it. Buckets upload with `skip_sha256`, so no
+  `metadata_ext` — a bucket has no LFS pointer to link.
+* The uploaded shard is the local shard **truncated at `file_lookup_offset`** with the header's
+  `footer_size` rewritten to 0 (`read_shard_to_bytes_remove_footer`); the timestamp is in the dropped part, so
+  identical content dedups (`shard_result = exists`). CAS-reported `shard_hash` is plain hex and is the hash
+  of *its* re-serialization — reported verbatim, never compared locally.
+* **Fixed a pre-existing bug found by the new bucket test**: `COPY … TO '…/dir/'` created a file named `dir`
+  (URL parsing drops the trailing slash — right for reads) for git-backed repos too. Local DuckDB refuses it,
+  so `HFFileSystem::OpenFile` now refuses it on the raw path, and `RequireFileName()` covers the resolved path.
+* Removed `HFRefuseBucketWrite` (dead guard from when buckets were refused).
+* Next (M6): git-backed repos through Xet via the `metadata_ext` sha256 link; then upload concurrency, an
+  upload-side dedup query, LZ4 frames. Details in `docs/XET.md`.
+
+## Position before this (2026-10-17, ~11:55 UTC)
 
 **Milestone: M4, the CAS client, is in and works against the production Hub. `hf_xet_upload()` chunks a
 file, serializes each xorb (M3) and stores it in the real CAS - token exchange, retries, splitting, and
@@ -296,6 +327,9 @@ ls -la && ls src/huggingface 2>/dev/null
 ```
 
 Then continue with the first unchecked box in `PLAN.md`. Do not restart the env setup — it is done.
+For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS API, the shard layout),
+`scripts/xet_oracle.py` regenerates `src/hf_xet_*_vectors.cpp` from `/home/quentin/hf/xet-core`, and
+`tools/xet_probe` (cargo, `--release`) is the oracle. Offline suite: `bash scripts/smoke_xet.sh`.
 
 ## Change log (append one line per meaningful step)
 
@@ -492,3 +526,23 @@ Then continue with the first unchecked box in `PLAN.md`. Do not restart the env 
   GLOBAL scope, so it kept saying `hf_create_repo = false` after `SET hf_create_repo = true`. It now looks
   them up on the `ClientContext` (the init function always had one) and agrees with `duckdb_settings()`.
   Added the missing `scripts/smoke_read.sh` so all four suites are invoked the same way.
+
+* `2026-10-17 12:10` — M5 shard format read out of `xet-core`: sections, bookends, `FileTableIndex` key
+  truncation (`truncated_hash` swaps endianness, key = first 8 LE bytes), `CompareByTruncatedHash`, section
+  ordering (file by full hash, xorb by truncated key). Confirmed the *uploaded* form is
+  `read_shard_to_bytes_remove_footer`: truncate at `file_lookup_offset`, rewrite header `footer_size` to 0.
+* `12:40` — `src/hf_xet_shard.{hpp,cpp}` + probe `shard <max_bytes>` mode + oracle vectors: 11 reference
+  shards byte-identical, including a 7-xorb file and the dedup/global-dedup flag cases. Selftest 226 → 286.
+* `13:05` — `HFXetCasClient::UploadShard` (`POST /v1/shards`, raw bytes, CAS bearer). Live: small file
+  published to `lhoestq/playground` and read back byte-identical; re-publish dedups (`inserted=false`,
+  `shard_result=exists`). `hf_xet_upload` gains `publish` + the shard columns.
+* `13:35` — bucket batch `addFile` path fix (`PathInRepo` leading slash → was `422`). `COPY TO 'hf://buckets/…'`
+  writes a readable parquet; multi-xorb (230 MB uncompressed) initially rejected by CAS with
+  `invalid shard failed to verify file`.
+* `14:20` — root cause: segment chunk indices are xorb-local, verification hashes are file-global. Fixed
+  `HFXetShardSegment` (two coordinate fields), probe + vectors regenerated, selftest 296. Multi-xorb bucket
+  round-trip green, and p5 proves the Hub treats a DuckDB-written bucket file as Xet content (bucket→bucket
+  copy of it succeeds).
+* `14:55` — trailing-slash write refusal (bucket *and* git path; DuckDB local refuses the same statement).
+  Full `run_all.sh` green: 174 statements, 9 expected failures, 0 failures. Bucket probe artifacts deleted;
+  `lhoestq/playground` bucket is empty again.

@@ -10,8 +10,32 @@ Two version numbers are in play, and they are independent:
   per DuckDB identifier per platform, and rebuilding for a newer DuckDB pre-release is a rebuild,
   not a version bump.
 
-## Unreleased — the Xet write path
+## 0.0.2-pre2 — a file at the end of the shard
 
+* **`COPY (SELECT …) TO 'hf://buckets/me/playground/x.parquet'` works, and writes through Xet.** A
+  bucket file *is* Xet content — no pointer, no branch, no commit — so this is the honest bucket write,
+  not a workaround: the temp file is chunked, its xorbs are stored, a metadata shard describing them as
+  one file is stored, and the bucket registers the result by hash (`addFile` + `xetHash`). The file is
+  readable at the url you wrote, verified `md5`-for-`md5` against what went in, including a 230 MB
+  uncompressed file whose chunks are spread over several xorbs (the Hub rebuilds the read ranges from
+  the shard). `hf_upload(local, 'hf://buckets/…')` takes the same route.
+* `hf_xet_shard.cpp` writes the session metadata shard — hand-rolled little-endian, not protobuf, and
+  byte-for-byte identical to what `xet-core` produces for the same content (its uploaded form is the
+  shard cut at `file_lookup_offset` with `footer_size` rewritten to 0, which is what makes re-uploads
+  dedup: the timestamp lives in the part that is dropped). One file's chunks across seven xorbs is one
+  of the pinned vectors. The two coordinate systems a shard uses are documented in `docs/XET.md`: a
+  segment indexes chunks **inside its xorb**, while its verification hash covers a **file-wide** range —
+  mixing them up is invisible until a file spans xorbs, and the production CAS caught it for us
+  (`400 (19) invalid shard failed to verify file`).
+* `hf_xet_upload(...)` gained `publish := true` and the columns the full path produces:
+  `xet_hash, shard_bytes, shard_hash, shard_result, published`. `xet_hash` is the value the Hub calls a
+  `xetHash` — the word-swapped hex of the file hash, confirmed by having the reference chunker and hasher
+  reproduce a real file already on the Hub, hash equal to what its tree entry reports.
+* A trailing slash on a write target is refused rather than obeyed. `COPY … TO '…/dir/'` used to create a
+  file *named* `dir` beside it (url parsing drops the slash — correctly for a read), for buckets and for
+  git-backed repos alike; local DuckDB refuses the same statement, so now this does too, with a message
+  pointing at `PARTITION_BY`, which writes into a directory without needing the slash.
+* `hf_xet_selftest()` pins 296 checks, up from 226.
 * `hf_xet_upload(path [, scope := …])` — chunks a file the way Xet does, serializes each xorb, and
   uploads it to the real content addressable storage: the write-token exchange, the CAS-scoped bearer
   token (never alongside the HF token), the reference's retry policy, and its token refresh 30s before

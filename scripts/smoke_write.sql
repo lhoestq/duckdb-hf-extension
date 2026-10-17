@@ -31,12 +31,15 @@ COPY (SELECT * FROM range(100) t(i)) TO 'hf://datasets/lhoestq/playground/duckdb
 SELECT 'r10 zstd parquet' AS t, count(*) = 100 AS assert_rows FROM 'hf://datasets/lhoestq/playground/duckdb/zstd.parquet';
 
 -- refusals: nothing is created, and the message says why
+-- a trailing slash is a directory: writing it as a name would create a file called `dirslash` beside it
+-- expect-fail: does not contain a file name
+COPY (SELECT 1 i) TO 'hf://datasets/lhoestq/playground/duckdb/dirslash/';
 -- expect-fail: Repository not found
 COPY (SELECT 1 i) TO 'hf://datasets/lhoestq/definitely-not-a-repo-xyz/a.parquet';
 -- expect-fail: Authorization error
 COPY (SELECT 1 i) TO 'hf://datasets/wikimedia/wikipedia/nope.parquet';
--- expect-fail: Writing to Hugging Face buckets is not supported
-COPY (SELECT 1 i) TO 'hf://buckets/lhoestq/playground/nope.parquet';
+-- expect-fail: not found
+COPY (SELECT 1 i) TO 'hf://buckets/lhoestq/definitely-not-a-bucket-xyz/a.parquet';
 -- expect-fail: hf_create_repo
 SELECT * FROM hf_upload('/tmp/hf_write_fixture.bin', 'hf://datasets/lhoestq/definitely-not-a-repo-xyz/b.parquet');
 
@@ -69,7 +72,7 @@ FROM hf_list_revisions('hf://datasets/lhoestq/playground', max_revisions := 5)
 WHERE title = 'duckdb smoke: hf_upload with message';
 SELECT 'i5 hf_status reads' AS t, endpoint LIKE 'https://%' AS assert_endpoint, user <> '' AS assert_user,
        whoami_error = '' AS assert_no_whoami_error, token_source <> 'none' AS assert_token,
-       hf_version = '0.0.2-pre1' AS assert_version
+       hf_version = '0.0.2-pre2' AS assert_version
 FROM hf_status();
 
 -- the read cache has to notice what the write changed

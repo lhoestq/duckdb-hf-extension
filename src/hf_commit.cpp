@@ -1,6 +1,7 @@
 #include <algorithm>
 #include "hf_fs.hpp"
 
+#include "hf_cas.hpp"
 #include "hf_crypto.hpp"
 #include "hf_settings.hpp"
 
@@ -59,6 +60,19 @@ static string PathInRepo(const string &path) {
 		return "";
 	}
 	return path.front() == '/' ? path.substr(1) : path;
+}
+
+//! A write names one file. A trailing slash means the caller meant a directory, and writing it as a file
+//! name would create a file called `dir` next to it - which is what a plain `PathInRepo` check allows,
+//! locally-confirmed for both repository kinds before this said otherwise.
+static void RequireFileName(const HFUrl &url, const string &path_in_repo) {
+	if (path_in_repo.empty() || path_in_repo.back() == '/') {
+		throw IOException("'%s' does not contain a file name - write to a path ending in a file name, for "
+		                  "example 'hf://%s/user/repo/data.parquet'%s",
+		                  url.ToString(), string(url.repo_type),
+		                  path_in_repo.empty() ? "" : " (a trailing slash names a directory, which is what "
+		                                             "PARTITION_BY writes into without one)");
+	}
 }
 
 //! The Hub switches a git-LFS blob to "basic multipart" once it is big enough: the batch answer then carries one
@@ -678,16 +692,35 @@ static void UploadLFSBlob(HFClient &client, const HFUrl &url, const HFBlobInfo &
 	}
 }
 
+void HFUploadLocalFileToBucket(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &bucket,
+                               const string &local_path) {
+	if (!bucket.url.IsBucket()) {
+		throw InternalException("HFUploadLocalFileToBucket called for '%s', which is not a bucket",
+		                        bucket.url.ToString());
+	}
+	auto path_in_repo = PathInRepo(bucket.url.path);
+	RequireFileName(bucket.url, path_in_repo);
+
+	// A bucket file *is* its Xet content: no pointer, no branch, no commit. Uploading the chunks, then
+	// the shard that describes them as this file, then naming the file in the bucket is the whole write,
+	// and it is the same order `hf upload` uses.
+	auto uploaded = HFXetUploadFileContents(db, FileSystem::GetLocal(db), opener, bucket, local_path);
+	HFBucketAddOp add;
+	add.path = path_in_repo;
+	add.xet_hash = uploaded.XetHash();
+	HFAddFilesToBucket(db, opener, bucket, {add});
+}
+
 void HFUploadLocalFile(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &target,
                        const string &local_path, const HFBlobInfo &blob, const string &commit_message,
                        bool create_repo) {
-	HFRefuseBucketWrite(target.url, target.url.ToString());
-	auto path_in_repo = PathInRepo(target.url.path);
-	if (path_in_repo.empty()) {
-		throw IOException("'%s' does not contain a file name - write to a path ending in a file name, for example "
-		                  "'hf://datasets/user/repo/data.parquet'",
-		                  target.url.ToString());
+	if (target.url.IsBucket()) {
+		// no blob, no preupload: a bucket has neither git objects nor LFS pointers
+		HFUploadLocalFileToBucket(db, opener, target, local_path);
+		return;
 	}
+	auto path_in_repo = PathInRepo(target.url.path);
+	RequireFileName(target.url, path_in_repo);
 
 	auto client = HFMakeClient(db, opener, target);
 	bool should_ignore = false;
@@ -855,6 +888,60 @@ void HFCopyIntoBucket(DatabaseInstance &db, optional_ptr<FileOpener> opener, con
 			if (failed.find('{') != string::npos || failed.find('"') != string::npos) {
 				throw IOException("The Hugging Face Hub refused some copies into '%s': %s", bucket.url.ToString(),
 				                    failed.size() > 512 ? failed.substr(0, 512) + "..." : failed);
+			}
+			continue;
+		}
+		client->ThrowHTTPError(*response, "POST (bucket batch)", url);
+	}
+	// the bucket has new bytes at these paths: anything cached for it is stale
+	HFReadCacheInvalidateRepo(HFRepoCacheKey(bucket.url));
+}
+
+void HFAddFilesToBucket(DatabaseInstance &db, optional_ptr<FileOpener> opener, const HFTarget &bucket,
+                        const vector<HFBucketAddOp> &operations) {
+	if (operations.empty()) {
+		return;
+	}
+	if (!bucket.url.IsBucket()) {
+		throw IOException("'%s' is not a bucket - only buckets address files by their Xet hash",
+		                  bucket.url.ToString());
+	}
+	auto client = HFMakeClient(db, opener, bucket);
+	auto url = HFUtil::Join(bucket.url.endpoint,
+	                        HFUtil::Join(HFUtil::Join("api", bucket.url.repo_type), bucket.url.repository) + "/batch");
+	HTTPHeaders headers;
+	headers.Insert("Content-Type", "application/x-ndjson");
+
+	const auto now_ms =
+	    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+	        .count();
+	constexpr idx_t BATCH_SIZE = 100;
+	for (idx_t from = 0; from < operations.size(); from += BATCH_SIZE) {
+		HFJsonWriter out;
+		for (idx_t i = from; i < MinValue<idx_t>(from + BATCH_SIZE, operations.size()); i++) {
+			auto &op = operations[i];
+			out.Raw("{\"type\":\"addFile\",\"path\":");
+			// the batch endpoint takes repository-relative paths and says so: "Path must not start with
+			// '/'", which an hf:// url always does
+			out.String(PathInRepo(op.path));
+			out.Raw(",\"xetHash\":");
+			out.String(op.xet_hash);
+			// mtime is the bucket's own timestamp for the file; the Hub accepts "now", and sending the
+			// upload time is the honest reading of a write that has no local file behind it
+			out.Raw(",\"mtime\":");
+			out.Raw(std::to_string(now_ms));
+			if (!op.content_type.empty()) {
+				out.Raw(",\"contentType\":");
+				out.String(op.content_type);
+			}
+			out.Raw("}\n");
+		}
+		auto response = client->Post(url, out.out, headers);
+		if (!(response->HasRequestError() || static_cast<int>(response->status) >= 400)) {
+			auto failed = HFJson::FindArray(response->body, "failed");
+			if (failed.find('{') != string::npos || failed.find('"') != string::npos) {
+				throw IOException("The Hugging Face Hub refused some files added to '%s': %s", bucket.url.ToString(),
+				                  failed.size() > 512 ? failed.substr(0, 512) + "..." : failed);
 			}
 			continue;
 		}

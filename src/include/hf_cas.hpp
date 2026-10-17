@@ -2,6 +2,7 @@
 
 #include "hf_common.hpp"
 #include "hf_fs.hpp"
+#include "hf_xet_shard.hpp"
 #include "hf_xet_xorb.hpp"
 
 namespace duckdb {
@@ -59,6 +60,13 @@ public:
 	//! whole deduplication story of a re-upload or a file that shares chunks with another file.
 	bool UploadXorb(const HFXetXorb &xorb, const string &prefix = HF_XET_DEFAULT_PREFIX);
 
+	//! Store a metadata shard, which is what makes uploaded chunks reachable as a file. The CAS
+	//! re-serializes what it is sent and stores it under the result, so the hash it answers with is
+	//! authoritative and the uploader's own is only a prediction - which is why it comes back as text
+	//! rather than being compared to anything here.
+	//! `result` is the CAS's own words: "exists" or "sync performed".
+	void UploadShard(const string &shard_bytes, string &shard_hash, string &result);
+
 	//! Where to ask for a repo's write-scoped CAS token. The route is derived rather than discovered:
 	//! `{endpoint}/api/{repo_type}/{repo_id}/xet-write-token`, plus the revision as a path segment for
 	//! the git-backed repo types (a bucket has no revision to name).
@@ -85,11 +93,30 @@ struct HFXetXorbUpload {
 	bool inserted;
 };
 
-//! Chunk a file, group its chunks into xorbs, and put each one where the CAS will find it by hash.
-//! This is the upload half of a Xet write on its own: the content ends up addressable, but no file
-//! refers to it until a metadata shard is committed, so nothing reads it back yet (docs/XET.md, M5).
-vector<HFXetXorbUpload> HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs,
-                                                optional_ptr<FileOpener> opener, const HFTarget &target,
-                                                const string &path);
+//! The upload of one file's content: every xorb it took, the metadata shard that turns them back
+//! into this file, and the hash that names the result. The file hash is what the Hub spells `xetHash`
+//! - verified, not inferred: the hub's own tree API reports exactly this string for a file whose
+//! bytes the reference chunker and hasher reproduce locally.
+struct HFXetUploadResult {
+	HFXetHash file_hash;
+	vector<HFXetXorbUpload> xorbs;
+	//! the shard as the CAS named it, verbatim from its answer. Not comparable to a hash computed
+	//! here: the CAS re-serializes shards before keying them.
+	string shard_hash;
+	string shard_result;
+	idx_t shard_bytes = 0;
+
+	//! What a bucket's `addFile` (and `hf_bucket_copy`) calls a xetHash.
+	string XetHash() const {
+		return file_hash.Hex();
+	}
+};
+
+//! Chunk a file, group its chunks into xorbs, upload each one where the CAS will find it by hash,
+//! then upload the shard that describes the file. After this call the *content* exists in the CAS and
+//! is reachable *by hash*; naming it as a file in a repository is the caller's business - a bucket
+//! does it with a batch `addFile`, a git-backed repo with an LFS pointer (docs/XET.md, M5).
+HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, optional_ptr<FileOpener> opener,
+                                          const HFTarget &target, const string &path);
 
 } // namespace duckdb

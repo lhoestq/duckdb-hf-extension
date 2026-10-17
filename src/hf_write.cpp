@@ -88,9 +88,14 @@ void HFWriteHandle::Close() {
 
 	auto &db = file_system.Cast<HFFileSystem>().Db();
 	try {
-		auto blob = HFComputeBlobInfo(db, temp_path);
-		// the opener is gone by now, so the flag resolved at open time is the one that counts
-		HFUploadLocalFile(db, nullptr, target, temp_path, blob, commit_message, create_repo);
+		if (target.url.IsBucket()) {
+			// the same route hf_upload takes; a bucket write has no blob info to compute first
+			HFUploadLocalFileToBucket(db, nullptr, target, temp_path);
+		} else {
+			auto blob = HFComputeBlobInfo(db, temp_path);
+			// the opener is gone by now, so the flag resolved at open time is the one that counts
+			HFUploadLocalFile(db, nullptr, target, temp_path, blob, commit_message, create_repo);
+		}
 	} catch (std::exception &) {
 		CleanupTempFile();
 		throw;

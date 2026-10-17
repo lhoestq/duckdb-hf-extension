@@ -1,6 +1,9 @@
 -- Bucket behaviour through the hf extension. Run with scripts/smoke_buckets.sh, which puts the fixtures in a
--- staging dataset repository first. The two statements carrying an `expect-fail` marker are the direct bucket
--- write paths, which need a Xet client to compute a chunk hash - try.py counts those as expected failures.
+-- staging dataset repository first.
+--
+-- Direct writes work: a bucket file is Xet content, so a write means chunking it, uploading it, uploading the
+-- metadata shard that describes it and registering it with the bucket - which is what COPY and hf_upload do
+-- here. The byte-for-byte proof of that pipeline is scripts/smoke_xet_upload.sql; this suite covers the doors.
 SELECT 'clean slate' AS t, count(*) = 0 AS assert_nothing_to_clean
 FROM hf_delete('hf://buckets/lhoestq/playground/duckdb', missing_ok := true);
 SELECT 'copy one file onto an exact name' AS t,
@@ -49,11 +52,17 @@ FROM read_parquet('hf://buckets/lhoestq/playground/duckdb/**/*.parquet', filenam
 SELECT 'deleting a copy works' AS t, count(*) = 1 AS assert_deleted
 FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/second-copy.parquet');
 SELECT 'and it is gone' AS t, exists = false AS assert_gone FROM hf_meta('hf://buckets/lhoestq/playground/duckdb/second-copy.parquet');
--- expected failures: direct byte writes into a bucket need a Xet xetHash, see the note at the top
--- expect-fail: is not supported
-COPY (SELECT 1 i) TO 'hf://buckets/lhoestq/playground/duckdb/nope.parquet';
--- expect-fail: is not supported
-SELECT * FROM hf_upload('/tmp/hf_bucket_probe.csv', 'hf://buckets/lhoestq/playground/duckdb/uploaded.csv');
+-- direct writes: DuckDB fills a temp file, the extension puts it in Xet and names it in the bucket
+COPY (SELECT 42 AS answer) TO 'hf://buckets/lhoestq/playground/duckdb/written.parquet' (FORMAT PARQUET);
+SELECT 'a written file reads back' AS t, count(*) = 1 AS assert_rows, sum(answer) = 42 AS assert_values
+FROM read_parquet('hf://buckets/lhoestq/playground/duckdb/written.parquet');
+SELECT 'hf_upload takes the same route' AS t, count(*) = 1 AS assert_uploaded
+FROM hf_upload('/tmp/hf_bucket_probe.csv', 'hf://buckets/lhoestq/playground/duckdb/uploaded.csv');
+SELECT 'and that file is a file' AS t, count(*) = 1 AS assert_rows, sum(a) = 1 AS assert_values
+FROM read_csv('hf://buckets/lhoestq/playground/duckdb/uploaded.csv');
+-- a write to a path with no file name is still refused, and says which part is missing
+-- expect-fail: does not contain a file name
+COPY (SELECT 1 i) TO 'hf://buckets/lhoestq/playground/duckdb/';
 SELECT 'cleanup' AS t, count(*) >= 1 AS assert_deleted FROM hf_delete('hf://buckets/lhoestq/playground/duckdb');
 SELECT 'nothing left behind' AS t, count(*) = 0 AS assert_empty
 FROM hf_ls('hf://buckets/lhoestq/playground', recursive := true) WHERE path LIKE 'duckdb%';

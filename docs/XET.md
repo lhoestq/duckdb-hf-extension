@@ -178,12 +178,15 @@ against those on random + real (parquet, csv, binary) inputs in CI-able scripts.
 * **M4 — CAS client.** refresh-route exchange, `PUT /v1/xorbs/{key}`, exists-check, retry semantics —
   behind a `hf_xet_upload_debug` switch, and tested against the in-tree simulation server
   (`xet_client/src/cas_client/simulation`) before touching the production Hub.
-* **M5 — shards + commit.** Produce the session shard, upload it, then commit with the file hash;
-  first target: `COPY … TO 'hf://buckets/…'` (which is the whole point), then optionally make
-  repo writes prefer Xet when `preupload` offers it.
+* **M5 — shards + publish.** Produce the session shard, upload it, then register the file by hash;
+  first target: `COPY … TO 'hf://buckets/…'` (which is the whole point). **Done** - see *M5* below.
+* **M6 — git-backed repos through Xet.** Datasets, models, spaces and kernels: the `metadata_ext` link
+  between the LFS pointer's sha256 and the Xet file hash, then deciding when a repo write should prefer
+  Xet over git-LFS (which is a cost question, not a correctness one: LFS works today for every type).
 
-Each milestone lands behind a setting or an internal flag so 0.0.x behaviour never regresses, and the
-git-LFS path stays the default until M5 is proven.
+Each milestone lands behind a setting or an internal flag so 0.0.x behaviour never regresses. Git-backed
+writes stayed on git-LFS through M5 deliberately: the Xet path earned its bytes on buckets first, where a
+file *is* its Xet content and nothing else can go wrong.
 
 ## Where M1 and M2 stand (verified, not assumed)
 
@@ -297,14 +300,64 @@ Two bugs the first 70 MiB file found, both invisible below the xorb size limit:
   chunk that does not fit. The limits are on *uncompressed* bytes, which is why the function reports
   both byte counts: 1026 chunks / 67,076,687 uncompressed bytes is legal at a serialized 67,126,031.
 
-## M5 checklist (next)
+## M5 the metadata shard, and a file at the end of it (done)
 
-* Serialize a session metadata shard: the protobuf wire format by hand (no protobuf dependency), one
-  entry per file: its chunk list, its (salted) file hash, path, size.
-* `POST {cas}/v1/shards` with the shard, taking `{shard_hash, result}` back; the shard is what makes
-  content reachable.
-* Commit through the Hub's commit route with the `xetHash` = the file hash the CAS knows, so a bucket
-  or repo entry can point at the content - `COPY ... TO 'hf://buckets/...'` end to end.
-* Read the result back through `hf://` and make it a suite: the round trip is the milestone, not the
-  upload.
-* Then the polish that stops being excusable: LZ4 frames, parallel xorb uploads.
+The shard is **not protobuf**. `xet_core_structures/src/metadata_shard/` hand-rolls little-endian
+binary, which is a gift: the writer is 200 lines of appends and no dependency. What a session uploads is
+*not* what `MDBShardInfo::serialize` writes either - it is that same byte stream **cut short at
+`file_lookup_offset`, with the header's `footer_size` rewritten to 0**
+(`read_shard_to_bytes_remove_footer`). Header, file section, file bookend, xorb section, xorb bookend.
+No lookup tables, no footer: the CAS rebuilds the lookups, and the footer carries the timestamp - which
+is why re-uploading identical content dedups instead of creating a new shard per upload.
+
+The layout, in the order it is written (all little-endian, 32-byte hashes):
+
+```
+header  "HFRepoMetaData" + 18 tag bytes, u64 version 2, u64 footer_size = 0
+file    hash, u32 flags, u32 num_segments, u64 0
+  seg   xorb_hash, u32 xorb_flags, u32 unpacked_bytes, u32 chunk_index_start, u32 chunk_index_end
+  verif range_hash + 16 zero bytes            (one per segment)
+  ext   sha256 + 16 zero bytes                (only when WITH_METADATA_EXT)
+  bookend all-ones hash, zeros
+xorb    xorb_hash, u32 flags, u32 num_chunks, u32 num_bytes_in_xorb, u32 num_bytes_on_disk = 0
+  chunk hash, u32 byte_range_start, u32 unpacked_bytes, u32 flags, u32 0
+  bookend all-ones hash, zeros
+```
+
+Three things worth writing down, each of which cost a debugging cycle:
+
+* **Chunk indices in a file segment are xorb-local.** A reader resolves the xorb by hash and then slices
+  *its* chunk list, so a segment that covers a whole xorb is `0..len` - not the chunk's position in the
+  file. The CAS checks this on ingest: `400 (19) invalid shard failed to verify file <hash>`. A
+  single-xorb file cannot tell the difference, which is why the first small uploads all worked.
+* **The verification hash is a keyed blake3 over the concatenated *chunk hashes* of the segment**
+  (`chunk_verification.rs`), i.e. a range over the *file's* chunk list. Same key, different
+  coordinate system from the one above: the entry stores xorb-local indices, the hash covers file
+  ranges, and the shard does not store the file range - so a writer has to carry both.
+* **`xetHash` in the Hub's API is `MerkleHash::hex()`, the word-swapped hex** - the same rendering as
+  the xorb hash. This was checked against the live Hub rather than reasoned out: the reference chunker
+  and hasher reproduce `xet_probe.parquet` as
+  `1b14d820168795c0a60ca8daa1b3a2c7161375f62883b6767fe9c5f10d444d9f`, which is exactly what the tree API
+  reports as its `xetHash`.
+
+`POST {cas}/v1/shards` answers `{"result": 0|1, "shard_hash": "..."}` (`0` = already present, `1` =
+merged), with `shard_hash` in plain hex - and it is the hash of the shard *as the CAS re-serialized it*,
+so it is a name the service chose, not something to compare a local hash against.
+
+A bucket then takes the file by hash:
+
+```
+POST {endpoint}/api/buckets/{repo}/batch   Content-Type: application/x-ndjson
+{"type":"addFile","path":"duckdb/x.parquet","xetHash":"<word-swapped file hash>","mtime":<ms>}
+```
+
+which is `COPY (SELECT ...) TO 'hf://buckets/...'` end to end: temp file → chunk → xorbs → shard →
+`addFile` → readable at the url, verified byte-for-byte by `scripts/smoke_xet_upload.sql` including a
+230 MB uncompressed file whose chunks land in several xorbs (the Hub assembles the read ranges from the
+shard, so a segment bug shows up as a corrupt read rather than an error).
+
+**Next (M6)**: git-backed repositories. The commit names a file by an LFS pointer (sha256 + size), and a
+Xet-stored file is content the pointer does not describe - the `metadata_ext` (sha256 in the file
+section, `flags | WITH_METADATA_EXT`) is what links them, and huggingface_hub only omits it for buckets
+(`SKIP_SHA256`). Then the polish that stops being excusable: parallel xorb uploads, an upload-side dedup
+query, and LZ4 frames.

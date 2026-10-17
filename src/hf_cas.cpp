@@ -104,10 +104,36 @@ bool HFXetCasClient::UploadXorb(const HFXetXorb &xorb, const string &prefix) {
 	return inserted;
 }
 
-vector<HFXetXorbUpload> HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs,
-                                                optional_ptr<FileOpener> opener, const HFTarget &target,
-                                                const string &path) {
-	vector<HFXetXorbUpload> uploads;
+void HFXetCasClient::UploadShard(const string &shard_bytes, string &shard_hash, string &result) {
+	CasUrl();
+
+	auto url = HFUtil::Join(token.cas_url, "v1/shards");
+	HTTPHeaders headers;
+	headers.Insert("Authorization", "Bearer " + token.access_token);
+
+	HFClient client(db, opener, connection, url);
+	auto response = client.RunWithRetry([&]() {
+		return client.Post(url, shard_bytes, headers, false);
+	});
+	if (response->HasRequestError() || static_cast<int>(response->status) >= 400) {
+		client.ThrowHTTPError(*response, "POST (xet shard upload)", url);
+	}
+	bool found = false;
+	// `result` is a number in the wire format (0 = the shard was already there, 1 = the CAS merged it
+	// in), spelled out here because the reference client's own log strings are the readable version
+	auto result_raw = HFJson::GetRaw(response->body, "result", found);
+	if (found) {
+		result = HFJson::AsInt(result_raw) == 0 ? "exists" : "sync performed";
+	} else {
+		result = "unknown";
+	}
+	auto hash_raw = HFJson::GetRaw(response->body, "shard_hash", found);
+	shard_hash = found ? HFJson::AsString(hash_raw) : "";
+}
+
+HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, optional_ptr<FileOpener> opener,
+                                         const HFTarget &target, const string &path) {
+	HFXetUploadResult result;
 
 	// The token route is per repository, so the file being uploaded has to live in one - which is also
 	// the honest scope: a CAS token lets you write content for one repo, not for any file you can read.
@@ -128,23 +154,64 @@ vector<HFXetXorbUpload> HFXetUploadFileContents(DatabaseInstance &db, FileSystem
 	auto file_size = file.GetFileSize();
 	idx_t offset = 0;
 
+	// The shard is written at the end, but it describes what happened here, so the upload keeps the
+	// bookkeeping as it goes: the file's chunks in file order (the verification hashes are ranges over
+	// them), and one segment per xorb, since xorbs are filled in file order.
+	vector<HFXetHashNode> file_chunks;
+	vector<HFXetShardXorb> shard_xorbs;
+	vector<HFXetShardSegment> segments;
+
 	auto flush_xorb = [&](bool force) {
 		// A xorb is closed when it is full, and only at a chunk boundary otherwise: the 64 MiB and
 		// 8192 chunk limits are per object, and splitting a chunk across two xorbs would not be the
 		// same content.
-		if (builder.ChunkCount() > 0 && (builder.IsFull() || force)) {
-			auto uncompressed = builder.UncompressedBytes();
-			auto xorb = builder.Finish();
-			uploads.push_back({xorb.hash, xorb.chunks.size(), xorb.bytes.size(), uncompressed,
-			                   cas.UploadXorb(xorb)});
+		if (builder.ChunkCount() == 0 || !(builder.IsFull() || force)) {
+			return;
 		}
+		auto uncompressed = builder.UncompressedBytes();
+		auto xorb = builder.Finish();
+		auto inserted = cas.UploadXorb(xorb);
+		result.xorbs.push_back({xorb.hash, xorb.chunks.size(), xorb.bytes.size(), uncompressed, inserted});
+
+		HFXetShardXorb shard_xorb;
+		shard_xorb.hash = xorb.hash;
+		uint32_t byte_range_start = 0;
+		for (idx_t i = 0; i < xorb.chunks.size(); i++) {
+			HFXetShardXorbChunk chunk;
+			chunk.hash = xorb.chunks[i].hash;
+			chunk.byte_range_start = byte_range_start;
+			chunk.unpacked_bytes = xorb.chunks[i].uncompressed_size;
+			// the reference marks the chunk that begins a file, which is what lets the CAS offer this
+			// content to a *different* repository's dedup query later. One file per upload, so this is
+			// the first chunk of the first xorb and nothing else
+			chunk.starts_a_file = segments.empty() && shard_xorb.chunks.empty() && result.xorbs.size() == 1;
+			shard_xorb.chunks.push_back(chunk);
+
+			auto chunk_bytes = xorb.chunks[i].uncompressed_size;
+			byte_range_start += chunk_bytes;
+			file_chunks.push_back({chunk.hash, chunk_bytes});
+		}
+
+		HFXetShardSegment segment;
+		segment.xorb_hash = xorb.hash;
+		segment.unpacked_bytes = uint32_t(uncompressed);
+		// Xorb local, not positions in the file: a reader finds the xorb by hash and then slices *its*
+		// chunk list, so indices are into the block above. One segment per xorb, so the segment is the
+		// whole xorb - and a shard that spells this as file offsets is refused by the CAS with
+		// "invalid shard failed to verify file", which is how it was found.
+		segment.chunk_index_start = 0;
+		segment.chunk_index_end = uint32_t(xorb.chunks.size());
+		segment.file_chunk_start = uint32_t(file_chunks.size() - xorb.chunks.size());
+		segment.file_chunk_end = uint32_t(file_chunks.size());
+		segments.push_back(segment);
+		shard_xorbs.push_back(std::move(shard_xorb));
 	};
 
 	while (offset < file_size) {
 		auto want = std::min<idx_t>(buffer.size(), file_size - offset);
 		// FileSystem::Read fills exactly `want` bytes or throws, so there is no short read to handle
-		// here - and a chunker must not see a partial block anyway, since gear positions depend on
-		// the bytes that precede them.
+		// here - and a chunker must not see a partial block anyway, since gear positions depend on the
+		// bytes that precede them.
 		fs.Read(file, buffer.data(), int64_t(want), offset);
 		offset += want;
 		chunker.Process(const_data_ptr_cast(buffer.data()), want, [&](const_data_ptr_t data, idx_t len) {
@@ -162,7 +229,35 @@ vector<HFXetXorbUpload> HFXetUploadFileContents(DatabaseInstance &db, FileSystem
 	});
 	flush_xorb(true);
 
-	return uploads;
+	// The file's own hash is a keyed hash of its merkle root, un-salted: an upload session has no
+	// reason to pick a salt, and a salt would make the same content hash differently per upload.
+	result.file_hash = HFXetFileHash(file_chunks);
+
+	vector<HFXetHash> chunk_hashes;
+	for (auto &chunk : file_chunks) {
+		chunk_hashes.push_back(chunk.hash);
+	}
+	HFXetShardFile shard_file;
+	shard_file.file_hash = result.file_hash;
+	shard_file.segments = segments;
+	shard_file.chunk_hashes = chunk_hashes;
+	// No sha256 metadata extension. A bucket names a file by its xet hash, so there is nothing for the
+	// extra field to point at, and huggingface_hub uploads bucket adds the same way (SKIP_SHA256). A
+	// git-backed repository is the case that needs it: there the commit names the blob by sha256, and
+	// the extension is the only place the two hashes meet.
+	shard_file.has_sha256 = false;
+
+	HFXetShardBuilder shard;
+	for (auto &xorb : shard_xorbs) {
+		shard.AddXorb(std::move(xorb));
+	}
+	shard.AddFile(std::move(shard_file));
+
+	auto shard_bytes = shard.Serialize();
+	result.shard_bytes = shard_bytes.size();
+	cas.UploadShard(shard_bytes, result.shard_hash, result.shard_result);
+
+	return result;
 }
 
 } // namespace duckdb

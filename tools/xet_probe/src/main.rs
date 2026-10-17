@@ -11,11 +11,41 @@
 //   probe pattern   the fixed 0x00..0x1f byte pattern, no stdin
 //   probe xorb <scheme> <out>  chunk stdin with the reference chunker, write a xorb with the reference
 //                    writer, and report the hashes the C++ writer has to reproduce
+//   probe xorb-read <path>     read a xorb back with xet-core's footer-aware reader
+//   probe shard <max_xorb_bytes> < chunk stdin as a file, describe it as an upload session would, and
+//                    write the shard with xet-core's own writer. `max_xorb_bytes` splits the file into
+//                    several xorbs so a small input still produces a multi-segment shard; 0 means the
+//                    format's real limit. Prints the bytes a session would send to `POST /v1/shards`.
+use xet_core_structures::metadata_shard::chunk_verification::range_hash_from_chunks;
+use xet_core_structures::metadata_shard::file_structs::{
+    FileDataSequenceEntry, FileDataSequenceHeader, FileVerificationEntry, MDBFileInfo,
+};
+use xet_core_structures::metadata_shard::shard_format::MDBShardFileFooter;
+use xet_core_structures::metadata_shard::shard_in_memory::MDBInMemoryShard;
+use xet_core_structures::metadata_shard::xorb_structs::{
+    MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader, MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG,
+};
 use std::fs::File;
+use std::ops::Deref;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
-use xet_core_structures::merklehash::{compute_data_hash, compute_internal_node_hash, xorb_hash, MerkleHash};
+use xet_core_structures::merklehash::{
+    compute_data_hash, compute_internal_node_hash, file_hash, xorb_hash, MerkleHash,
+};
 use xet_core_structures::xorb_object::xorb_format_test_utils::serialize_xorb_to_stream_reference;
 use xet_core_structures::xorb_object::{deserialize_chunks, CompressionScheme, XorbObject};
+
+fn xorb_sizes(sizes: &[usize], start: usize, end: usize) -> String {
+    let mut out = String::new();
+    let mut offset = 0u32;
+    for size in &sizes[start..end] {
+        if !out.is_empty() {
+            out.push(',');
+        }
+        out.push_str(&format!("{offset}/{size}"));
+        offset += *size as u32;
+    }
+    out
+}
 
 fn plain_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -135,6 +165,144 @@ fn main() {
         println!("unpacked_offsets_end_at_data={}",
                  info.unpacked_chunk_offsets.last().copied().unwrap_or(0) as usize == data.len());
         println!("hashes_match={}", footer_matches_body && recomputed_hash == info.xorb_hash);
+        return;
+    }
+    if mode == "shard" {
+        // An upload session's shard, written by the reference writer. The parts are assembled with the
+        // reference's own entry structs and their serialize() methods, then handed to MDBShardInfo, so
+        // the framing under test - header, section order, bookends, lookup tables, footer - is all
+        // xet-core's. What the probe chooses is only the grouping of chunks into xorbs, which is the
+        // same choice the C++ makes and which the live CAS checks independently.
+        let max_xorb_bytes: u64 = std::env::args()
+            .nth(2)
+            .unwrap_or_else(|| "0".to_string())
+            .parse()
+            .expect("probe shard <max_xorb_bytes>");
+        use xet_data::deduplication::constants::{MAX_XORB_BYTES, MAX_XORB_CHUNKS};
+        // config-overridable at runtime in the reference, hence the derefs; the defaults are what a
+        // plain session uses and what the C++ constants hard-code
+        let (limit_bytes, limit_chunks) = (*MAX_XORB_BYTES, *MAX_XORB_CHUNKS);
+        let max_xorb_bytes = if max_xorb_bytes == 0 { limit_bytes as u64 } else { max_xorb_bytes };
+
+        let mut chunker = xet_data::deduplication::Chunker::new(64 * 1024);
+        let mut chunks = chunker.next_block(&data, false);
+        if let Some(last) = chunker.finish() {
+            chunks.push(last);
+        }
+        let chunk_hashes: Vec<MerkleHash> = chunks.iter().map(|c| c.hash).collect();
+        let chunk_sizes: Vec<usize> = chunks.iter().map(|c| c.data.len()).collect();
+
+        let mut groups: Vec<(usize, usize)> = Vec::new();
+        let mut start = 0usize;
+        while start < chunk_sizes.len() {
+            let (mut end, mut bytes) = (start, 0u64);
+            while end < chunk_sizes.len()
+                && (end - start) < limit_chunks
+                && bytes + chunk_sizes[end] as u64 <= max_xorb_bytes
+            {
+                bytes += chunk_sizes[end] as u64;
+                end += 1;
+            }
+            if end == start {
+                end = start + 1; // a single oversized chunk still needs a xorb of its own
+            }
+            groups.push((start, end));
+            start = end;
+        }
+
+        let mut xorb_blocks = Vec::new();
+        let mut xorb_hashes = Vec::new();
+        let mut segments = Vec::new();
+        let mut stored_bytes = 0u64;
+        for (start, end) in &groups {
+            let sized: Vec<(MerkleHash, u64)> =
+                chunk_hashes[*start..*end].iter().copied().zip(chunk_sizes[*start..*end].iter().copied().map(|s| s as u64)).collect();
+            let xorb_hash = xorb_hash(&sized);
+            let group_bytes: u64 = chunk_sizes[*start..*end].iter().sum::<usize>() as u64;
+            stored_bytes += group_bytes;
+            let mut chunks_entries = Vec::new();
+            let mut offset = 0u32;
+            for (index, size) in chunk_sizes[*start..*end].iter().enumerate() {
+                let mut entry = XorbChunkSequenceEntry::new(chunk_hashes[*start + index], *size, offset);
+                // the reference flags a chunk that begins a file; with one file per shard that is only
+                // the very first chunk, and it lands in the first xorb
+                if *start == 0 && index == 0 {
+                    entry.flags = MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG;
+                }
+                chunks_entries.push(entry);
+                offset += *size as u32;
+            }
+            xorb_blocks.push(MDBXorbInfo {
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, end - start, group_bytes),
+                chunks: chunks_entries,
+            });
+            xorb_hashes.push(xorb_hash);
+            // Chunk indices in a file segment are *xorb local*: a reader resolves the xorb by hash and
+            // then slices its own chunk list, so `start..end` here is `0..group.len()`. (The CAS checks
+            // this on ingest: global file indices produce "invalid shard failed to verify file".)
+            segments.push(FileDataSequenceEntry::new(xorb_hash, group_bytes, 0u64, (end - start) as u64));
+        }
+
+        let all_sized: Vec<(MerkleHash, u64)> = chunk_hashes
+            .iter()
+            .copied()
+            .zip(chunk_sizes.iter().copied().map(|s| s as u64))
+            .collect();
+        let file_hash = file_hash(&all_sized);
+        let verification: Vec<MerkleHash> =
+            groups.iter().map(|(s, e)| range_hash_from_chunks(&chunk_hashes[*s..*e])).collect();
+
+        let mut mdb = MDBInMemoryShard::default();
+        for info in xorb_blocks {
+            mdb.add_xorb_block(info).expect("reference rejected the xorb block");
+        }
+        mdb.add_file_reconstruction_info(MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(file_hash, segments.len(), true, false),
+            segments,
+            verification: verification.iter().map(|hash| FileVerificationEntry::new(*hash)).collect(),
+            metadata_ext: None,
+        })
+        .expect("reference rejected the file info");
+
+        let full = mdb.to_bytes().expect("reference could not write the shard");
+        // A session uploads the local shard file cut short at file_lookup_offset, with the header's
+        // footer_size rewritten to 0; that is the byte stream the CAS sees and hashes.
+        let footer = MDBShardFileFooter::deserialize(&mut Cursor::new(&full[full.len() - 200..]))
+            .expect("the reference's own footer did not parse");
+        let mut uploaded = full[..footer.file_lookup_offset as usize].to_vec();
+        uploaded[40..48].copy_from_slice(&0u64.to_le_bytes());
+
+        // xet-core ordering: ascending by the hash's first word, which is what the lookups key on
+        let mut ordered_xorb_hashes = xorb_hashes.clone();
+        ordered_xorb_hashes.sort_by_key(|hash| hash.deref()[0]);
+
+        println!("shard_fingerprint={}", compute_data_hash(&uploaded).hex());
+        println!("shard_length={}", uploaded.len());
+        println!("shard_full_length={}", full.len());
+        println!("shard_file_lookup_offset={}", footer.file_lookup_offset);
+        println!("file_hex={}", file_hash.hex());
+        println!("stored_bytes={stored_bytes}");
+        println!("num_xorbs={}", xorb_hashes.len());
+        for (index, (start, end)) in groups.iter().enumerate() {
+            // printed as the shard stores them: chunk indices are xorb local, so a segment that covers
+            // a whole xorb reads 0..len regardless of where in the file that xorb sits
+            println!("segment 0-{} {}", end - start, xorb_hashes[index].hex());
+        }
+        for hash in &verification {
+            println!("verification {}", hash.hex());
+        }
+        for hash in &ordered_xorb_hashes {
+            println!("xorb_stored {}", hash.hex());
+        }
+        println!("limits {limit_bytes} {limit_chunks}");
+        for index in 0..groups.len() {
+            println!(
+                "xorb_chunks {} {} {}",
+                groups[index].0,
+                groups[index].1,
+                xorb_sizes(&chunk_sizes, groups[index].0, groups[index].1)
+            );
+        }
         return;
     }
     if mode == "internal" {
