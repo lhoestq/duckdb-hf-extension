@@ -376,6 +376,8 @@ scripts/
   smoke_xet_upload.sh/.sql the Xet write path against the production CAS, which re-hashes what we send
   delete_repo.sh    drop a scratch repository for good (see the note in *Notes / limitations*)
   bench.py          times a query with either the `hf` filesystem or plain `httpfs`
+  xet_bench.sh/.cpp the CPU phase of a Xet write on its own (chunk, hash, serialize), no network: this is
+                    how "hash-bound or wire-bound?" stays a measured question
   check.sh          compile-only syntax check of every source file (fast feedback)
   ci_selftest.sh    load a built binary into a plain duckdb shell and run every offline check (what CI
                     runs, since it cannot satisfy `require hf` either)
