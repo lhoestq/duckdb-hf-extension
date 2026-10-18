@@ -395,5 +395,5 @@ tools/xet_probe       Rust probe over xet-core — the oracle (cargo, --release)
 ```
 
 The long form of any claim in this file — the failed attempts, the measurements behind a decision, the bug
-each caveat came from — is in `git log`, whose commit bodies carry ~8 700 words of it, and in the
+each caveat came from — is in `git log`, whose commit bodies carry ~9 000 words of it, and in the
 CHANGELOG's per-release entries.
