@@ -40,9 +40,18 @@ checks**. `docs/XET.md` has the M8 write-up.
   (`bytes > uncompressed_bytes`) is false once chunks compress, so it became `sum(bytes) <
   sum(uncompressed_bytes)` under LZ4 and the framing statement moved to the `hf_xet_compression='none'`
   block, where it is still true.
-* Next: **publish pre5 from CI artifacts** (first time linux_amd64 + windows_amd64_mingw binaries go out at
-  all; the pre4 run is being rerun after an EPEL mirror failure and pre5 supersedes it - push pre5 and let
-  its own run be the publish source), then the upload-side dedup query, then shard-driven read prefetch.
+* **A packaging bug found by assembling pre4's artifacts, before publishing anything**: the repository
+  script took the DuckDB version from `strings | grep '^v[0-9]'`, and the windows artifact matched a
+  mingw fragment `v0.1H` → its 73 MB binary was filed under a directory no client asks for, with a green
+  CI run and a successful-looking script. Now `scripts/ext_footer.py` reads the footer as the structure
+  `append_metadata.cmake` defines (534 bytes: `duckdb_signature` marker, 8×32 NUL-padded fields in reverse
+  order, 256-byte signature slot), `make_extension_repo.sh` cross-checks `DUCKDB_PLATFORM`/`DUCKDB_VERSION`
+  against the binary, and `publish_extension_repo.py` verifies every binary's footer against its directory
+  *before* any network call. Re-assembling pre4 filed all three platforms correctly afterwards.
+* Next: **publish pre5 from CI run `39130114709`** (first time linux_amd64 + windows_amd64_mingw binaries
+  go out at all; pre4's artifacts are assembled and install-verified locally at `dist/repo-ci-pre4`, so the
+  pipeline itself is proven), then the upload-side dedup query, then shard-driven read prefetch. macOS
+  binaries still need a `workflow_dispatch` (billing: private repo, 10x minutes) - open decision.
 
 ## Position before this (2026-10-18, ~11:25 UTC)
 
@@ -784,3 +793,9 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
   cross-scheme identity block (`hf_xet_compression='none'` re-upload must find every xorb already
   stored). xet_upload 27 → 30 checks; `run_all.sh` → **192 passed, 9 expected failures, 0 failed**;
   selftest 325 → 367 (pinned in `test/sql/hf_selftest.test`, `smoke_xet.sql`'s floor, README, docs).
+* `13:20` — committed `af700f4`, tagged `v0.0.2-pre5`, pushed; CI run `39130114709` started (linux_amd64,
+  linux_arm64, windows_amd64_mingw; macOS excluded on push events).
+* `13:45` — pre4's CI artifacts downloaded and assembled to validate the publish pipeline before spending
+  it on pre5: found the `v0.1H` misfiling bug (see Current position), fixed it with `scripts/ext_footer.py`
+  + cross-checks in both repository scripts, re-assembled → three platforms under `v2.0.0-alpha47600/`, and
+  `test_install.py` installs/loads/queries from that tree over `file://` (arm64, unsigned).

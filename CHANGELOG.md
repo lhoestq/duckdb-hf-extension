@@ -43,6 +43,17 @@ Two version numbers are in play, and they are independent:
   xxhash and its own namespaced LZ4. DuckDB's copies are inside C++ namespaces so nothing was colliding
   today; the extension now exports zero `LZ4_*`/`XXH*` symbols, which is what keeps it true tomorrow.
 
+* **A packaging bug that would have made the first windows release unusable.** The script that assembles a
+  serveable repository read the DuckDB version identifier out of a built binary with `strings | grep
+  '^v[0-9]'`, and in a mingw-built artifact the first such match is some fragment that reads `v0.1H` - so
+  the binary was filed under `v0.1H/windows_amd64_mingw/`, a directory no client will ever ask for, while
+  everything that could report on the run reported success. `scripts/ext_footer.py` now reads the footer as
+  the structure DuckDB's `append_metadata.cmake` defines it (a 534-byte custom section: a
+  `duckdb_signature` marker, eight NUL-padded 32-byte fields appended in reverse order, then the 256-byte
+  signature slot), `make_extension_repo.sh` refuses a `DUCKDB_PLATFORM`/`DUCKDB_VERSION` that disagrees
+  with the binary in front of it, and `publish_extension_repo.py` checks every binary's footer against the
+  directory it is about to upload before it touches anything remote.
+
 ## 0.0.2-pre4 — writes go out over several streams, and CI's artifacts are the ones a client can load
 
 * **A file's Xet xorbs are uploaded with several requests in flight**, which is the one thing a Xet write

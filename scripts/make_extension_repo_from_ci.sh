@@ -16,10 +16,13 @@
 #   * the platform directory is taken from the *artifact name* and passed to make_extension_repo.sh as
 #     DUCKDB_PLATFORM, never inferred from a footer: a local build directory also carries a
 #     duckdb_platform_out file, and letting that decide would file every platform's binary under the
-#     architecture of the machine that happened to run this script.
+#     architecture of the machine that happened to run this script. The footer is not ignored:
+#     make_extension_repo.sh cross-checks it against that name and refuses the binary when they disagree,
+#     which is the guard against the other direction of the same mistake (and the one that caught a
+#     windows binary filed under `v0.1H`, see scripts/ext_footer.py).
 #   * artifacts are cached (CACHE_DIR below, default dist/ci-artifacts/<run>/), because the unsigned and
-#     the signed tree come from the same bytes and re-downloading 14 MB per platform to sign them is a
-#     tax on nothing.
+#     the signed tree come from the same bytes and re-downloading a few hundred MB to sign them is a tax
+#     on nothing.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

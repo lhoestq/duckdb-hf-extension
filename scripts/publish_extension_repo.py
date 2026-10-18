@@ -11,9 +11,13 @@ just a url layout, so a dataset, a bucket, or any web server all work):
     <repo>/.well-known/duckdb-extension-repo.json            (the signing public key, when signed)
     <repo>/unsigned/...                                      (optional second tree)
 
-The version directory is read out of the binary rather than passed in: a repository whose directory
-does not equal the footer of the extension it serves is a repository nobody can install from, and the
-footer is the only copy of the truth.
+The version directory is not passed in either: it is taken from the tree and then *checked* against
+the footer of every binary in it. A repository whose directory does not equal the footer of the
+extension it serves is a repository nobody can install from, and the failure is silent from the
+builder's side - the first multi-platform tree this script was shown had a windows binary filed under
+`v0.1H`, because the script that assembled it had grepped a `strings` listing for something shaped like
+a version and found one in mingw metadata. Everything that run reported was green; `INSTALL hf` on
+windows would simply have 404'd forever.
 
 Uploading is idempotent (same content, same commit). The point of running this from CI is that the
 files below <repo> are exactly what a client's `INSTALL` will fetch, so the tree that is tested locally
@@ -24,17 +28,40 @@ import json
 import os
 import sys
 
+import ext_footer
 from huggingface_hub import HfApi
 
 
 def footer_version(tree: str) -> str:
-    """The DuckDB version identifier the tree is built for, from the binary's own footer."""
-    root = os.path.join(tree, ".well-known")
+    """The DuckDB version identifier a tree serves, confirmed against every binary inside it.
+
+    Refuses a mixed tree, because `upload_folder` would happily publish both halves and a client only
+    ever looks in one of them.
+    """
+    versions = set()
     for entry in sorted(os.listdir(tree)):
         path = os.path.join(tree, entry)
-        if entry.startswith("v") and os.path.isdir(path):
-            return entry
-    raise SystemExit(f"no <version>/ directory under {tree} - run scripts/make_extension_repo.sh first")
+        if entry.startswith(".") or not os.path.isdir(path):
+            continue
+        for platform in sorted(os.listdir(path)):
+            ext = os.path.join(path, platform, "hf.duckdb_extension")
+            if not os.path.isfile(ext):
+                continue
+            footer = ext_footer.read_footer(ext)
+            if footer["version"] != entry:
+                raise SystemExit(
+                    f"{ext} carries duckdb_version {footer['version']!r} but sits in a directory called "
+                    f"{entry!r}; a client asks for the directory and refuses the binary, so this tree "
+                    "cannot work - rebuild it with scripts/make_extension_repo.sh"
+                )
+            versions.add(entry)
+    if not versions:
+        raise SystemExit(f"no <version>/<platform>/hf.duckdb_extension under {tree} - run "
+                         "scripts/make_extension_repo.sh first")
+    if len(versions) > 1:
+        raise SystemExit(f"{tree} holds binaries for more than one duckdb version: "
+                         f"{', '.join(sorted(versions))}")
+    return versions.pop()
 
 
 def main() -> int:
@@ -51,10 +78,13 @@ def main() -> int:
     if "/" not in args.repo:
         raise SystemExit(f"'{args.repo}' is not a <namespace>/<name> repository id")
 
+    # before anything is created or uploaded: a tree that does not agree with its own binaries should
+    # fail here rather than half-publish itself
+    version = footer_version(args.tree)
+
     api = HfApi()
     api.create_repo(args.repo, repo_type="dataset", private=args.private, exist_ok=True)
 
-    version = footer_version(args.tree)
     api.upload_folder(
         folder_path=args.tree,
         repo_id=args.repo,

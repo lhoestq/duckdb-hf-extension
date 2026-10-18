@@ -22,18 +22,36 @@ if [[ ! -f "$EXT" ]]; then
   exit 1
 fi
 
-# Version identifier and platform are baked into the extension footer; never guess them, read them
-# back, otherwise the repository directory simply will not match what DuckDB asks for.
-VERSION="${DUCKDB_VERSION:-$(strings -a "$EXT" | grep -a -m1 -E '^v[0-9]+\.[0-9]+' || true)}"
-if [[ -f "$BUILD_DIR/duckdb_platform_out" ]]; then
-  PLATFORM="${DUCKDB_PLATFORM:-$(head -1 "$BUILD_DIR/duckdb_platform_out")}"   # authoritative
-else
-  PLATFORM="${DUCKDB_PLATFORM:-$(strings -a "$EXT" | grep -a -m1 -E '^(linux|osx|windows|wasm)_(amd64|arm64|[a-z0-9_]+)' || true)}"
-fi
-if [[ -z "$VERSION" || -z "$PLATFORM" ]]; then
-  echo "could not read the version/platform footer out of $EXT" >&2
+# The version identifier and the platform are baked into the extension's footer, and the footer is the
+# only copy of the truth: a client asks for <duckdb_version>/<platform>/hf.duckdb_extension.gz and then
+# refuses a binary whose footer disagrees. So read it as a structure (scripts/ext_footer.py, which knows
+# the layout) rather than the way this file used to - `strings | grep '^v[0-9]'` - because the version
+# string is not the only thing in a binary that starts like a version. The first windows artifact to come
+# through here matched a stray `v0.1H` from somewhere in mingw's metadata and was filed under a directory
+# no client will ever ask for, which a green run and a 222 MB artifact did not show.
+FOOTER="$(python3 scripts/ext_footer.py --all "$EXT")"
+FOOTER_PLATFORM="${FOOTER%%	*}"
+FOOTER_REST="${FOOTER#*	}"
+FOOTER_VERSION="${FOOTER_REST%%	*}"
+if [[ -z "$FOOTER_PLATFORM" || -z "$FOOTER_VERSION" ]]; then
+  echo "could not read the footer out of $EXT" >&2
   exit 1
 fi
+
+# An override is a cross-check here, not a fallback. make_extension_repo_from_ci.sh passes the platform
+# taken from the artifact's *name*, because the alternative - letting a local duckdb_platform_out decide -
+# files every platform's binary under the architecture of whichever machine ran the script. If that name
+# and the binary's own footer ever disagree, that is the misfiling mistake, so stop instead of choosing.
+if [[ -n "${DUCKDB_PLATFORM:-}" && "$DUCKDB_PLATFORM" != "$FOOTER_PLATFORM" ]]; then
+  echo "refusing: DUCKDB_PLATFORM=$DUCKDB_PLATFORM but $EXT says $FOOTER_PLATFORM" >&2
+  exit 1
+fi
+if [[ -n "${DUCKDB_VERSION:-}" && "$DUCKDB_VERSION" != "$FOOTER_VERSION" ]]; then
+  echo "refusing: DUCKDB_VERSION=$DUCKDB_VERSION but $EXT says $FOOTER_VERSION" >&2
+  exit 1
+fi
+PLATFORM="${DUCKDB_PLATFORM:-$FOOTER_PLATFORM}"
+VERSION="$FOOTER_VERSION"
 
 DEST="$OUT_DIR/$VERSION/$PLATFORM"
 mkdir -p "$DEST"
@@ -81,6 +99,7 @@ echo
 echo "repository: $OUT_DIR"
 echo "  $VERSION/$PLATFORM/hf.duckdb_extension     ($(stat -c%s "$DEST/hf.duckdb_extension") bytes)"
 echo "  $VERSION/$PLATFORM/hf.duckdb_extension.gz  ($(stat -c%s "$DEST/hf.duckdb_extension.gz") bytes)"
+echo "  footer says: platform=$FOOTER_PLATFORM duckdb_version=$FOOTER_VERSION ext_version=$(python3 scripts/ext_footer.py --extension-version "$DEST/hf.duckdb_extension") signed=$(python3 scripts/ext_footer.py --signed "$DEST/hf.duckdb_extension" && echo yes || echo no)"
 echo
 cat <<EOF
 try it:
