@@ -41,10 +41,16 @@ if "--tamper-child" in sys.argv:
     key = "".join(l for l in tampered_keys[0].splitlines() if not l.startswith("-----")).strip()
     kid = duckdb.connect(config={"home_directory": tampered_home, "allow_extension_repositories": "allowed"})
     kid.execute(f"CREATE EXTENSION REPOSITORY hf_local WITH PREFIX 'file://{tampered_repo}/' "
-                f"USING PUBLIC KEY '{key}'")
+                f"USING PUBLIC KEYS '{key}'")
     kid.execute("INSTALL hf FROM hf_local")
     kid.execute("LOAD hf FROM hf_local")
-    raise SystemExit("LOADED DESPITE TAMPERING")
+    # Getting here means the tampered bytes were accepted. Exit 0, deliberately: the parent asserts on a
+    # zero return code, and a nonzero one now means only "something refused" - which the parent then
+    # checks is actually about the signature. (This used to be SystemExit(<message>), which exits 1, and
+    # the parent read any nonzero as a refusal: a child that died of an unrelated cause passed, and one
+    # that loaded the tampered file passed too, printing its own accusation as the refusal message.)
+    print("LOADED DESPITE TAMPERING")
+    sys.exit(0)
 
 
 version = duckdb.sql("PRAGMA version").fetchall()[0][0]
@@ -96,7 +102,10 @@ if signed:
     pinned = con.execute("SELECT key_fingerprints FROM duckdb_extension_repositories()"
                          " WHERE repository_name = 'hf_local'").fetchone()[0]
     assert pinned == [expected], f"pinned keys {pinned} != our signing key {expected}"
-    print("signature       -> verified against", expected[:24] + "...")
+    # What this line does NOT prove is that a signature was checked - it proves the repository is pinned to
+    # our key, which is what makes a signature mean something. That the check happens is what the tamper
+    # test below shows, by corrupting the bytes and requiring DuckDB to refuse them.
+    print("trusted key     -> repository pins", expected[:24] + "...")
 assert con.execute("SELECT count(*) FROM hf_ls('hf://datasets/lhoestq/demo1')").fetchone()[0] > 0
 print("usable          -> hf_ls('hf://datasets/lhoestq/demo1') works")
 
@@ -112,19 +121,36 @@ if signed and not remote:
     tampered = tempfile.mkdtemp(prefix="hf-ext-tampered-")
     subprocess.run(["cp", "-r", repo, tampered + "/repo"], check=True)
     tampered_repo = tampered + "/repo"
-    served = os.path.join(tampered_repo, version, os.listdir(os.path.join(repo, version))[0])
-    # both the plain and the gzipped copy have to be corrupted: DuckDB 2.0 sniffs gzip and may pick
-    # either, so tampering only one of them proves nothing
-    for name in ("hf.duckdb_extension", "hf.duckdb_extension.gz"):
-        path = os.path.join(served, name)
-        data = bytearray(open(path, "rb").read())
-        data[len(data) // 3] ^= 0xFF
-        open(path, "wb").write(bytes(data))
+    # Every platform directory, not the first one: this machine installs the binary under its own
+    # architecture, and a three-platform tree whose first entry happens to be linux_amd64 used to leave
+    # the arm64 bytes - the ones actually installed here - untouched. The test then "passed", and the
+    # message it printed was the child's own accusation that nothing was refused.
+    corrupted = 0
+    for platform in sorted(os.listdir(os.path.join(tampered_repo, version))):
+        served = os.path.join(tampered_repo, version, platform)
+        if not os.path.isdir(served):
+            continue
+        # both the plain and the gzipped copy have to be corrupted: DuckDB 2.0 sniffs gzip and may pick
+        # either, so tampering only one of them proves nothing
+        for name in ("hf.duckdb_extension", "hf.duckdb_extension.gz"):
+            path = os.path.join(served, name)
+            if not os.path.isfile(path):
+                continue
+            data = bytearray(open(path, "rb").read())
+            data[len(data) // 3] ^= 0xFF
+            open(path, "wb").write(bytes(data))
+            corrupted += 1
+    assert corrupted, f"nothing to tamper with under {tampered_repo}/{version}"
     tampered_home = tempfile.mkdtemp(prefix="hf-ext-tamper-home-")
     child = subprocess.run([sys.executable, __file__, tampered_repo, "--signed", "--tamper-child",
                             tampered_home, tampered_repo], capture_output=True, text=True)
     if child.returncode == 0:
-        raise AssertionError("a tampered extension loaded cleanly:\n" + child.stdout)
-    print("tamper check    -> refused:", (child.stderr.strip().splitlines() or ["?"])[-1][:100])
+        raise AssertionError("a tampered extension loaded cleanly:\n" + child.stdout + child.stderr)
+    # "something went wrong" is not the same statement as "the signature was the thing that went wrong"
+    if "signature" not in child.stderr.lower():
+        raise AssertionError("the tampered install failed for a reason unrelated to the signature, so it "
+                             "proves nothing:\n" + child.stderr)
+    reason = next((line for line in child.stderr.splitlines() if "signature" in line.lower()), "?")
+    print(f"tamper check    -> refused ({corrupted} files corrupted):", reason.strip()[:110])
 
 print("OK")

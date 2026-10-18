@@ -29,6 +29,19 @@ Two version numbers are in play, and they are independent:
   signature slot), `make_extension_repo.sh` refuses a `DUCKDB_PLATFORM`/`DUCKDB_VERSION` that disagrees
   with the binary in front of it, and `publish_extension_repo.py` checks every binary's footer against the
   directory it is about to upload, before it touches anything remote.
+* **The signature gate turned out to be untested, and it was passing.** `scripts/test_install.py`'s tamper
+  check copies a repository, corrupts the served bytes, and requires a fresh DuckDB process to refuse them.
+  Two ways it could report success without proving anything: it corrupted `os.listdir(...)[0]`, which on a
+  three-platform tree is `linux_amd64` while the machine doing the install is `linux_arm64` - so the bytes
+  it served were never touched - and its pass condition was "the child exited nonzero", which the child did
+  also when it *succeeded*, because its `SystemExit(<message>)` exits 1. The line printed as the refusal was
+  the child's own "LOADED DESPITE TAMPERING". Now every platform directory and both file forms are
+  corrupted, the child signals acceptance by exiting 0, and a nonzero exit counts only when the error
+  actually mentions the signature. On the real thing: 6 files corrupted, `INSTALL` refused with "an
+  extension file that doesn't have a valid signature", and the same child run against untampered bytes exits
+  0 - both directions of the check are exercised. The `signature -> verified against ...` line it printed
+  was also an overclaim (it compared the key the *repository pins*, not a verification event), so it now
+  says `trusted key -> repository pins ...`, and the refusal is where the proof lives.
 * **Nothing was published under 0.0.2-pre5.** It was tagged and its CI run went green on all three
   platforms; these two changes landed before its artifacts went out, so the release that shipped is this
   one, and what a client downloads is built from the commit the tag names.

@@ -56,6 +56,16 @@ selftest at **367 checks**. Everything below is M8; what landed after the `v0.0.
   order, 256-byte signature slot), `make_extension_repo.sh` cross-checks `DUCKDB_PLATFORM`/`DUCKDB_VERSION`
   against the binary, and `publish_extension_repo.py` verifies every binary's footer against its directory
   *before* any network call. Re-assembling pre4 filed all three platforms correctly afterwards.
+* **And the signature gate was passing without testing anything** (found while assembling the signed tree,
+  after the pre6 tag): `test_install.py`'s tamper check corrupted `os.listdir(...)[0]`, which on a
+  three-platform tree is `linux_amd64` while the installing machine is `linux_arm64` - the served bytes were
+  untouched - and its pass condition (`child exited nonzero`) was satisfied by the child's *success* path
+  too, since `SystemExit(<str>)` exits 1. The line printed as "refused" was the child's own "LOADED DESPITE
+  TAMPERING". Now all platform dirs and both file forms are corrupted, acceptance exits 0, and a refusal
+  only counts when it mentions the signature; verified in both directions (6 files corrupted → `INSTALL`
+  refused with "doesn't have a valid signature"; untampered → child exits 0). `signature -> verified
+  against` was also an overclaim about a pinned-key comparison and now says `trusted key -> repository
+  pins`. Test-only: the pre6 artifacts still come from the tagged commit.
 * Next: **tag `v0.0.2-pre6` and publish the artifacts of the run that commit's own push starts** - first
   time linux_amd64 and windows_amd64_mingw binaries go out at all, next to a signed linux_arm64 and an
   unsigned mirror. The pipeline is already proven end to end: pre4's artifacts assembled into a correct
@@ -818,3 +828,8 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
   failures; full `run_all.sh` → **200 passed, 12 expected failures, 0 failed**. Version → **0.0.2-pre6**
   (constant + the `smoke_write.sql` assertion that pins it), CHANGELOG restructured so the packaging fix
   sits in the release that carries it rather than in pre5.
+* `14:35` — committed `08948d1`, tagged `v0.0.2-pre6`, pushed; its own push started CI run `39133332083`.
+* `14:50` — signed tree assembled from pre4's cached artifacts (all three platforms, `signed=yes` in every
+  footer, key fingerprint `sha256:f007c8016bc2f3a29…`), and `test_install.py --signed` installed from it on
+  arm64. Which exposed that the tamper check was vacuous (see Current position) — fixed, and re-verified
+  both ways.
