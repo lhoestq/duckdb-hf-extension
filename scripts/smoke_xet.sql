@@ -19,7 +19,7 @@ SELECT check_name, expected, got FROM hf_xet_selftest() WHERE NOT assert_passed 
 -- vectors from xet-core's own correctness table, interior node hashes, hex/base64 renderings, the
 -- serialized xorb objects the reference writer produces, and the session metadata shards that make
 -- those xorbs reachable.
-SELECT count(*) >= 280 AS assert_vectors_run,
+SELECT count(*) >= 360 AS assert_vectors_run,
        count(*) FILTER (WHERE NOT assert_passed) = 0 AS assert_nothing_failed,
        count(*) FILTER (WHERE check_name LIKE '%chunk boundaries%') >= 8 AS assert_chunking_covered,
        count(*) FILTER (WHERE check_name LIKE '%file hash%') >= 40 AS assert_tree_covered,

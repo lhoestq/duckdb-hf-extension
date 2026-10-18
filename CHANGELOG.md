@@ -10,6 +10,39 @@ Two version numbers are in play, and they are independent:
   per DuckDB identifier per platform, and rebuilding for a newer DuckDB pre-release is a rebuild,
   not a version bump.
 
+## 0.0.2-pre5 — xorb chunks go out LZ4-compressed
+
+* **Chunk payloads inside an xorb are LZ4 frames now**, on by default, with `hf_xet_compression` as the
+  switch (`lz4`, or `none` for the pre-M8 bytes). A Xet write waits on the wire, and this is the same
+  upload with fewer bytes on it: a 2,103,723 byte CSV that serialized to 2,105,403 bytes uncompressed
+  serializes to 889,917 compressed - 2.4x. The reference client's own encoder gets 881,602, 0.9% under
+  ours, and that difference is free: two conforming LZ4 encoders are not required to agree on frame bytes,
+  because a reader decodes each chunk from the scheme byte and the compressed length stored next to it.
+* **What this cannot do is change what content *is***, and that is the property the whole change rests on.
+  An xorb's hash is the merkle root of the *uncompressed* chunk hashes, so the four schemes produce the same
+  `xorb_hex` for one file - measured, not assumed, with `tools/xet_probe` writing the same CSV four times.
+  The live suite makes the CAS say it: `smoke_xet_upload.sql` writes a file with compression on, uploads it
+  again with `hf_xet_compression = 'none'`, and requires every xorb to come back `inserted = false`.
+  Meanwhile the metadata shard did not move at all - its byte ranges are cumulative *unpacked* lengths, so
+  a reader asking for a range of a file asks in the space compression happens underneath.
+* **Decodability replaced byte-exactness as the contract**, and is checked in four places: `AddChunk`
+  decompresses the frame it just made and compares it with the bytes it hashed before any POST can happen
+  (an uploaded xorb cannot be edited, and its hash looks fine while a broken payload makes it unreadable
+  forever); the self-test rebuilds every pinned vector with LZ4 and pins hashes, chunk counts, unpacked
+  totals and footer placement - frame bytes deliberately not among them; `xet-probe xorb-read`, which is
+  xet-core's deserializer, reproduces the chunk hashes and the xorb hash of a file *our* writer dumped
+  (`scripts/xet_bench.sh <file> lz4 <dir>`); and the live round-trip above. `hf_xet_selftest()` is at 367
+  checks.
+* It is not free and does not pretend to be: the CPU phase of a write goes from ~690 MB/s to ~370 MB/s on
+  compressible data (from ~1% of a large upload's wall clock to ~2%), and incompressible chunks grow about
+  16 bytes each - `1.001x` over 5 MB of random bytes - because reference clients compress *every* chunk and
+  an incompressible one is stored raw inside a frame. There is no per-chunk "skip it" heuristic here, on
+  purpose: the special case costs more than it saves and would make our xorbs a shape nobody else's are.
+* **`XXH_NAMESPACE=LZ4_`, `-fvisibility=hidden`, and lz4's own visibility macros emptied out**, because
+  `lz4frame` computes frame checksums with xxhash and this extension shares a process with DuckDB's own
+  xxhash and its own namespaced LZ4. DuckDB's copies are inside C++ namespaces so nothing was colliding
+  today; the extension now exports zero `LZ4_*`/`XXH*` symbols, which is what keeps it true tomorrow.
+
 ## 0.0.2-pre4 — writes go out over several streams, and CI's artifacts are the ones a client can load
 
 * **A file's Xet xorbs are uploaded with several requests in flight**, which is the one thing a Xet write

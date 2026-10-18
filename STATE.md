@@ -2,7 +2,49 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-18, ~11:25 UTC)
+## Current position (2026-10-18, ~13:10 UTC)
+
+**M8: xorb chunks go out LZ4-compressed.** Version **0.0.2-pre5**, suites at **192 passed / 9 expected
+failures / 0 failed** (xet 4, xet_upload 30, read 55, write 57, models 24, buckets), selftest at **367
+checks**. `docs/XET.md` has the M8 write-up.
+
+* **Why this after concurrency**: it is the other multiplier on the thing that measures slow. Measured
+  offline with `tools/xet_probe` as the reference writer over a 2,103,723 byte CSV: none 2,105,403,
+  lz4 881,602, bg4 1,148,898 (worse), auto 881,602 → **0.42x on the wire**, bigger than M7's 1.7x and
+  multiplicative with it. Our own writer lands at 889,917 (0.9% above the reference's frame bytes, which
+  is free: conforming LZ4 encoders need not agree, since each chunk is decoded from its own scheme byte +
+  length).
+* **The load-bearing fact**: an xorb's hash is the merkle root of the **uncompressed** chunk hashes, so
+  all four schemes produced the same `xorb_hex` (`9f7738bc…b16489`). Codec is a wire decision. Live proof
+  in `smoke_xet_upload.sql`: write with lz4, re-upload with `hf_xet_compression='none'` → every xorb
+  `inserted = false`, from the CAS, for no new storage.
+* **The shard did not move.** `chunk_byte_range_start` is cumulative *unpacked* length (xet-core books
+  `unpacked_segment_bytes`; `memory_client` accumulates uncompressed sizes), so readers ask in the space
+  compression happens under. LZ4 touched xorb serialization and nothing else - which is also why 325
+  checks became 367 rather than why they were rewritten.
+* **Decodability is the test surface now**, in four places: `AddChunk` decompresses its own frame and
+  compares against the bytes it hashed before any POST; the selftest pins hashes/counts/unpacked-totals/
+  footer-placement for LZ4 builds (frame bytes deliberately *not* pinned); `xet-probe xorb-read` - xet-core
+  deserializing - reproduces chunk hashes and the xorb hash of a file **our** writer dumped
+  (`scripts/xet_bench.sh <file> lz4 <dir>`, which is what left those files on disk); and the live re-upload.
+* **Costs, stated plainly**: CPU phase ~690 → ~370 MB/s (compressible) / ~520 MB/s (random), i.e. ~1% of a
+  big write's wall clock → ~2%; incompressible chunks grow ~16 B (1.001x over 5 MB random) because
+  reference clients compress *every* chunk and store incompressible ones raw inside a frame. No per-chunk
+  "skip" heuristic, deliberately. bg4 not implemented (needs `bg4_split` + KL predictor, and it lost on
+  this data); `Auto` still refused in the ctor rather than guessed.
+* **Build hygiene**: `XXH_NAMESPACE=LZ4_` + `-fvisibility=hidden` + emptying lz4's own
+  `LZ4LIB_VISIBILITY`/`LZ4FLIB_VISIBILITY` macros → the extension exports **0** `LZ4_*`/`XXH*` symbols.
+  DuckDB's own LZ4/xxhash are C++-namespaced, so nothing was colliding; `hf_library` deliberately keeps its
+  default visibility (it holds the entry points).
+* One live assertion had to change meaning, and it was the suite doing its job: `assert_serialized_is_larger`
+  (`bytes > uncompressed_bytes`) is false once chunks compress, so it became `sum(bytes) <
+  sum(uncompressed_bytes)` under LZ4 and the framing statement moved to the `hf_xet_compression='none'`
+  block, where it is still true.
+* Next: **publish pre5 from CI artifacts** (first time linux_amd64 + windows_amd64_mingw binaries go out at
+  all; the pre4 run is being rerun after an EPEL mirror failure and pre5 supersedes it - push pre5 and let
+  its own run be the publish source), then the upload-side dedup query, then shard-driven read prefetch.
+
+## Position before this (2026-10-18, ~11:25 UTC)
 
 **M7: a file's xorbs go out over several streams, and CI is green all the way down to loading the
 artifact.** Version **0.0.2-pre4**, suites at **189 passed / 9 expected failures / 0 failed** (xet 4,
@@ -720,3 +762,25 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
 * `11:20` — bumped to **0.0.2-pre4**; `scripts/run_all.sh --build` → 189 passed, 9 expected failures, 0
   failed. To publish: pre4 goes out from CI's artifacts, which is the first time amd64 and windows
   binaries exist at all.
+* `12:05` — M8 started from the oracle numbers rather than from enthusiasm: vendored lz4 v1.10.0
+  (`lz4.c`/`lz4hc.c`/`lz4frame.c`/`xxhash.c`, BSD-2) as `hf_lz4_library`, per-chunk LZ4 frames behind the
+  scheme-1 chunk header, `hf_xet_compression` setting (default `lz4`), round-trip decompress-and-compare
+  inside `AddChunk`.
+* `12:35` — the selftest caught nothing and its own arithmetic was the bug: the LZ4 loop read the footer's
+  trailing u32 with descending byte indices, which only misbehaves when the value exceeds 255 - i.e. only
+  for multi-chunk xorbs, and the pinned vectors that passed were single-chunk. Read forward, and
+  `footer_start == last physical_end` for every vector. Worth remembering: a selftest that fails is not
+  the same as a writer that is wrong.
+* `12:40` — **interop proven with the reference's own reader**: `xet-probe xorb-read` on xorbs dumped by
+  our writer (`scripts/xet_bench.sh <file> lz4 <dir>`) reports `num_chunks=33`, `uncompressed=2103723`
+  and `footer_xorb_hex=9f7738bc…b16489` - the same hash `xet-probe xorb lz4` computes for the reference
+  writer's file, and the same hash the `none`/`bg4`/`auto` schemes produce. Random 5 MB: ours 5,247,715 vs
+  reference 5,246,480 (+0.02%), xorb hash identical.
+* `12:55` — symbol hygiene: `-fvisibility=hidden` alone left 75 exported LZ4 symbols (lz4.h stamps
+  `visibility("default")` unless its own macros are predefined); emptying `LZ4LIB_VISIBILITY` /
+  `LZ4FLIB_VISIBILITY` gets it to 0, with `hf_library`'s visibility untouched so the entry points stay
+  exported. Verified by `nm -D` and by `LOAD`ing the result.
+* `13:05` — live suite adapted: `assert_serialized_is_larger` → `assert_lz4_shrinks_the_wire`, plus the
+  cross-scheme identity block (`hf_xet_compression='none'` re-upload must find every xorb already
+  stored). xet_upload 27 → 30 checks; `run_all.sh` → **192 passed, 9 expected failures, 0 failed**;
+  selftest 325 → 367 (pinned in `test/sql/hf_selftest.test`, `smoke_xet.sql`'s floor, README, docs).

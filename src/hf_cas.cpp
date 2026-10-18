@@ -4,6 +4,7 @@
 #include "hf_xet_chunk.hpp"
 
 #include "duckdb/common/file_opener.hpp"
+#include "duckdb/common/string_util.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -287,6 +288,28 @@ idx_t ParallelUploads(optional_ptr<FileOpener> opener, const string &path) {
 	return HF_DEFAULT_WRITE_MAX_PARALLEL;
 }
 
+//! Which codec the chunks of this file's xorbs get. `hf_xet_compression` is a string rather than a
+//! boolean because the format has more than two answers and one of them (bg4-LZ4) is worth adding
+//! later without renaming a setting.
+HFXetCompressionScheme ChunkCompression(optional_ptr<FileOpener> opener, const string &path) {
+	if (opener) {
+		Value value;
+		FileOpenerInfo info;
+		info.file_path = path;
+		if (FileOpener::TryGetCurrentSetting(opener, Identifier("hf_xet_compression"), value, info) && !value.IsNull()) {
+			auto configured = StringUtil::Lower(value.ToString());
+			if (configured == "none") {
+				return HFXetCompressionScheme::NONE;
+			}
+			if (configured == "lz4") {
+				return HFXetCompressionScheme::LZ4;
+			}
+			throw InvalidInputException("hf_xet_compression must be 'lz4' or 'none', got '%s'", configured);
+		}
+	}
+	return HFXetCompressionScheme::LZ4;
+}
+
 } // namespace
 
 HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, optional_ptr<FileOpener> opener,
@@ -316,7 +339,7 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 	FileHandle &file = *handle;
 
 	HFXetChunker chunker;
-	HFXetXorbBuilder builder;
+	HFXetXorbBuilder builder(ChunkCompression(opener, path));
 	string buffer(HF_DEFAULT_READ_BUFFER, '\0');
 	auto file_size = file.GetFileSize();
 	idx_t offset = 0;

@@ -27,8 +27,12 @@ SELECT count(*) >= 1                                  AS assert_xorbs_uploaded,
        bool_and(inserted)                                AS assert_fresh_content_is_inserted,
        max(num_chunks) <= 8192                        AS assert_chunk_limit_respected,
        max(uncompressed_bytes) <= 67108864            AS assert_size_limit_respected,
-       -- the footer and the chunk headers are the difference between the two byte counts
-       bool_and(bytes > uncompressed_bytes)              AS assert_serialized_is_larger,
+       -- Chunks are LZ4-compressed by default (docs/XET.md, M8), so the serialized xorb is *smaller*
+       -- than the content it carries - the framing it adds is 8 bytes per chunk, and what the frames
+       -- saved on this CSV is far more than that. `uncompressed_bytes` stays the size the merkle tree
+       -- is built over, which is why the two can move apart without anything about the content moving.
+       sum(bytes) < sum(uncompressed_bytes)           AS assert_lz4_shrinks_the_wire,
+       bool_and(bytes > 0)                               AS assert_serialized_is_positive,
        count(DISTINCT xorb) = count(*)                AS assert_each_xorb_is_distinct
 FROM hf_xet_upload('hf://datasets/lhoestq/hf-smoke-staging/xet_upload_probe.csv');
 
@@ -39,6 +43,21 @@ SELECT bool_and(NOT inserted)                            AS assert_repeat_is_alr
                     FROM hf_xet_upload('hf://datasets/lhoestq/hf-smoke-staging/xet_upload_probe.csv'))
                                                      AS assert_layout_is_deterministic
 FROM hf_xet_upload('hf://datasets/lhoestq/hf-smoke-staging/xet_upload_probe.csv');
+
+-- The same file uploaded again with compression switched off. An xorb's hash is the merkle root of the
+-- *uncompressed* chunk hashes, so switching codecs cannot change which objects the CAS is asked for -
+-- and the CAS, which stores bytes without interpreting them, must recognize every one of them. This is
+-- the strongest available live proof that compression is a wire decision and not a content decision, and
+-- it costs no new storage. The uncompressed uploads are also where "the serialized form is larger than
+-- the content, by the framing" is a true statement: with LZ4 it is the other way round.
+SET hf_xet_compression = 'none';
+
+SELECT bool_and(NOT inserted)                            AS assert_uncompressed_is_the_same_content,
+       bool_and(bytes > uncompressed_bytes)              AS assert_uncompressed_carries_framing,
+       count(*) >= 1                                     AS assert_uncompressed_uploaded
+FROM hf_xet_upload('hf://datasets/lhoestq/hf-smoke-staging/xet_upload_probe.csv');
+
+RESET hf_xet_compression;
 
 -- A CAS token is scoped to a repository, so uploading needs one even when the bytes are not in a
 -- repository at all - which is how a COPY will do it: DuckDB fills a local temp file, and the target

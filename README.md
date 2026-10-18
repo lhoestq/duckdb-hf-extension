@@ -69,6 +69,7 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | `hf_create_repo` | `false` | create the target repository when it does not exist |
 | `hf_xet_write` | `true` | send file content through Xet (content-defined chunks, deduplicated, incremental). If the content store cannot be reached the write falls back to a plain LFS upload, so this costs time rather than correctness when the CAS is down; `false` forces the LFS route |
 | `hf_write_max_parallel_uploads` | `3` | how many of a file's xorbs are on the wire at once (`1` sends them one after another). Each one waiting costs up to 64 MiB of serialized bytes in memory, and that is also how far ahead of the network the reader/chunker may run |
+| `hf_xet_compression` | `lz4` | how chunk payloads are stored inside an xorb: LZ4 frames, or `none`. Changes how many bytes travel and nothing else - an xorb's hash covers the uncompressed bytes, so the CAS's dedup answers, the shard and every other client are unaffected. Incompressible chunks come out ~16 bytes larger (they are stored raw inside a frame, which is what reference clients do too) |
 
 ## Table functions
 
@@ -315,7 +316,7 @@ what a given binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
   presigned PUT per part, then a completion POST with the part etags)
 * ✔ the Xet *client* halves that are pure computation (`docs/XET.md`, M1-M3): chunk hashes,
   file/xorb merkle roots, the content-defined chunker, and the serialized xorb itself - each one
-  byte-for-byte identical to what `xet-core` produces, checked by `hf_xet_selftest()` (325 checks) /
+  byte-for-byte identical to what `xet-core` produces, checked by `hf_xet_selftest()` (367 checks) /
   `scripts/smoke_xet.sh` against vectors generated from the reference implementation.
 * ✔ Xet *uploads* (`docs/XET.md`, M4): `hf_xet_upload(path [, scope := …])` chunks a file, serializes
   each xorb and stores it in the real content addressable storage - write-token exchange, the CAS's own
@@ -340,6 +341,15 @@ what a given binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
   file measured 31 s at concurrency 1 against 18 s at 3, interleaved runs on a link whose single-stream
   throughput sits around 7 MB/s). Content addressing is what makes overlapping legal — no xorb depends on
   another, and the metadata shard that does depend on all of them is posted after the last one lands.
+* ✔ chunks are LZ4-compressed on their way to the CAS (`hf_xet_compression`, on by default,
+  `docs/XET.md`, M8). A Xet write waits on the wire, so this is the same upload with 2.4x fewer bytes on
+  it: a 2,103,723 byte CSV serializes to 2,105,403 bytes uncompressed and 889,917 compressed. What it
+  cannot change is identity - an xorb's hash is the merkle root of the *uncompressed* chunk hashes - and
+  the live suite proves that with the CAS itself: a file written with compression on is re-uploaded with
+  compression off and every xorb comes back `inserted = false`. Cost is ~1% of wall clock in CPU (the
+  hashing+serialize phase goes from ~690 to ~370 MB/s) and, on truly incompressible bytes, 1.001x *more*
+  bytes: incompressible chunks are stored raw inside a frame rather than skipped, which is what reference
+  clients do, at a rounding error.
 * ✘ `hf_xet_write` has no way to be *made* to fail from SQL, so the fallback path itself is only covered
   by reading the code and by the explicit `hf_xet_write = false` route; forcing a CAS failure would mean
   adding a test-only seam to the upload path, which is not a thing a shipping extension should carry.
@@ -413,9 +423,9 @@ bash scripts/smoke_models.sh  # each .sh makes its own fixtures and cleans up af
 
 ```
 --- xet
-    xet: 4 passed, 0 expected failures, 0 failed          # offline: 325 reference checks
+    xet: 4 passed, 0 expected failures, 0 failed          # offline: 367 reference checks
 --- xet_upload
-    xet_upload: 24 passed, 1 expected failures, 0 failed  # against the production CAS
+    xet_upload: 30 passed, 1 expected failures, 0 failed  # against the production CAS
 --- read
     read: 55 passed, 0 expected failures, 0 failed
 --- write

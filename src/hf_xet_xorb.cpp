@@ -2,6 +2,8 @@
 
 #include "hf_xet_chunk.hpp"
 
+#include "lz4frame.h"
+
 #include <cstring>
 
 namespace duckdb {
@@ -21,6 +23,70 @@ constexpr uint8_t HF_XET_XORB_CHUNK_HEADER_VERSION = 0;
 constexpr idx_t HF_XET_XORB_CHUNK_HEADER_LEN = 8;
 constexpr uint64_t HF_XET_XORB_MAX_STORED_LENGTH = (1ULL << 24) - 1;
 
+//! Compress one chunk into exactly one LZ4 frame - which is what the format's per-chunk scheme byte
+//! and 3-byte compressed length describe, and what xet-core does with lz4_flex's FrameEncoder.
+//!
+//! The bytes do not have to match what the Rust encoder would have produced. An xorb's hash is over
+//! *uncompressed* content, and a reader decodes a chunk from the length and scheme it is told, so any
+//! conforming frame works; the default preferences (64 KiB blocks, no content checksum) are the plain
+//! ones. What has to be true is that the frame decodes, which is why CompressChunk wraps this with a
+//! round-trip check rather than trusting it.
+idx_t CompressChunkLZ4(const_data_ptr_t data, idx_t len, string &out) {
+	auto bound = LZ4F_compressFrameBound(size_t(len), nullptr);
+	out.resize(size_t(bound));
+	auto written = LZ4F_compressFrame(out.data(), bound, const_data_ptr_cast(data), size_t(len), nullptr);
+	if (LZ4F_isError(written)) {
+		throw IOException("LZ4 compression of a %llu byte Xet chunk failed: %s", len,
+		                  LZ4F_getErrorName(written));
+	}
+	out.resize(size_t(written));
+	return written;
+}
+
+//! Decode one LZ4 frame back, and fail loudly if it does not come out as the bytes that went in.
+//! The uncompressed length is known here (it is the chunk size the merkle tree was built over), so
+//! the check is exact rather than a plausibility test.
+void DecompressChunkLZ4(const string &frame, const_data_ptr_t expected, idx_t expected_len) {
+	LZ4F_dctx *ctx = nullptr;
+	auto status = LZ4F_createDecompressionContext(&ctx, LZ4F_VERSION);
+	if (LZ4F_isError(status)) {
+		throw IOException("could not create an LZ4 decompressor: %s", LZ4F_getErrorName(status));
+	}
+	string out;
+	out.resize(size_t(expected_len));
+	idx_t written = 0;
+	idx_t consumed = 0;
+	try {
+		while (true) {
+			size_t dst_size = size_t(expected_len) - size_t(written);
+			size_t src_size = size_t(frame.size()) - size_t(consumed);
+			auto result = LZ4F_decompress(ctx, out.data() + written, &dst_size, frame.data() + consumed, &src_size,
+			                              nullptr);
+			if (LZ4F_isError(result)) {
+				throw IOException("LZ4 decompression of a written Xet chunk failed: %s",
+				                  LZ4F_getErrorName(result));
+			}
+			written += dst_size;
+			consumed += src_size;
+			if (result == 0) {
+				break; // the frame is complete
+			}
+			if (dst_size == 0 && src_size == 0) {
+				throw IOException("LZ4 decompression of a written Xet chunk made no progress");
+			}
+		}
+	} catch (...) {
+		LZ4F_freeDecompressionContext(ctx);
+		throw;
+	}
+	LZ4F_freeDecompressionContext(ctx);
+	if (written != expected_len || memcmp(out.data(), const_data_ptr_cast(expected), size_t(expected_len)) != 0) {
+		throw IOException("LZ4 round-trip check failed: a %llu byte Xet chunk came back as %llu bytes of "
+		                  "something else",
+		                  expected_len, written);
+	}
+}
+
 void AppendU32(string &out, uint32_t value) {
 	out.push_back(char(value & 0xFF));
 	out.push_back(char((value >> 8) & 0xFF));
@@ -37,11 +103,11 @@ void AppendU24(string &out, uint32_t value) {
 } // namespace
 
 HFXetXorbBuilder::HFXetXorbBuilder(HFXetCompressionScheme scheme) : scheme(scheme) {
-	if (scheme != HFXetCompressionScheme::NONE) {
-		// The scheme byte exists in the format and the footer does not care which one is used - the
-		// xorb hash covers *uncompressed* contents - but every non-None scheme has to produce bytes
-		// the Hub's reader can decode, so each one is added deliberately and diffed against the
-		// reference (docs/XET.md, M3). Uncompressed uploads are valid meanwhile.
+	if (scheme != HFXetCompressionScheme::NONE && scheme != HFXetCompressionScheme::LZ4) {
+		// The scheme byte exists in the format and the xorb hash does not care which one is used - it
+		// covers *uncompressed* contents - but every scheme has to produce bytes the Hub's reader can
+		// decode, so each one is added deliberately and checked against the reference (docs/XET.md).
+		// BYTE_GROUPING_4_LZ4 additionally needs the bg4 splitter, and Auto is a policy, not a codec.
 		throw NotImplementedException("Xet chunk compression scheme %d is not implemented by the hf "
 		                              "extension yet; see docs/XET.md",
 		                              int(scheme));
@@ -81,14 +147,37 @@ void HFXetXorbBuilder::AddChunk(const_data_ptr_t data, idx_t len) {
 		                        len, chunks.size(), uncompressed_bytes, HF_XET_MAX_XORB_CHUNKS,
 		                        uint64_t(HF_XET_MAX_XORB_BYTES));
 	}
-	// The reference falls back to storing a chunk uncompressed when compressing it did not pay; with
-	// only the None scheme that decision is already taken, and `len` is both lengths.
 	auto hash = HFXetChunkHash(data, len);
+	// Compress when the scheme says to, and store exactly what the frame came out as - including when
+	// the frame is *larger* than the chunk, which is what an incompressible chunk (already-compressed
+	// parquet columns, random weights) does. Reference clients behave the same way: `Auto` resolves to
+	// LZ4 or bg4-LZ4 and never to "leave it alone", so a chunk that grew by a few bytes of framing is
+	// what the ecosystem uploads, and a per-chunk decision would make our xorbs differ from theirs for
+	// no gain - the CAS stores either way, and the hash is of the bytes before this line either way.
+	string compressed;
+	const_data_ptr_t stored = data;
+	idx_t stored_len = len;
+	if (scheme == HFXetCompressionScheme::LZ4) {
+		// The CAS object we are about to create cannot be edited and is addressed by the hash of the
+		// *uncompressed* bytes, so a frame that only this one encoder could read would be a corrupt
+		// object forever, with the hash looking fine the whole way through. Decompressing what we just
+		// compressed costs milliseconds against a network round trip, and turns "our LZ4 works" from an
+		// assumption about vendored code into a property of the bytes being posted.
+		CompressChunkLZ4(data, len, compressed);
+		DecompressChunkLZ4(compressed, data, len);
+		stored = const_data_ptr_cast(compressed.data());
+		stored_len = compressed.size();
+		if (stored_len > HF_XET_XORB_MAX_STORED_LENGTH) {
+			throw InternalException("LZ4-compressed Xet chunk of %llu bytes does not fit a 3-byte chunk "
+			                        "header length",
+			                        stored_len);
+		}
+	}
 	body.push_back(char(HF_XET_XORB_CHUNK_HEADER_VERSION));
-	AppendU24(body, uint32_t(len));
+	AppendU24(body, uint32_t(stored_len));
 	body.push_back(char(uint8_t(scheme)));
 	AppendU24(body, uint32_t(len));
-	body.append(const_char_ptr_cast(data), len);
+	body.append(const_char_ptr_cast(stored), stored_len);
 
 	uncompressed_bytes += len;
 	chunks.push_back({hash, uint32_t(len), uint32_t(body.size())});
@@ -263,6 +352,59 @@ idx_t HFXetXorbSelfTest(vector<std::tuple<string, bool, string, string>> &result
 		      ident_at(length - 4 - boundary_offset_from_end, HF_XET_XORB_IDENT_BOUNDARIES) ? "true" : "false");
 		check(name + " xorb hashes section is where the footer says", "true",
 		      ident_at(length - 4 - hashes_offset_from_end, HF_XET_XORB_IDENT_HASHES) ? "true" : "false");
+	}
+
+	// LZ4 frames. These are deliberately *not* reference-pinned byte-for-byte: two conforming LZ4
+	// encoders produce different frames for the same input and a reader cannot tell them apart, since
+	// it decodes a chunk from the stored length and scheme byte. What would break in a way a reader
+	// notices is the framing arithmetic and the hash, so those are what gets checked - plus one check
+	// per direction of the size change, because a "compression" that never compresses and one that
+	// shrinks random data are both bugs.
+	for (auto &test : HFXetXorbVectors()) {
+		auto lz4_name = string(test.name);
+		auto lz4_input = HFXetTestInputBytes(test.input, test.size, test.seed, test.pattern);
+
+		HFXetXorbBuilder lz4(HFXetCompressionScheme::LZ4);
+		HFXetChunker lz4_chunker;
+		auto lz4_on_chunk = [&](const_data_ptr_t data, idx_t len) {
+			if (lz4.IsFull()) {
+				throw InternalException("xorb vector %s is larger than one xorb", lz4_name);
+			}
+			lz4.AddChunk(data, len);
+		};
+		lz4_chunker.Process(const_data_ptr_cast(lz4_input.data()), lz4_input.size(), lz4_on_chunk);
+		lz4_chunker.Finish(lz4_on_chunk);
+		auto xorb = lz4.Finish();
+
+		// The one reference number an LZ4 xorb does have: its hash, which is over the chunk contents as
+		// they were before compression. If a codec ever touched what gets hashed, this is where it shows.
+		check(lz4_name + " lz4 xorb hash is the uncompressed one", test.xorb_hash, xorb.hash.Hex());
+		check(lz4_name + " lz4 xorb chunk count", to_string(test.num_chunks), to_string(xorb.chunks.size()));
+
+		uint64_t uncompressed_total = 0;
+		for (auto &chunk : xorb.chunks) {
+			uncompressed_total += chunk.uncompressed_size;
+		}
+		check(lz4_name + " lz4 xorb unpacked sizes still sum to the input", to_string(lz4_input.size()),
+		      to_string(uncompressed_total));
+
+		// physical_end is the compressed space now, so the two offset arrays can no longer be the same
+		// numbers: the chunk section has to end where the footer starts, and the footer has to still be
+		// findable by its trailing length
+		auto length = xorb.bytes.size();
+		// the trailing u32, read forward: it is little-endian, so the byte at length-4 is the low one
+		auto info_length = uint32_t(uint8_t(xorb.bytes[length - 4])) | (uint32_t(uint8_t(xorb.bytes[length - 3])) << 8) |
+		                   (uint32_t(uint8_t(xorb.bytes[length - 2])) << 16) |
+		                   (uint32_t(uint8_t(xorb.bytes[length - 1])) << 24);
+		auto footer_start = length - 4 - info_length;
+		check(lz4_name + " lz4 xorb chunk section ends at the footer", to_string(footer_start),
+		      xorb.chunks.empty() ? "0" : to_string(xorb.chunks.back().physical_end));
+		check(lz4_name + " lz4 xorb footer ident", "true",
+		      memcmp(xorb.bytes.data() + footer_start, HF_XET_XORB_IDENT, 7) == 0 ? "true" : "false");
+
+		auto compressible = test.input == HFXetTestInput::REPEAT && test.size >= 1000;
+		check(lz4_name + " lz4 xorb size moved the expected way", compressible ? "smaller" : "not smaller",
+		      xorb.bytes.size() < test.length ? "smaller" : "not smaller");
 	}
 
 	return failures;

@@ -91,6 +91,8 @@ produce a distinct object. Chunk payloads are compressed with `CompressionScheme
 LZ4 *frames* - so either vendor `lz4frame.c` (BSD, self-contained) or write the frame container by
 hand around the block API (magic `0x6422150C`, FLG/HC header, block sizes, end mark: short and fully
 specified). `bg4` is a small byte shuffle worth porting since Auto may pick it.
+*(M8 vendored `lz4.c`/`lz4hc.c`/`lz4frame.c`/`xxhash.c` at v1.10.0 and shipped LZ4 frames; bg4 did not
+ship, and the reasoning about byte-for-byte equality turned out to be the load-bearing part - see M8.)*
 `xorb_chunk_format.rs` (`serialize_chunk`, `write_chunk_header`) and `xorb_object_format.rs`
 (footer construction) are the two files to translate.
 
@@ -130,6 +132,8 @@ successfully uploaded"). Shard format is the second big port after the xorb form
 3. Does `Auto` compression have to match `hf_xet`'s choice for the resulting xorb hash to match the
    reference client byte-for-byte, or is per-chunk scheme free (it should be free: the hash covers
    *uncompressed* chunk data — verify against `xorb_hash`, which takes `(hash, size)` pairs).
+   **Answered before it was built**: free, and verified - `xet-probe xorb` writes the same file's xorb
+   under four schemes and prints the same `xorb_hex` for all four (M8).
 4. Exact `preupload` response shape for a bucket vs a git repo (`xet_file_data` fields per repo type).
 5. Dedup: is a global dedup query required, or can a first implementation skip it (correct but
    no sharing)? `MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES` suggests it is opportunistic.
@@ -256,6 +260,10 @@ equality with the reference's `lz4_flex` output is not required, since any valid
 same chunk and the hash is over the chunk; what is required is that the reference reader gets the
 original bytes back. BG4 (scheme 2) is a byte-regrouping permutation on top of that. Both are
 upload-size optimizations and can land after the write path works.
+
+*(LZ4 landed in M8 and is the default; bg4 did not, and `Auto` is still refused rather than guessed at.
+Everything above is what M8 was built on: the "what is required is that the reader gets the original
+bytes back" sentence is the test that replaced byte-exactness as the contract.)*
 
 ## M4 the CAS client (done)
 
@@ -417,7 +425,7 @@ rather than from guessing which of the three remaining optimizations to take fir
 | the same upload, end to end | 12,000-70,000 ms, link-dependent |
 
 about 1% of a big write's wall clock is CPU. So SIMD dispatch was worth committing (it is free, and it
-makes the x86 paths' correctness a *tested* thing rather than an assumption - the CI self-test runs the 325
+makes the x86 paths' correctness a *tested* thing rather than an assumption - the CI self-test runs the 367
 checks on an amd64 artifact, which nothing local can) and was not worth waiting for. What a user of
 `hf_xet_write` actually waits on is a sequence of xorb POSTs, one per 64 MiB, each on its own connection
 getting what one connection on this link gets. Measured on 200 MB of fresh random content, six runs,
@@ -481,3 +489,86 @@ happen, and the seam required to try is worse than the gap.
 as a byte count), an upload-side dedup query (`POST /v1/chunks/…` before hashing work another repository
 already paid for), and a read prefetch that walks a shard's chunk table instead of issuing one range per
 window.
+
+## M8 LZ4 chunk compression (done)
+
+M7 put three xorbs on the wire at once. The other lever on the same measurement is making each xorb
+smaller, and it turned out to be the bigger one - so it was measured offline before a line of the write
+path changed. `tools/xet_probe` (`xet-probe xorb <scheme> <out>`, xet-core's own writer) over the same
+2,103,723 byte CSV the smoke suites write:
+
+| scheme | xorb bytes | |
+|---|---|---|
+| `none` | 2,105,403 | 8 bytes of chunk header per chunk, nothing else |
+| `lz4` | 881,602 | 0.42x the content |
+| `bg4` | 1,148,898 | *worse* than plain lz4 on this data |
+| `auto` | 881,602 | auto resolved to lz4, which is what it does for tabular data |
+
+`xorb_hex` was `9f7738bc…b16489` in all four rows. That single fact is what the milestone rests on: an
+xorb's hash is the merkle root of the **uncompressed** chunk hashes, so the codec is a decision about
+bytes on the wire and not about identity. Compressing cannot make content that a repository already holds
+look like new content, and it cannot make our objects unreadable to a client that picked a different
+codec. Everything below follows from that being true rather than from hoping it is.
+
+**What the reference does, mirrored rather than improved on.** `Auto` never resolves to `None`: reference
+clients pick lz4 (or bg4-lz4 with `bg4_split` + the K-Lipschitz predictor) and compress *every* chunk,
+including the ones that come out bigger than they went in. There is no per-chunk "skip it if it doesn't
+pay" here, because the cost of not skipping is small and measured - an incompressible chunk is stored as a
+raw LZ4 block inside a frame and costs about 16 bytes of framing, **1.001x** over 5 MB of `/dev/urandom` -
+and a clever-looking divergence would make our xorbs a shape nobody else's are, for a rounding error. bg4
+is not implemented: it needs `bg4_split` and the predictor, and it lost to plain lz4 on the data that made
+it here. `Auto` remains refused in the constructor rather than guessed at.
+
+**Frames, and what is *not* pinned.** A chunk payload is an LZ4 frame (`lz4_flex::frame` on the reference
+side), so `lz4frame.c` is vendored (v1.10.0, BSD-2) rather than hand-rolled. Two conforming LZ4 encoders do
+not produce the same frame bytes - descriptors, block sizes and checksum choices differ - and ours is not
+the reference's: 889,917 bytes where `lz4_flex` wrote 881,602 (+0.9%) for the CSV, and 5,247,715 where it
+wrote 5,246,480 (+0.02%) for random bytes. Those differences are not the contract, and pinning them in a
+self-test would have been pinning lz4 version details that are free to change. The contract is that a
+chunk header's scheme byte plus its compressed length let a reader decode that chunk on its own, and that
+the hash covers the bytes before compression.
+
+**So decodability is what gets checked**, in four places, each answering a different doubt:
+
+* `AddChunk` decompresses what it just compressed and compares it, byte for byte at the exact length, with
+  the bytes it hashed - before the xorb can be posted. An uploaded xorb cannot be edited, and it is
+  addressed by a hash of content that looks perfectly fine while a broken payload makes it unreadable
+  forever; the check costs milliseconds against the network round trip that follows it.
+* `hf_xet_selftest()` (325 checks before this, **367** after) rebuilds every pinned input vector with LZ4
+  and requires the *chunk and xorb hashes* to equal the reference-pinned ones for that vector, the chunk
+  count to be unchanged, the unpacked lengths to still sum to the input size, the chunk section to end
+  exactly where the footer starts, and the footer to still be findable by its trailing length. Frame bytes
+  are deliberately absent from that list.
+* the reference's own reader gets our files: `scripts/xet_bench.sh <file> lz4 <dir>` leaves serialized
+  xorbs on disk, and `xet-probe xorb-read` over one of them - xet-core deserializing, recomputing every
+  chunk hash - reports `num_chunks=33`, `uncompressed=2103723` and footer hash `9f7738bc…b16489`, which is
+  the hash the reference writer's own xorb for that file carries.
+* live, in `smoke_xet_upload.sql`: a file is written with the default (lz4) and then uploaded again with
+  `hf_xet_compression='none'`, and every xorb of the second pass must come back `inserted = false`. The
+  CAS holding content it has never seen by url but recognizing it by hash is the strongest available
+  statement that compression is not part of identity - and it is the service making it, not us. The same
+  block keeps the old "serialized is larger than content, by the framing" assertion alive, where it is
+  true; with lz4 on, the suite asserts the opposite direction (`sum(bytes) < sum(uncompressed_bytes)`).
+
+**The shard did not move**, which is worth saying because it looked like it might.
+`chunk_byte_range_start` is cumulative **unpacked** length: xet-core advances segment bookkeeping by
+`unpacked_segment_bytes` and `memory_client` accumulates uncompressed sizes. A reader asking for a byte
+range of a file asks in the space compression happens underneath, so LZ4 changed xorb serialization and
+nothing else.
+
+**The build**, because two C libraries in one process is where this nearly went wrong: `lz4frame` computes
+frame checksums with xxhash, and DuckDB links xxhash and its own namespaced LZ4 into the same process as
+this extension. `XXH_NAMESPACE=LZ4_` renames ours (`LZ4_XXH32`), and `-fvisibility=hidden` plus empty
+`LZ4LIB_VISIBILITY`/`LZ4FLIB_VISIBILITY` - lz4's headers stamp `visibility("default")` on their own
+declarations unless those macros are predefined - leave **zero** `LZ4_*`/`XXH*` symbols exported from the
+extension. DuckDB's copies are inside C++ namespaces, so there was no live collision to fix; this is the
+hygiene that keeps it that way for the next extension loaded into the same process. `hf_library` keeps its
+own default visibility: that is the target holding the entry points.
+
+**Cost**, measured with the same bench that justified M7: the CPU phase of a write was ~690 MB/s
+uncompressed and is ~370 MB/s on compressible CSV / ~520 MB/s on random bytes. It was about 1% of a large
+upload's wall clock and is now about 2%, buying 0.42x on the bytes the other 98% waits for. `hf_xet_compression`
+(default `lz4`, accepts `none`) is the switch; `none` reproduces pre-M8 bytes exactly.
+
+**Next**: an upload-side dedup query (`POST /v1/chunks/…` before hashing work another repository already
+paid for), and a read prefetch that walks a shard's chunk table instead of issuing one range per window.

@@ -23,14 +23,15 @@ set(HF_THIRD_PARTY ${CMAKE_CURRENT_SOURCE_DIR}/../third_party)
 add_library(hf_library OBJECT ${HF_SOURCES})
 target_include_directories(hf_library PUBLIC
     ${HF_THIRD_PARTY}/blake3
-    ${HF_THIRD_PARTY}/gearhash)
+    ${HF_THIRD_PARTY}/gearhash
+    ${HF_THIRD_PARTY}/lz4)
 
 # Vendored BLAKE3 (third_party/blake3, blake3-1.8.3, C only - no C++ runtime needed).
 #
 # Xet hashes are keyed BLAKE3, so this has to be bit-exact. It is: BLAKE3's output is defined to be
 # independent of which implementation path computes it, and scripts/xet_oracle.py checks that rather
 # than assuming it. The same is true of the per-ISA paths compiled below - which is exactly what the
-# CI `selftest` job is for: it runs the 325 reference checks against the *built* linux_amd64 artifact,
+# CI `selftest` job is for: it runs the 367 reference checks against the *built* linux_amd64 artifact,
 # so an AVX2 path that disagreed with the reference would fail there instead of shipping.
 #
 # Upstream selects SIMD two ways, and the asymmetry is the reason this block is longer than it looks:
@@ -75,6 +76,46 @@ add_library(hf_blake3_library OBJECT ${HF_BLAKE3_SOURCES})
 target_include_directories(hf_blake3_library PUBLIC ${HF_THIRD_PARTY}/blake3)
 target_compile_definitions(hf_blake3_library PRIVATE ${HF_BLAKE3_DEFINITIONS})
 
+# Vendored LZ4 (third_party/lz4, v1.10.0, BSD-2-Clause) for the Xet xorb chunk-compression schemes.
+#
+# Unlike BLAKE3 this one does not have to agree byte-for-byte with anyone: an xorb's hash covers
+# *uncompressed* chunk contents, and a reader decodes each chunk with the scheme byte and the stored
+# compressed length, so any conforming LZ4 frame decodes. What it does have to be is decodable - which
+# is checked two ways, by decompressing every xorb we just serialized before posting it, and by handing
+# dumped xorbs to xet-core's own reader (`scripts/xet_bench.sh <file> lz4 <dir>` then `xet-probe
+# xorb-read`, docs/XET.md "Chunk compression").
+#
+# XXH_NAMESPACE=LZ4_ is not decoration: lz4frame computes frame checksums with xxhash, DuckDB links its
+# own xxhash into the same process, and an extension's default-visibility symbols are exported. With
+# the namespace on, the only XXH32 in the binary is DuckDB's, and lz4's is called LZ4_XXH32.
+add_library(hf_lz4_library OBJECT
+    ${HF_THIRD_PARTY}/lz4/lz4.c
+    ${HF_THIRD_PARTY}/lz4/lz4hc.c
+    ${HF_THIRD_PARTY}/lz4/lz4frame.c
+    ${HF_THIRD_PARTY}/lz4/xxhash.c)
+target_include_directories(hf_lz4_library PUBLIC ${HF_THIRD_PARTY}/lz4)
+target_compile_definitions(hf_lz4_library PRIVATE XXH_NAMESPACE=LZ4_)
+if (NOT MSVC)
+    # Keep the LZ4/xxhash C symbols out of the process's global namespace. hf_library calls them from
+    # the same shared object, so nothing outside needs to resolve them, and an extension that exports a
+    # plain `LZ4_compress_default` is one more candidate in the global namespace for whatever else in
+    # the process asks for that name (DuckDB's own copy of LZ4 is namespaced into C++, so it is not the
+    # collision - some other extension's unnamespaced copy would be).
+    #
+    # -fvisibility=hidden alone is not enough: lz4.h and lz4frame.h stamp their public declarations with
+    # __attribute__((visibility("default"))) unless LZ4*_VISIBILITY is predefined, so the macro has to be
+    # emptied out too - and emptied out for the *caller* as well, or hf_library would be declaring with
+    # wider visibility than the definition it links against.
+    set(HF_LZ4_HIDDEN -fvisibility=hidden)
+    target_compile_definitions(hf_lz4_library PRIVATE LZ4LIB_VISIBILITY= LZ4FLIB_VISIBILITY=)
+    target_compile_options(hf_lz4_library PRIVATE ${HF_LZ4_HIDDEN})
+    # hf_library's *declarations* are matched to that definition (an attribute saying "default" on a
+    # symbol defined hidden is at best a warning), but hf_library itself keeps its own visibility: this
+    # is the target holding the extension's entry points, and those have to stay exported.
+    target_compile_definitions(hf_library PRIVATE LZ4LIB_VISIBILITY= LZ4FLIB_VISIBILITY=)
+endif()
+
 set(ALL_OBJECT_FILES
     ${ALL_OBJECT_FILES} $<TARGET_OBJECTS:hf_library> $<TARGET_OBJECTS:hf_blake3_library>
+    $<TARGET_OBJECTS:hf_lz4_library>
     PARENT_SCOPE)

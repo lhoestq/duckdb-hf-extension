@@ -11,8 +11,15 @@
 # what a large upload waits on. Two consequences worth knowing before optimizing: 100 MB costs ~0.15 s
 # of CPU, and the *first* thing to parallelize is the sequence of xorb POSTs, not the hashing loop.
 #
-#   scripts/xet_bench.sh [file-to-measure]
+#   scripts/xet_bench.sh [file-to-measure] [none|lz4] [dir-to-dump-xorbs]
 #   XET_BLAKE3=portable scripts/xet_bench.sh /tmp/100mb.bin   # rebuild BLAKE3 with all SIMD off
+#
+# The third argument leaves each serialized xorb on disk, which is how the write path's other question
+# gets answered - "will the Hub's reader decode what our writer writes?" - by handing those files to
+# xet-core's own reader:
+#
+#   scripts/xet_bench.sh /tmp/compressible.bin lz4 /tmp/xorb_dump
+#   for f in /tmp/xorb_dump/*.xorb; do tools/xet_probe/target/release/xet-probe xorb-read "$f"; done
 #
 # Needs a `make release` tree (it links the objects that build, so what it times is what ships).
 set -euo pipefail
@@ -21,6 +28,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 objects="$root/build/release/extension/hf/src/CMakeFiles"
 duckdb_include="$(cd "$root/.." && pwd)/vendor/duckdb/src/include"
 input="${1:-/tmp/xet_bench_100mb.bin}"
+scheme="${2:-none}"
+dump="${3:-}"
 
 if [[ ! -d "$objects/hf_library.dir" ]]; then
   echo "no build tree at build/release - run: . .venv/bin/activate && make release OVERRIDE_GIT_DESCRIBE=v2.0.0-alpha47600" >&2
@@ -45,10 +54,17 @@ if [[ "${XET_BLAKE3:-built}" == "portable" ]]; then
   blake3_objs=$(find "$scratch" -name '*.o' | tr '\n' ' ')
 fi
 
+lz4_objs=$(find "$objects/hf_lz4_library.dir" -name '*.o' | tr '\n' ' ')
+
 g++ -std=c++17 -O2 -o /tmp/hf_xet_bench "$root/scripts/xet_bench.cpp" \
-  "$objects/hf_library.dir"/*.o $blake3_objs \
+  "$objects/hf_library.dir"/*.o $blake3_objs $lz4_objs \
   -I "$root/src/include" -I "$root/third_party/blake3" -I "$root/third_party/gearhash" \
+  -I "$root/third_party/lz4" \
   -I "$duckdb_include" \
   -L "$root/build/release/src" -lduckdb -Wl,-rpath,"$root/build/release/src"
 
-/tmp/hf_xet_bench "$input"
+if [[ -n "$dump" ]]; then
+  mkdir -p "$dump"
+  exec /tmp/hf_xet_bench "$input" "$scheme" "$dump"
+fi
+exec /tmp/hf_xet_bench "$input" "$scheme"

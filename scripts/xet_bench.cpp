@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 using namespace duckdb;
@@ -25,6 +26,19 @@ static double MBps(size_t bytes, double ms) {
 
 int main(int argc, char **argv) {
 	const char *input = argc > 1 ? argv[1] : "/tmp/xet_bench_100mb.bin";
+	// Which codec to measure, and where to leave the serialized xorbs. The dump exists because the
+	// question "does the Hub's reader accept what our writer writes?" is answered by handing these files
+	// to xet-core's own reader, not by trusting that a vendored encoder is standard-conforming:
+	//   tools/xet_probe/target/release/xet-probe xorb-read /tmp/xorb_dump/xorb0.xorb
+	const char *scheme_name = argc > 2 ? argv[2] : "none";
+	HFXetCompressionScheme scheme = HFXetCompressionScheme::NONE;
+	if (strcmp(scheme_name, "lz4") == 0) {
+		scheme = HFXetCompressionScheme::LZ4;
+	} else if (strcmp(scheme_name, "none") != 0) {
+		printf("unknown scheme '%s' (none, lz4)\n", scheme_name);
+		return 1;
+	}
+	const char *dump_dir = argc > 3 ? argv[3] : nullptr;
 	FILE *f = fopen(input, "rb");
 	if (!f) {
 		printf("cannot open '%s' - pass a file: scripts/xet_bench.sh /tmp/100mb.bin\n", input);
@@ -46,7 +60,7 @@ int main(int argc, char **argv) {
 	}
 	fclose(f);
 	const_data_ptr_t data = const_data_ptr_cast(buffer.data());
-	printf("input: %zu bytes\n", size);
+	printf("input: %zu bytes\n  scheme: %s\n", size, scheme_name);
 
 	// gear hashing alone: the chunk boundaries, which are the only thing the format's own chunking
 	// definition cares about
@@ -66,7 +80,7 @@ int main(int argc, char **argv) {
 	chunks = 0;
 	idx_t xorbs = 0;
 	idx_t serialized = 0;
-	HFXetXorbBuilder builder;
+	HFXetXorbBuilder builder(scheme);
 	auto flush = [&]() {
 		if (builder.ChunkCount() == 0) {
 			return;
@@ -74,7 +88,17 @@ int main(int argc, char **argv) {
 		auto xorb = builder.Finish();
 		xorbs++;
 		serialized += xorb.bytes.size();
-		builder = HFXetXorbBuilder();
+		if (dump_dir) {
+			char path[4096];
+			snprintf(path, sizeof(path), "%s/xorb%02zu.xorb", dump_dir, xorbs - 1);
+			FILE *out = fopen(path, "wb");
+			if (!out || fwrite(xorb.bytes.data(), 1, xorb.bytes.size(), out) != xorb.bytes.size()) {
+				printf("could not write %s\n", path);
+				return;
+			}
+			fclose(out);
+		}
+		builder = HFXetXorbBuilder(scheme);
 	};
 	auto add = [&](const_data_ptr_t chunk_data, idx_t len) {
 		if (builder.WouldOverflow(len)) {
@@ -94,6 +118,11 @@ int main(int argc, char **argv) {
 	printf("  chunk + hash + xorb:      %7.1f ms (%5.0f MB/s), %llu xorbs, %llu bytes serialized\n",
 	       Ms(begin, done), MBps(size, Ms(begin, done)), (unsigned long long)xorbs,
 	       (unsigned long long)serialized);
+	printf("  serialized / input:       %.3f  (the wire bill; hashing is over the input bytes either way)\n",
+	       double(serialized) / double(size ? size : 1));
+	if (dump_dir) {
+		printf("  dumped to:                %s/xorbNN.xorb\n", dump_dir);
+	}
 	printf("\ncompare with a real upload of this same file (SELECT count(*) FROM hf_upload(...)): the CPU\n"
 	       "phase above is the part of it that is not the wire.\n");
 	return 0;

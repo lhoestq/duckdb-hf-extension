@@ -27,7 +27,7 @@ SELECT bool_and(assert_passed) FROM hf_xet_selftest()
 query I
 SELECT count(*) FROM hf_xet_selftest()
 ----
-325
+367
 
 # url parsing happens before any request, so refusals are testable offline too. hf_ls rather than
 # FROM '<path>': a bare path in FROM goes through a format's replacement scan, and a format is an

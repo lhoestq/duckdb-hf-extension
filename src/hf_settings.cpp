@@ -75,6 +75,10 @@ void HFSettings::Register(DBConfig &config) {
 	                          "Upload files through Xet content-defined chunking (deduplicated, incremental); "
 	                          "falls back to a plain LFS upload when the content store cannot be reached",
 	                          LogicalType::BOOLEAN, Value(true));
+	config.AddExtensionOption("hf_xet_compression",
+	                          "Compression of Xet chunks inside an xorb: 'lz4' (default) or 'none'. Chunk hashes are "
+	                          "over uncompressed bytes, so this cannot change what a file's content is",
+	                          LogicalType::VARCHAR, Value("lz4"));
 	config.AddExtensionOption("hf_read_buffer_size", "Read-ahead buffer size (in bytes) for hf:// reads",
 	                          LogicalType::UBIGINT, Value::UBIGINT(HF_DEFAULT_READ_BUFFER));
 	config.AddExtensionOption("hf_read_cache_size", "How many fetched bytes a single hf:// file may keep in memory (shared by all readers of that file)",
