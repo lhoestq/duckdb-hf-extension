@@ -53,8 +53,10 @@ CREATE OR REPLACE EXTENSION REPOSITORY hf_repo
 
 That is the whole setup, and it is *persistent*: the repository is written to
 `~/.duckdb/extension_repositories/hf_repo.json`, where every later session and every other database on the
-machine finds it. (`SET` is a setting, so it has to be said in the session that creates; a later session
-can skip it and still use the repository. `OR REPLACE` makes the two lines idempotent.)
+machine finds it. (`SET` is a setting, so it has to be said in the session that creates; a later session can
+skip both lines and still `LOAD hf FROM hf_repo` — what it cannot do is `INSTALL` again, because installing
+from a user-provided repository is gated by the same setting in the session that installs. `OR REPLACE`
+makes the two lines idempotent.)
 
 No public key to paste: the repository serves `.well-known/duckdb-extension-repo.json` and DuckDB reads the
 key from there. That is not a hole — a prefix without that file cannot be registered this way at all, and a
@@ -66,16 +68,22 @@ of that `.well-known` file gives you.
 ### Every session
 
 ```sql
-INSTALL hf FROM hf_repo;    -- the first time; re-run it to update
+INSTALL hf FROM hf_repo;    -- first time only; see the note below about updating
 LOAD hf FROM hf_repo;
 SELECT * FROM hf_ls('hf://datasets/lhoestq/demo1');
 ```
 
-Two things here are DuckDB 2.0 behaviour, not this extension's:
+Three things here are DuckDB 2.0 behaviour, not this extension's:
 
 * `LOAD` names the repository it installed from. A bare `LOAD hf` looks for the flat
   `…/<version>/<platform>/hf.duckdb_extension` path and reports *not found* while the copy you installed
   lives under `…/repositories/hf_repo/`.
+* **an update is `SET` + `INSTALL` again, in the same session.** The gate that lets a repository be added is
+  the same gate that lets it be installed from, and unlike the registration it is not remembered: a later
+  session loads fine (`LOAD hf FROM hf_repo` with `allow_extension_repositories` still at its default of
+  `undecided`) and `INSTALL` answers `Permission Error: Installing extensions from a user-provided
+  repository requires allow_extension_repositories='allowed'`. Both halves of that were run against the live
+  repository, in one home directory, one connection apart.
 * nothing autoloads. An unqualified `hf_ls` before `LOAD` is a `Catalog Error`, because DuckDB only
   autoloads extension names compiled into its own index — which is also why a third-party extension cannot
   be in that index until it *is* in the index. `LOAD` is a line you type per session.
@@ -92,7 +100,9 @@ con.execute("LOAD hf FROM hf_repo")
 ```
 
 For the CLI, put the two setup lines in `~/.duckdbrc` — the shell executes it at startup, so every session
-starts with the repository registered and needs only `LOAD hf FROM hf_repo;`.
+starts with the repository registered *and the gate open*, needs only `LOAD hf FROM hf_repo;`, and can run
+`INSTALL hf FROM hf_repo;` later in that session without anything else typed. In Python the gate is
+connect-time config, which is the same thing said a different way.
 
 ### The unsigned copy
 

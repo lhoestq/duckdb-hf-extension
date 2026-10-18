@@ -39,8 +39,9 @@ Two version numbers are in play, and they are independent:
 * **A `## Installation` section at the top of the README**, written by running each step against the live
   repository instead of transcribing docs, which is how it picked up things the docs do not say: the
   repository registration is stored in `~/.duckdb/extension_repositories/<name>.json` and so is done once per
-  machine rather than once per session, even though the `allow_extension_repositories` gate that permits it
-  is per-session; the public key needs no copy-paste because DuckDB reads it from the repository's
+  machine rather than once per session — a later session `LOAD`s from it with `allow_extension_repositories`
+  still at its default `undecided` — while the *gate itself* is per-session, and it gates installing as well
+  as registering, so an update is `SET` + `INSTALL` in the same session and nothing else is needed to load; the public key needs no copy-paste because DuckDB reads it from the repository's
   `.well-known/duckdb-extension-repo.json` — and a prefix *without* that file cannot be registered at all,
   while a binary whose bytes were edited afterwards is still refused (re-checked here by flipping a byte in
   the local signed tree and watching `INSTALL` refuse it); a repository-installed extension must be loaded as

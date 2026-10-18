@@ -941,3 +941,10 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
   changed "three platforms" into "eight" wherever it appeared.
 * **Unstarted next**, in order: the upload-side dedup query (a file sharing 90% of its chunks with something
   already in the CAS is still re-sent whole), then shard-driven read prefetch.
+* `19:00` — ran the README's own steps verbatim against the live repository in a throwaway home, then a
+  second connection in the same home: session 1 installs (both `hf_version` = `0.0.2-pre7` and
+  `duckdb_extensions().extension_version` = `v0.0.2-pre7`, so the footer finally carries the tag), session 2
+  loads with the gate at its default `undecided`, and `INSTALL` in session 2 is refused. That last half
+  contradicted what the README had said an hour earlier ("re-run it to update", with the gate described as
+  only a registration-time thing), so the wording moved; the CLI paragraph now says why putting the two setup
+  lines in `~/.duckdbrc` is what makes a later `INSTALL` work without extra typing.
