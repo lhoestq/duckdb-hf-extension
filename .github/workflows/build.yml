@@ -60,13 +60,18 @@ jobs:
       # this extension is a filesystem + HTTP client with a thread pool for uploads, and the shape of those
       # assumptions does not survive into a browser.
       #
-      # The extras on a dispatch are opt-ins in extension-ci-tools' own matrix
+      # The extra architectures are opt-ins in extension-ci-tools' own matrix
       # (config/distribution_matrix.json), so `opt_in_archs` is what turns them on - `exclude_archs` alone
-      # would not be enough on its own for the musl pair and osx_amd64, which a reduced matrix skips, and
+      # would not be enough for the musl pair and osx_amd64, which a reduced matrix skips. And
       # `allow_failure_archs` keeps one experimental cross-compile from failing the run whose artifacts a
       # release is made of (a failed job uploads nothing, so its platform directory is simply absent).
       exclude_archs: "windows_arm64;wasm_mvp;wasm_eh;wasm_threads${{ github.event_name == 'push' || github.event_name == 'pull_request' && ';linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64' || '' }}"
-      opt_in_archs: "linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64"
+      # opt_in_archs, not exclude_archs, decides: setting both for the same architecture OPTS IT IN, even
+      # though the input's own description says "exclusions take precedence". Observed the hard way - the
+      # first push under this matrix happily queued two musl builds that exclude_archs named explicitly.
+      # So the opt-in is conditional on the event, and exclude_archs is left to do what it does reliably:
+      # name architectures that are never wanted.
+      opt_in_archs: ${{ github.event_name == 'workflow_dispatch' && 'linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64' || '' }}
       allow_failure_archs: "linux_amd64_musl;linux_arm64_musl;windows_amd64"
       skip_tests: false
 
