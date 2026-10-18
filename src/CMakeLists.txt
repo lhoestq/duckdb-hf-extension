@@ -53,7 +53,16 @@ set(HF_BLAKE3_SOURCES
     ${HF_THIRD_PARTY}/blake3/blake3_portable.c)
 set(HF_BLAKE3_DEFINITIONS BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512 BLAKE3_USE_NEON=0)
 
-if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+# The target architecture is asked of the compiler rather than read out of CMAKE_SYSTEM_PROCESSOR. That
+# variable describes the host on an Apple cross-build - the osx_amd64 job runs on an arm64 runner and passes
+# -DCMAKE_OSX_ARCHITECTURES=x86_64 - so the first osx_amd64 build concluded it was compiling for aarch64 and
+# handed blake3_neon.c to a compiler that answered "NEON intrinsics not available with the soft-float ABI".
+include(CheckCSourceCompiles)
+set(CMAKE_REQUIRED_QUIET TRUE)
+check_c_source_compiles("#if !(defined(__x86_64__) || defined(_M_X64))\n#error not x86-64\n#endif\nint main(void) { return 0; }" HF_TARGET_X86_64)
+check_c_source_compiles("#include <arm_neon.h>\nint main(void) { uint32x4_t v = vld1q_u8((const unsigned char *)\"0123456789abcdef\"); return (int)v[0]; }" HF_TARGET_NEON)
+
+if (HF_TARGET_X86_64 AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     # the upstream c/CMakeLists.txt flags, per file
     set_source_files_properties(${HF_THIRD_PARTY}/blake3/blake3_sse2.c PROPERTIES COMPILE_FLAGS "-msse2")
     set_source_files_properties(${HF_THIRD_PARTY}/blake3/blake3_sse41.c PROPERTIES COMPILE_FLAGS "-msse4.1")
@@ -66,7 +75,7 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND CMAKE_C_COMPILER
         ${HF_THIRD_PARTY}/blake3/blake3_avx2.c
         ${HF_THIRD_PARTY}/blake3/blake3_avx512.c)
     set(HF_BLAKE3_DEFINITIONS BLAKE3_DISPATCH)
-elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64|aarch64_be)$")
+elseif (HF_TARGET_NEON)
     list(APPEND HF_BLAKE3_SOURCES ${HF_THIRD_PARTY}/blake3/blake3_neon.c)
     # NEON by autodetection, so only the x86 switches stay switched off
     set(HF_BLAKE3_DEFINITIONS BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512)

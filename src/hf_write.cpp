@@ -4,6 +4,8 @@
 
 #include "duckdb/common/file_opener.hpp"
 
+#include <cstdint>
+
 namespace duckdb {
 
 static string SettingAsString(optional_ptr<FileOpener> opener, const char *key, const string &path) {

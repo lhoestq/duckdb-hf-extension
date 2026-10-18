@@ -12,6 +12,8 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 
+#include <cstdlib>
+
 namespace duckdb {
 
 static unique_ptr<BaseSecret> CreateHFSecretFromConfig(ClientContext &context, CreateSecretInput &input) {

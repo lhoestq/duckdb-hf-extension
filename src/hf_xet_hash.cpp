@@ -5,6 +5,8 @@
 
 #include <cstring>
 
+#include <cstdint>
+
 namespace duckdb {
 
 namespace {

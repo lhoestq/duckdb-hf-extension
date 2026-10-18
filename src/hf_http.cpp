@@ -10,6 +10,9 @@
 #include <chrono>
 #include <thread>
 
+#include <cstdint>
+#include <cstring>
+
 namespace duckdb {
 
 string HFJson::GetString(const string &json, const string &key, idx_t from, idx_t &end, bool &found) {

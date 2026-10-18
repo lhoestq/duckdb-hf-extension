@@ -9,6 +9,11 @@
 #include <unordered_map>
 #include <vector>
 
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 namespace duckdb {
 
 //! Largest read-ahead window a single file will fetch at once

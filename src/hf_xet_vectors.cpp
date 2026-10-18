@@ -4,6 +4,8 @@
 #include "hf_xet_hash.hpp"
 #include "hf_xet_xorb.hpp"
 
+#include <cstdint>
+
 namespace duckdb {
 
 const vector<HFXetHashVector> &HFXetHashVectors() {
@@ -94,12 +96,18 @@ const vector<HFXetRenderingVector> &HFXetRenderingVectors() {
 	return vectors;
 }
 
+// A zero-size array is accepted by GCC and clang and refused by MSVC ("cannot allocate an array of
+// constant size 0"). The entries below declare count 0, so the element is never read; naming one keeps
+// the no-children case - a hash vector with nothing in it - a test vector on every toolchain this
+// extension is built for, rather than one only the two GNU-ish ones can compile.
 static const char *const HF_XET_TREE_0_HASHES[] = {
+	"" /* count is 0, nothing reads this */,
 };
 static const uint64_t HF_XET_TREE_0_SIZES[] = {
 	0ULL,
 };
 static const char *const HF_XET_TREE_1_HASHES[] = {
+	"" /* count is 0, nothing reads this */,
 };
 static const uint64_t HF_XET_TREE_1_SIZES[] = {
 	0ULL,

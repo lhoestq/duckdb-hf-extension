@@ -12,6 +12,8 @@
 #include <mutex>
 #include <thread>
 
+#include <cstdint>
+
 namespace duckdb {
 
 uint64_t HFXetNowSeconds() {

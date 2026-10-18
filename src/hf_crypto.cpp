@@ -1,5 +1,8 @@
 #include "hf_crypto.hpp"
 
+#include <cstdint>
+#include <cstring>
+
 namespace duckdb {
 
 static const uint32_t SHA256_K[64] = {

@@ -21,6 +21,12 @@
 #include <process.h>
 #else
 #include <unistd.h>
+
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 #endif
 
 namespace duckdb {

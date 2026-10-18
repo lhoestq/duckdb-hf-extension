@@ -4,6 +4,8 @@
 
 #include <algorithm>
 
+#include <cstdint>
+
 namespace duckdb {
 
 namespace {

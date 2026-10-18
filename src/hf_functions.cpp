@@ -14,6 +14,8 @@
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
+#include <cstdint>
+
 namespace duckdb {
 
 //===----------------------------------------------------------------------===//
