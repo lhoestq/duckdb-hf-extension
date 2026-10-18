@@ -20,6 +20,16 @@ Two version numbers are in play, and they are independent:
   `opt_in_archs`. And `allow_failure_archs` exists, which is what lets an experimental cross-compile sit in
   the same run as the artifacts a release is made of: a job allowed to fail uploads nothing, so its platform
   directory is simply absent from the assembled tree instead of taking the run down.
+* **A release run no longer cancels its own healthy jobs.** With `reduced_ci_mode: 'auto'` the shared
+  workflow runs `fail-fast`, so the first architecture that fails to compile cancelled two architectures that
+  were building next to it and had nothing wrong with them, and macOS jobs were not scheduled until the whole
+  linux group finished. A dispatch now passes `reduced_ci_mode: 'disabled'`, which builds all eight in
+  parallel and lets each answer for itself; `allow_failure_archs`, not fail-fast, decides the run's colour.
+* **`opt_in_archs` opts an architecture in even when `exclude_archs` names it**, which contradicts that
+  input's own description ("explicit opt-ins override reduced CI, while exclusions take precedence"). The
+  first push under the new matrix queued `linux_amd64_musl` and `linux_arm64_musl` — named explicitly in the
+  exclusion string — which is visible only by reading a run's *job list* rather than its conclusion, since
+  the run was green. The opt-in is now conditional on the event.
 * **`windows_amd64` joins `windows_amd64_mingw`, and the difference is not cosmetic.** DuckDB derives the
   platform string it installs by — what `PRAGMA platform` answers — in `platform.hpp`, and the `_mingw`
   postfix is applied `#ifdef __MINGW32__` (plus a `DUCKDB_PLATFORM_RTOOLS` case for the R build). A client
@@ -38,8 +48,33 @@ Two version numbers are in play, and they are independent:
   `…/repositories/hf_repo/` *not found*; and nothing autoloads, so `LOAD` is a line per session — the same
   compiled-in-index rule that makes a third-party extension un-autoloadable is the one that keeps `INSTALL hf`
   with no prefix from working until this extension is in that index.
+* **The new architectures found three bugs in our own code, which is the whole reason to build for them.**
+  None was platform API — all three were things two toolchains had been letting us get away with:
+  * `src/hf_http.cpp` passed values from `std::string::find()` to helpers taking `idx_t &`. `idx_t` is
+    `uint64_t` (`typedefs.hpp`), and on Apple's libc++ that is `unsigned long long` while
+    `string::size_type` is `unsigned long`: the same width, a different type, so the reference cannot bind.
+    On Linux both spellings are `unsigned long`, so six call sites compiled for two years of builds and
+    failed the first time macOS compiled them.
+  * `src/CMakeLists.txt` picked BLAKE3's SIMD family from `CMAKE_SYSTEM_PROCESSOR`, which describes the
+    **host** on an Apple cross-build. The `osx_amd64` job runs on an arm64 runner with
+    `-DCMAKE_OSX_ARCHITECTURES=x86_64`, so the build believed it was compiling aarch64 and handed
+    `blake3_neon.c` to an x86-64 compiler. Two `check_c_source_compiles` probes now ask the compiler what it
+    is targeting. The Linux cross-compile version of this mistake would not have failed loudly — it would
+    have shipped a binary with the wrong SIMD family in it.
+  * `hf_xet_vectors.cpp` declared two zero-size arrays (a GNU extension MSVC refuses), and fourteen files
+    used `memcpy`/`strlen`/`snprintf`/`getenv`/`uint64_t` without naming `<cstring>`/`<cstdio>`/`<cstdlib>`/
+    `<cstdint>` — libstdc++ and libc++ hand those out through other headers, MSVC does not.
+* **Published as 0.0.2-pre7**: CI run `39153506221` built all eight architectures green, including the
+  reference-checks job. The assembled tree was signed and published to `lhoestq/duckdb-hf-extension` for
+  `linux_amd64`, `linux_arm64`, `linux_amd64_musl`, `linux_arm64_musl`, `osx_amd64`, `osx_arm64`,
+  `windows_amd64` and `windows_amd64_mingw`. Every one of the sixteen served binaries (eight platforms, plain
+  and gzipped, signed and unsigned trees) was re-downloaded and confirmed byte-identical to what CI built,
+  with the footer reading `v2.0.0-alpha47600` + `v0.0.2-pre7`; `INSTALL`/`LOAD` then verified for real over
+  https on this machine's own platform, signed and unsigned. The architectures that cannot run here — macOS,
+  both Windows flavours, both musl builds — are verified by that byte comparison and nothing else, which is
+  worth saying out loud rather than implying a green publish covers them.
 * Version constant and the `scripts/smoke_write.sql` assertion that pins it move to `0.0.2-pre7`; the suites
-  are unchanged at **200 passed / 12 expected failures / 0 failed**.
+  are unchanged at **200 passed / 12 expected failures / 0 failed**, selftest at 367 checks.
 
 ## 0.0.2-pre6 — a bad setting fails where it was set, and a release tree is checked against its own binaries
 

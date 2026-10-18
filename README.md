@@ -37,6 +37,12 @@ PRAGMA platform;       -- linux_arm64         <- one of linux_amd64, linux_arm64
                                                -- linux_amd64_musl, linux_arm64_musl
 ```
 
+All eight of those directories are published, so whichever name the client answers with, there is a binary
+behind it. The `windows_amd64` / `windows_amd64_mingw` pair is the one people get wrong, and it is not about
+which Windows you run: DuckDB composes that name itself, and the `_mingw` suffix appears only when DuckDB
+itself was *compiled* with mingw (`#ifdef __MINGW32__`, plus the R build). An MSVC-built client - which is
+what the plain `windows_amd64` means - never asks for the mingw directory, and vice versa.
+
 ### Once, ever: register the repository
 
 ```sql
@@ -432,11 +438,12 @@ what a given binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
   hashing+serialize phase goes from ~690 to ~370 MB/s) and, on truly incompressible bytes, 1.001x *more*
   bytes: incompressible chunks are stored raw inside a frame rather than skipped, which is what reference
   clients do, at a rounding error.
-* ✔ the extension itself is installable from the Hub ("Distributing", above): a signed extension
-  repository serving `linux_amd64`, `linux_arm64` and `windows_amd64_mingw` for one DuckDB version, built
-  by CI, then assembled and published by scripts that identify every binary by *reading its footer* - so a
-  tree cannot be misfiled, and a client that installs from it gets signature verification with a pinned key
-  and refuses a modified file.
+* ✔ the extension itself is installable from the Hub ("Installation" above, "Distributing" below): a signed
+  extension repository serving all eight DuckDB client platforms - `linux_amd64`, `linux_arm64`, both
+  `_musl` variants, `osx_amd64`, `osx_arm64`, `windows_amd64` and `windows_amd64_mingw` - for one DuckDB
+  version, built by CI, then assembled and published by scripts that identify every binary by *reading its
+  footer* - so a tree cannot be misfiled, and a client that installs from it gets signature verification
+  with a pinned key and refuses a modified file.
 * ✘ `hf_xet_write` has no way to be *made* to fail from SQL, so the fallback path itself is only covered
   by reading the code and by the explicit `hf_xet_write = false` route; forcing a CAS failure would mean
   adding a test-only seam to the upload path, which is not a thing a shipping extension should carry.
@@ -670,22 +677,23 @@ from the child, has passed here while proving neither.
 
 A DuckDB extension repository is a url layout over plain files, so the Hub can serve it — which means
 this extension ships through the protocol it implements. `lhoestq/duckdb-hf-extension` is a live one, and
-right now it serves `0.0.2-pre6` for `linux_amd64`, `linux_arm64` and `windows_amd64_mingw`, all against
-`v2.0.0-alpha47600`, signed at the root and unsigned under `unsigned/`:
+right now it serves `0.0.2-pre7` for all eight client platforms (`linux_amd64`, `linux_arm64`,
+`linux_amd64_musl`, `linux_arm64_musl`, `osx_amd64`, `osx_arm64`, `windows_amd64`,
+`windows_amd64_mingw`), all against `v2.0.0-alpha47600`, signed at the root and unsigned under `unsigned/`:
 
 ```bash
 # the binaries come from a CI run - one build per platform, on the machine that matches it - and
 # scripts/make_extension_repo_from_ci.sh downloads a run's artifacts and assembles them by footer
-RUN=39133332083 DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" \
+RUN=39153506221 DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" \
   scripts/make_extension_repo_from_ci.sh dist/repo-signed   # tree + signatures + .well-known key
-RUN=39133332083 scripts/make_extension_repo_from_ci.sh dist/repo                 # the same tree, unsigned
+RUN=39153506221 scripts/make_extension_repo_from_ci.sh dist/repo                 # the same tree, unsigned
 HF_REPO=lhoestq/duckdb-hf-extension scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo
 ```
 
 A local build goes through the same assembly (`BUILD_DIR=build/release`
 `DUCKDB_EXTENSION_SIGNING_PK=... scripts/make_extension_repo.sh dist/repo-signed`). The CI route exists
-because one machine cannot build three architectures' binaries at once, and because what a client installs
-should be the artifact CI produced rather than a rebuild of it.
+because one machine cannot build eight architectures' binaries, and because what a client installs should
+be the artifact CI produced rather than a rebuild of it.
 
 `publish_extension_repo.py` takes the version directory from the tree and then checks it against the
 footer of every binary inside it, and refuses a mixed tree: a repository whose directory does not equal
@@ -754,16 +762,26 @@ git push origin main
 git push origin refs/tags/v0.0.2-pre7 # explicit, for the same reason
 ```
 
-The push to `main` is what builds (`build.yml` has no `tags:` trigger, and it skips the macOS jobs on push
-events, so a Mac artifact takes a `workflow_dispatch`). Then assemble that run's artifacts and publish, as
-above.
+The push to `main` is *not* what builds a release tree. `build.yml` has no `tags:` trigger, and on a push it
+builds only the three cheap architectures (`linux_amd64`, `linux_arm64`, `windows_amd64_mingw`) — the extra
+five are opted in by event, because GitHub bills macOS minutes at 10x against a private repository's monthly
+quota and each of these jobs compiles DuckDB from source. A release tree comes from a dispatch run:
 
-Tag *before* the build starts, not after. The extension's footer carries `git describe` output as its own
-version field and DuckDB surfaces it: `SELECT extension_version FROM duckdb_extensions()` next to
-`hf_version` from `hf_status()`. A build that starts while the tag is only local reports a commit sha in
-that column for the rest of its life. That is how 0.0.2-pre6 arrived: `git push --follow-tags` carried
-`main` and skipped the lightweight tag, CI built with nothing to describe, and its first artifacts said
-`08948d1d66` — rebuilt from the same commit after the tag was pushed as an annotated one.
+```bash
+gh workflow run build.yml --ref main     # all eight architectures; musl/windows_amd64 may fail without failing the run
+```
+
+Then assemble that run's artifacts and publish, as above.
+
+Tag *before* the build starts, and be sure the tag still names the commit being built. The extension's
+footer carries `git describe` output as its own version field and DuckDB surfaces it: `extension_version` in
+`duckdb_extensions()` sits next to `hf_version` from `hf_status()`. A build that starts while the tag is only
+local reports a commit sha in that column for the rest of its life — that is how 0.0.2-pre6 arrived, with
+`08948d1d66` in the footer until the run was repeated after the tag was pushed. A build that starts *after*
+two more commits land reports `v0.0.2-pre7-2-g2d3f242`, which is the same problem wearing a different hat:
+`git describe` measures the distance from the commit to the tag, not the other way round. Moving the tag
+(`git tag -f -a`, `git push --force origin refs/tags/…`) is the fix while nothing has been published from
+the old one; once it has, the version in the field is history.
 
 ## Notes / limitations
 
@@ -771,9 +789,10 @@ that column for the rest of its life. That is how 0.0.2-pre6 arrived: `git push 
   write needs the file on disk for the same reason - chunking reads it back), then
   upload + commit - or the Xet publish - happen on `Close()`. One commit per file, serialised per
   repository within a process; concurrent writers are handled by the Hub's own conflict detection.
-* A bucket write uploads its xorbs **sequentially**. The reference client runs them through an adaptive
-  concurrency limiter, and ~76 MB in ~6 s is respectable, but a folder of files and a big single file
-  both have room to go; the parallelism is a client-side policy, not a format question (docs/XET.md).
+* A bucket write uploads a file's xorbs over several streams, but the number is fixed: `hf_write_max_parallel_uploads`
+  (default 3) is a client-side policy, not the reference client's adaptive limiter, and it applies per file —
+  a `COPY` writing ten files does not get thirty streams in flight, and the in-flight cap is also the memory
+  cap (see "Concurrency" in docs/XET.md for why one number does both jobs).
 * Uploads do not *query* for deduplication: a file that shares 90% of its chunks with something already
   in the CAS is re-sent whole, and the CAS refuses the duplicate work chunk-for-xorb rather than
   reusing it. `inserted` in `hf_xet_upload` is the visible symptom. The reconstruction-side dedup query
