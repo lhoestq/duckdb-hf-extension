@@ -967,7 +967,7 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
   conclusion, because a wrong exclusion string is green; and in a GitHub expression, keep exactly one
   comparison to the left of `&&` — `!=` on a single event name is the honest way to say "everything except a
   release".
-* `19:20`–`19:40` — **M9 measured before a line of it is written**, which changed what the feature is. The
+* `19:24`–`19:36` — **M9 measured before a line of it is written**, which changed what the feature is. The
   question in the backlog was "add the upload-side dedup query"; the question that mattered first was what
   the CAS would answer *for* that query. Two seeded payloads written through the extension into
   `lhoestq/hf-smoke-staging` (5 chunks, 196 chunks), all 201 chunk hashes computed with `xet-probe xorb`
@@ -975,14 +975,14 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
   included), then one `GET {cas}/v1/chunks/default/{hash}` per hash. **One hit in 196, one in 5, and both
   were chunk 1.** The body is a complete metadata shard in the format we already parse - our uploaded shard
   plus exactly 56 bytes - so the CAS returns the shard of the file that contained the chunk.
-* `19:45` — the reason is ours: `hf_xet_shard.cpp` sets `HF_XET_CHUNK_FLAG_GLOBAL_DEDUP` (`1 << 31`,
+* `19:36` — the reason is ours: `hf_xet_shard.cpp` sets `HF_XET_CHUNK_FLAG_GLOBAL_DEDUP` (`1 << 31`,
   `MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG`) on the chunk that *starts a file* and on nothing else, and that flag is
   what the CAS indexes. xet-core's own rule additionally flags every chunk with `word[3].to_le() % 1024 == 0`
   (`hash_is_global_dedup_eligible`, a 1-in-1024 sample). Checked: none of the 201 hashes is eligible under
   that rule - so it was flagged-ness, not the modulus, that got chunk 1 indexed, and the producer half of
   global dedup has been in this extension since M5 without anyone knowing what it bought. The consumer half
   was never written.
-* `19:50` — what that means for the work, written up as `docs/XET.md` "M9 (design)": (A) flag
+* `19:38` — what that means for the work, written up as `docs/XET.md` "M9 (design)": (A) flag
   modulus-eligible chunks in the shard writer, (B) re-sweep the same 196 hashes and check the CAS answers
   for them - **that experiment is the gate**, because if the flag is ignored on non-file-start chunks then
   cross-repo dedup is a whole-identical-file affair, (C) query during chunking and parse the returned shards
