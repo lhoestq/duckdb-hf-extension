@@ -2,7 +2,41 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-18, ~16:25 UTC)
+## Current position (2026-10-18, ~18:55 UTC)
+
+**0.0.2-pre7 is published for all eight DuckDB client platforms.** Version **0.0.2-pre7**, HEAD and tag
+`v0.0.2-pre7` both at `39706a5`, suites at **200 passed / 12 expected failures / 0 failed** (xet 12,
+xet_upload 30, read 55, write 57, models 24, buckets 22), selftest at **367 checks / 0 failed**.
+
+* Live at `https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main/` (signed, root) and
+  `…/resolve/main/unsigned/`, Hub commit `10716b52` at 18:49 UTC, from CI run **`39153506221`** (green
+  18:40 UTC: eight architecture builds + the linux_amd64 reference-checks job).
+* Platforms: `linux_amd64`, `linux_arm64`, `linux_amd64_musl`, `linux_arm64_musl`, `osx_amd64`, `osx_arm64`,
+  `windows_amd64`, `windows_amd64_mingw`. The five extra ones build on a `workflow_dispatch` only, and that
+  dispatch also passes `reduced_ci_mode: 'disabled'` so one failing cross-compile cannot cancel the
+  architectures building beside it.
+* **What the new architectures bought: three real bugs in our own sources**, none of them platform API.
+  `idx_t` is `uint64_t`, which on Apple's libc++ is `unsigned long long` and therefore not
+  `string::size_type`, so values from `std::string::find()` could not bind to the `idx_t &` the JSON helpers
+  take (six call sites, invisible on Linux where both spellings are `unsigned long`); the BLAKE3 SIMD family
+  was chosen from `CMAKE_SYSTEM_PROCESSOR`, which is the **host** on an Apple cross-build, so an `osx_amd64`
+  build running on an arm64 runner compiled `blake3_neon.c` for x86-64 — and the Linux version of that
+  mistake would have shipped a wrong-SIMD binary rather than failing; MSVC refused two zero-size arrays plus
+  fourteen files that used `memcpy`/`strlen`/`snprintf`/`getenv` without naming
+  `<cstring>`/`<cstdio>`/`<cstdlib>`/`<cstdint>`.
+* **Verification, and its limit**: all sixteen served binaries (eight platforms × plain/gzipped,
+  signed/unsigned trees) were re-downloaded and confirmed byte-identical to CI's bytes, every footer reading
+  `v2.0.0-alpha47600` + `v0.0.2-pre7`; `INSTALL`/`LOAD` then ran for real over https on this machine's own
+  platform, signed and unsigned, with the tamper check refusing in both registration forms (16 files
+  corrupted). macOS, both Windows flavours and both musl builds are covered by **byte comparison only** —
+  this machine cannot execute them, and a footer plus a sha256 is not a load test.
+* `## Installation` in the README documents the client-facing shape of it, including the easy one to get
+  wrong: `windows_amd64` vs `windows_amd64_mingw` is decided by how **DuckDB** was compiled
+  (`#ifdef __MINGW32__` in `platform.hpp`), not by which Windows you are on — so a client that is not
+  mingw-built never asks for the mingw directory, which is the directory pre6 published and why pre6 was
+  unreachable from a stock Windows DuckDB.
+
+## Position before this (2026-10-18, ~16:25 UTC)
 
 **0.0.2-pre6 is published for three platforms, and 0.0.2-pre7 is building for every architecture DuckDB
 has a runner for.** Version **0.0.2-pre7**, suites at **200 passed / 12 expected failures / 0 failed**
@@ -886,3 +920,24 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
 * **Unstarted next**, in order: publish pre7 from the dispatch run once every architecture's artifact is in
   (then verify each architecture that cannot run here by re-download + byte comparison, as pre6's were),
   the upload-side dedup query, and shard-driven read prefetch.
+* `17:44` — `2d3f242`: the first two toolchain bugs (`idx_t` vs `string::size_type` on macOS, `unistd.h` +
+  `getpid` on MSVC), and `reduced_ci_mode: 'disabled'` on dispatch. That last one is about run shape rather
+  than the build: with `auto`, fail-fast cancelled `osx_amd64` and `windows_amd64_mingw` while an unrelated
+  architecture failed to compile, so the run reported three failures when two of them had never been allowed
+  to compile at all.
+* `18:17` — `39706a5`, the commit the release is built from: the SIMD family asked of the compiler with two
+  `check_c_source_compiles` probes, the zero-size arrays given an element nothing reads, the standard headers
+  named explicitly. `v0.0.2-pre7` was **moved** to here (`git tag -f -a`, `git push --force`), because the
+  footer field is `git describe` output: tagged at `dbd4d52` and built two commits later would have shipped
+  binaries reporting `v0.0.2-pre7-2-g…`. Nothing had been published from the earlier position, which is the
+  only thing that makes moving a tag honest.
+* `18:40` — CI run `39153506221` green: eight architectures plus the artifact-level reference checks; both
+  architectures that failed in the two previous runs now build.
+* `18:45` — artifacts assembled twice over (`dist/repo-ci-pre7`, `dist/repo-ci-pre7-signed`, cache
+  `dist/ci-artifacts/39153506221`), eight footers at `v0.0.2-pre7`, both trees install-verified locally —
+  signed including the tamper refusal from both the pinned and the keyless form, 16 corrupted files.
+* `18:49` — **published** (Hub commit `10716b52`), then re-downloaded: sixteen served binaries identical to
+  CI's bytes, `INSTALL`/`LOAD` verified over https signed and unsigned. README, CHANGELOG and this file
+  changed "three platforms" into "eight" wherever it appeared.
+* **Unstarted next**, in order: the upload-side dedup query (a file sharing 90% of its chunks with something
+  already in the CAS is still re-sent whole), then shard-driven read prefetch.
