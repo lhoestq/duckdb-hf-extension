@@ -12,6 +12,10 @@ Two version numbers are in play, and they are independent:
 
 ## 0.0.2-pre6 — a bad setting fails where it was set, and a release tree is checked against its own binaries
 
+Published to `lhoestq/duckdb-hf-extension`: `v2.0.0-alpha47600` for **linux_amd64**, **linux_arm64** and
+**windows_amd64_mingw** — the first release with more than one architecture — signed at the root and
+unsigned under `unsigned/`, built by CI run `39133332083`.
+
 * **`SET hf_xet_compression = 'bg4'` fails at the `SET`.** It used to be accepted, and then fail on the next
   `COPY` - an error a long way from its cause, and one that would have read as a compression bug. The
   accepted values are `lz4` (default) and `none`, case-insensitively. `bg4` is a real scheme in the format,

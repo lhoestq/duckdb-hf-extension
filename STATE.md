@@ -2,12 +2,15 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-18, ~14:20 UTC)
+## Current position (2026-10-18, ~14:52 UTC)
 
-**M8 is done, and 0.0.2-pre6 is the release that ships.** Version **0.0.2-pre6**, suites at **200 passed /
+**0.0.2-pre6 is built, published and installable.** Version **0.0.2-pre6**, suites at **200 passed /
 12 expected failures / 0 failed** (xet 12, xet_upload 30, read 55, write 57, models 24, buckets 22),
-selftest at **367 checks**. Everything below is M8; what landed after the `v0.0.2-pre5` tag is the
-`hf_xet_compression` validation and the packaging fix, at the end.
+selftest at **367 checks**. `INSTALL` verified over https from `lhoestq/duckdb-hf-extension`, signed and
+unsigned, on `linux_arm64`; the `linux_amd64` and `windows_amd64_mingw` binaries were re-downloaded and
+compared byte for byte against what was built (this machine cannot load them). Everything in the bullets
+below is M8; what landed after the `v0.0.2-pre5` tag is the `hf_xet_compression` validation, the packaging
+fix, and a signature gate that had stopped testing anything.
 
 * **Why this after concurrency**: it is the other multiplier on the thing that measures slow. Measured
   offline with `tools/xet_probe` as the reference writer over a 2,103,723 byte CSV: none 2,105,403,
@@ -66,13 +69,14 @@ selftest at **367 checks**. Everything below is M8; what landed after the `v0.0.
   refused with "doesn't have a valid signature"; untampered → child exits 0). `signature -> verified
   against` was also an overclaim about a pinned-key comparison and now says `trusted key -> repository
   pins`. Test-only: the pre6 artifacts still come from the tagged commit.
-* Next: **tag `v0.0.2-pre6` and publish the artifacts of the run that commit's own push starts** - first
-  time linux_amd64 and windows_amd64_mingw binaries go out at all, next to a signed linux_arm64 and an
-  unsigned mirror. The pipeline is already proven end to end: pre4's artifacts assembled into a correct
-  tree and `test_install.py` installed, loaded and queried from it. **pre5 was tagged and built green and
-  is deliberately not published**, so that a released binary always comes from the commit its tag names.
-  Then the upload-side dedup query, then shard-driven read prefetch. macOS binaries still need a
-  `workflow_dispatch` (billing: private repo, 10x minutes) - open decision.
+* **Distribution is no longer the next thing to do** - it is done, for three platforms, and
+  `README` "Cutting a release" now documents how (including the trap that `git push --follow-tags` carries
+  `main` and silently skips a **lightweight** tag, which is why the first pre6 artifacts carried a commit
+  sha in `duckdb_extensions().extension_version`, and why tags here are annotated and pushed explicitly).
+* Next: the **upload-side dedup query** (`POST /v1/chunks/…` before hashing work another repository already
+  paid for), then **shard-driven read prefetch** (walk a shard's chunk table instead of one range request
+  per window). macOS artifacts remain an open decision: they need a `workflow_dispatch`, and private-repo
+  macOS minutes cost 10x.
 
 ## Position before this (2026-10-18, ~11:25 UTC)
 
@@ -814,22 +818,34 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
   cross-scheme identity block (`hf_xet_compression='none'` re-upload must find every xorb already
   stored). xet_upload 27 → 30 checks; `run_all.sh` → **192 passed, 9 expected failures, 0 failed**;
   selftest 325 → 367 (pinned in `test/sql/hf_selftest.test`, `smoke_xet.sql`'s floor, README, docs).
-* `13:20` — committed `af700f4`, tagged `v0.0.2-pre5`, pushed; CI run `39130114709` started (linux_amd64,
-  linux_arm64, windows_amd64_mingw; macOS excluded on push events).
-* `13:45` — pre4's CI artifacts downloaded and assembled to validate the publish pipeline before spending
-  it on pre5: found the `v0.1H` misfiling bug (see Current position), fixed it with `scripts/ext_footer.py`
-  + cross-checks in both repository scripts, re-assembled → three platforms under `v2.0.0-alpha47600/`, and
-  `test_install.py` installs/loads/queries from that tree over `file://` (arm64, unsigned). Committed
-  `7b52e05`.
-* `14:05` — **pre5's CI run `39130114709` completed green**: linux_amd64, linux_arm64,
-  windows_amd64_mingw, plus the job that runs `hf_xet_selftest()` against the built artifact. LZ4 and the
-  symbol hygiene build clean under mingw and x86_64, not just here.
-* `14:20` — `hf_xet_compression` validated at SET time; `smoke_xet.sql` 4 → 12 passed / 3 expected
-  failures; full `run_all.sh` → **200 passed, 12 expected failures, 0 failed**. Version → **0.0.2-pre6**
-  (constant + the `smoke_write.sql` assertion that pins it), CHANGELOG restructured so the packaging fix
-  sits in the release that carries it rather than in pre5.
-* `14:35` — committed `08948d1`, tagged `v0.0.2-pre6`, pushed; its own push started CI run `39133332083`.
-* `14:50` — signed tree assembled from pre4's cached artifacts (all three platforms, `signed=yes` in every
+* `13:06` — committed `af700f4`, tagged `v0.0.2-pre5`, pushed; CI run `39130114709` started (linux_amd64,
+  linux_arm64, windows_amd64_mingw; macOS excluded on push events). It ran green about 25 minutes later -
+  LZ4 and the symbol hygiene build clean under mingw and x86_64, not only here.
+* `13:19` — committed `7b52e05`. Assembling pre4's CI artifacts was the pipeline rehearsal that found the
+  `v0.1H` misfiling bug; with the footer reader in place the same artifacts file all three platforms under
+  `v2.0.0-alpha47600/`, and `test_install.py` installs/loads/queries from that tree over `file://`.
+* `13:50` — `hf_xet_compression` validated at SET time; `smoke_xet.sql` 4 → 12 passed / 3 expected
+  failures; full `run_all.sh` → **200 passed, 12 expected failures, 0 failed**; version → **0.0.2-pre6**
+  (constant + the `smoke_write.sql` assertion that pins it); CHANGELOG restructured so the packaging fix
+  sits in the release that carries it rather than in pre5. Commit `08948d1`, tag, push → CI run
+  `39133332083`.
+* `~13:55` — signed tree assembled from pre4's cached artifacts (three platforms, `signed=yes` in every
   footer, key fingerprint `sha256:f007c8016bc2f3a29…`), and `test_install.py --signed` installed from it on
-  arm64. Which exposed that the tamper check was vacuous (see Current position) — fixed, and re-verified
-  both ways.
+  arm64 - which exposed that the tamper check was vacuous (see Current position). Fixed, re-verified both
+  ways → commit `39d2b5e` at `13:59`.
+* `~14:10` — pre6's own artifacts assembled, and every one of them footered `ext_version=08948d1d66` rather
+  than the tag. Cause: the push used `git push --follow-tags`, which does not carry a **lightweight** tag,
+  so CI had nothing to describe - and `duckdb_extensions().extension_version` shows that footer field in
+  SQL, right next to `hf_version`. Annotated tag created on the same commit and pushed explicitly; run
+  `39133332083` rerun (same `headSha`), so nothing was rebuilt from different source.
+* `~14:40` — rerun green; both trees re-assembled from the new attempt's artifacts (fresh `CACHE_DIR`, since
+  the old cache held the first attempt's bytes) and every binary now footers `v0.0.2-pre6`; signed tree
+  install-verified locally, tampered trees refused.
+* `14:48` — **0.0.2-pre6 published** to `lhoestq/duckdb-hf-extension` (Hub commit timestamp): signed at the
+  root, unsigned under `unsigned/`, `linux_amd64` + `linux_arm64` + `windows_amd64_mingw`, twelve files plus
+  the `.well-known` key - the first release with more than one architecture. Verified: `test_install.py`
+  over https both ways on arm64 (signed install against the pinned key, then a real `hf_ls`), and the two
+  architectures that cannot run here were re-downloaded from `resolve/main` and compared against what was
+  built - byte-identical, valid gzip, correct footers.
+* Next up, unstarted: the upload-side dedup query, shard-driven read prefetch, and the open macOS
+  `workflow_dispatch` decision.

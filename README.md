@@ -350,6 +350,11 @@ what a given binary does and does not do, are in [CHANGELOG.md](CHANGELOG.md).
   hashing+serialize phase goes from ~690 to ~370 MB/s) and, on truly incompressible bytes, 1.001x *more*
   bytes: incompressible chunks are stored raw inside a frame rather than skipped, which is what reference
   clients do, at a rounding error.
+* ✔ the extension itself is installable from the Hub ("Distributing", above): a signed extension
+  repository serving `linux_amd64`, `linux_arm64` and `windows_amd64_mingw` for one DuckDB version, built
+  by CI, then assembled and published by scripts that identify every binary by *reading its footer* - so a
+  tree cannot be misfiled, and a client that installs from it gets signature verification with a pinned key
+  and refuses a modified file.
 * ✘ `hf_xet_write` has no way to be *made* to fail from SQL, so the fallback path itself is only covered
   by reading the code and by the explicit `hf_xet_write = false` route; forcing a CAS failure would mean
   adding a test-only seam to the upload path, which is not a thing a shipping extension should carry.
@@ -572,25 +577,38 @@ LOAD hf FROM hf_repo;                           -- per-repository installs live 
 SELECT repository_name, key_fingerprints FROM duckdb_extension_repositories();
 ```
 
-`--signed` in the test script really means *required*: it connects without
-`allow_unsigned_extensions`, checks the fingerprint of the key that signed the installed binary, then
-copies the repository, flips a byte in it, and demands that a fresh DuckDB refuses to install it.
+`--signed` in the test script really means *required*: it connects without `allow_unsigned_extensions`,
+confirms the repository is pinned to our key, then copies the repository, flips a byte in every platform's
+binary (plain and gzipped), and demands that a fresh DuckDB refuse to install it. That last step is where
+the verification is actually proven — the pinned-key check on its own only says which key *would* verify
+the file, and a tamper check that corrupts the wrong platform directory, or that accepts any nonzero exit
+from the child, has passed here while proving neither.
 
 ### Hosting it on Hugging Face
 
 A DuckDB extension repository is a url layout over plain files, so the Hub can serve it — which means
-this extension ships through the protocol it implements. `lhoestq/duckdb-hf-extension` is a live one:
+this extension ships through the protocol it implements. `lhoestq/duckdb-hf-extension` is a live one, and
+right now it serves `0.0.2-pre6` for `linux_amd64`, `linux_arm64` and `windows_amd64_mingw`, all against
+`v2.0.0-alpha47600`, signed at the root and unsigned under `unsigned/`:
 
 ```bash
-DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" \
-  scripts/make_extension_repo.sh dist/repo-signed          # tree + signature + .well-known key
-scripts/make_extension_repo.sh dist/repo                   # the same tree, unsigned
+# the binaries come from a CI run - one build per platform, on the machine that matches it - and
+# scripts/make_extension_repo_from_ci.sh downloads a run's artifacts and assembles them by footer
+RUN=39133332083 DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" \
+  scripts/make_extension_repo_from_ci.sh dist/repo-signed   # tree + signatures + .well-known key
+RUN=39133332083 scripts/make_extension_repo_from_ci.sh dist/repo                 # the same tree, unsigned
 HF_REPO=lhoestq/duckdb-hf-extension scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo
 ```
 
-`publish_extension_repo.py` reads the version directory *out of the binary footer* rather than taking it
-as an argument: a repository whose directory does not equal the footer of what it serves is a repository
-nobody can install from, and the footer is the only copy of the truth.
+A local build goes through the same assembly (`BUILD_DIR=build/release`
+`DUCKDB_EXTENSION_SIGNING_PK=... scripts/make_extension_repo.sh dist/repo-signed`). The CI route exists
+because one machine cannot build three architectures' binaries at once, and because what a client installs
+should be the artifact CI produced rather than a rebuild of it.
+
+`publish_extension_repo.py` takes the version directory from the tree and then checks it against the
+footer of every binary inside it, and refuses a mixed tree: a repository whose directory does not equal
+the footer of what it serves is a repository nobody can install from, the failure is silent for whoever
+built it, and this happens before the script touches the remote.
 
 One operational note, from a red run that fixed itself: an `INSTALL` issued seconds after a publish can
 fail with a bare `Failed to install remote extension`, because the dataset holding the tree is itself
@@ -621,9 +639,10 @@ LOAD hf;
 ```
 
 Both forms are verified in this tree: the signed run connects *without* `allow_unsigned_extensions`,
-checks the fingerprint of the key that signed what landed on disk (`sha256:f007c8016bc2f3a29…`), and the
-local variant then flips a byte in the served binary — in both the plain and the gzipped copy, because
-DuckDB 2.0 sniffs gzip rather than trusting the suffix — and requires a fresh process to refuse it.
+confirms the repository pins `sha256:f007c8016bc2f3a29…`, and the local variant then flips a byte in the
+served binary — in every platform directory and in both the plain and the gzipped copy, because DuckDB 2.0
+sniffs gzip rather than trusting the suffix, and because a client installs the directory of its own
+architecture — and requires a fresh process to refuse it.
 
 Two things to know about the key. It is an RSA-2048 private key kept outside the repository
 (`~/.config/duckdb-hf/signing.pem` on the build machine); losing it does not break clients that already
@@ -636,6 +655,30 @@ The plain binary is above the Hub's LFS threshold (14 MB) and the gzip is not (4
 holds both kinds of file; `resolve/main` serves either. `hf_upload` can publish it, which is a nice
 recursion and not the recommended path — `publish_extension_repo.py` is idempotent and does not need the
 extension to be built first.
+
+### Cutting a release
+
+The version string lives in two places that move together — `HF_EXTENSION_VERSION` in
+`src/include/hf_common.hpp` (reported as `hf_version`) and the assertion in `scripts/smoke_write.sql` that
+pins it — and then:
+
+```bash
+git commit ...                        # the bump, and nothing half-finished alongside it
+git tag -a v0.0.2-pre7 -m "..."       # annotated: `git push --follow-tags` silently skips lightweight tags
+git push origin main
+git push origin refs/tags/v0.0.2-pre7 # explicit, for the same reason
+```
+
+The push to `main` is what builds (`build.yml` has no `tags:` trigger, and it skips the macOS jobs on push
+events, so a Mac artifact takes a `workflow_dispatch`). Then assemble that run's artifacts and publish, as
+above.
+
+Tag *before* the build starts, not after. The extension's footer carries `git describe` output as its own
+version field and DuckDB surfaces it: `SELECT extension_version FROM duckdb_extensions()` next to
+`hf_version` from `hf_status()`. A build that starts while the tag is only local reports a commit sha in
+that column for the rest of its life. That is how 0.0.2-pre6 arrived: `git push --follow-tags` carried
+`main` and skipped the lightweight tag, CI built with nothing to describe, and its first artifacts said
+`08948d1d66` — rebuilt from the same commit after the tag was pushed as an annotated one.
 
 ## Notes / limitations
 
