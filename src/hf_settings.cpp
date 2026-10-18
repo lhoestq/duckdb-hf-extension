@@ -49,6 +49,23 @@ static void SetHFEndpoint(ClientContext &, SetScope scope, Value &parameter) {
 	parameter = Value(value);
 }
 
+static void SetHFXetCompression(ClientContext &, SetScope, Value &parameter) {
+	// Validated at SET time rather than at write time, because a setting that only complains when someone
+	// finally runs a COPY has been wrong for as long as it has been set. The list is deliberately short: the
+	// format knows schemes this build does not implement (bg4-LZ4) and an 'auto' whose meaning is a
+	// per-chunk decision we do not make, and accepting either as a synonym would promise behaviour that
+	// would not follow.
+	if (parameter.IsNull()) {
+		parameter = Value("lz4");
+		return;
+	}
+	auto value = StringUtil::Lower(StringValue::Get(parameter));
+	if (value != "lz4" && value != "none") {
+		throw InvalidInputException("hf_xet_compression must be 'lz4' or 'none', got '%s'", value);
+	}
+	parameter = Value(value);
+}
+
 static void SetHFCacheDir(ClientContext &, SetScope scope, Value &parameter) {
 	RequireGlobalScope(scope, "hf_cache_dir");
 	if (parameter.IsNull()) {
@@ -78,7 +95,7 @@ void HFSettings::Register(DBConfig &config) {
 	config.AddExtensionOption("hf_xet_compression",
 	                          "Compression of Xet chunks inside an xorb: 'lz4' (default) or 'none'. Chunk hashes are "
 	                          "over uncompressed bytes, so this cannot change what a file's content is",
-	                          LogicalType::VARCHAR, Value("lz4"));
+	                          LogicalType::VARCHAR, Value("lz4"), SetHFXetCompression);
 	config.AddExtensionOption("hf_read_buffer_size", "Read-ahead buffer size (in bytes) for hf:// reads",
 	                          LogicalType::UBIGINT, Value::UBIGINT(HF_DEFAULT_READ_BUFFER));
 	config.AddExtensionOption("hf_read_cache_size", "How many fetched bytes a single hf:// file may keep in memory (shared by all readers of that file)",

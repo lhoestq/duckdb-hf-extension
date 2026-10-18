@@ -69,7 +69,7 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | `hf_create_repo` | `false` | create the target repository when it does not exist |
 | `hf_xet_write` | `true` | send file content through Xet (content-defined chunks, deduplicated, incremental). If the content store cannot be reached the write falls back to a plain LFS upload, so this costs time rather than correctness when the CAS is down; `false` forces the LFS route |
 | `hf_write_max_parallel_uploads` | `3` | how many of a file's xorbs are on the wire at once (`1` sends them one after another). Each one waiting costs up to 64 MiB of serialized bytes in memory, and that is also how far ahead of the network the reader/chunker may run |
-| `hf_xet_compression` | `lz4` | how chunk payloads are stored inside an xorb: LZ4 frames, or `none`. Changes how many bytes travel and nothing else - an xorb's hash covers the uncompressed bytes, so the CAS's dedup answers, the shard and every other client are unaffected. Incompressible chunks come out ~16 bytes larger (they are stored raw inside a frame, which is what reference clients do too) |
+| `hf_xet_compression` | `lz4` | how chunk payloads are stored inside an xorb: LZ4 frames, or `none`. Changes how many bytes travel and nothing else - an xorb's hash covers the uncompressed bytes, so the CAS's dedup answers, the shard and every other client are unaffected. Incompressible chunks come out ~16 bytes larger (they are stored raw inside a frame, which is what reference clients do too). Anything else is refused at the `SET`, including `bg4`, a scheme the format defines and this build does not implement |
 
 ## Table functions
 
@@ -425,7 +425,7 @@ bash scripts/smoke_models.sh  # each .sh makes its own fixtures and cleans up af
 
 ```
 --- xet
-    xet: 4 passed, 0 expected failures, 0 failed          # offline: 367 reference checks
+    xet: 12 passed, 3 expected failures, 0 failed         # offline: 367 reference checks
 --- xet_upload
     xet_upload: 30 passed, 1 expected failures, 0 failed  # against the production CAS
 --- read

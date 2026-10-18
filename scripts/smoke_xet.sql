@@ -38,3 +38,22 @@ FROM hf_xet_selftest();
 
 SELECT (SELECT count(*) FROM hf_xet_selftest() WHERE NOT assert_passed) = 0 AS assert_still_clean,
        (SELECT hf_version FROM hf_status() LIMIT 1) <> '' AS assert_version_reported;
+
+-- hf_xet_compression is checked when it is set, not when something finally gets written: an accepted
+-- nonsense value would otherwise sit there until a COPY failed a long way from its cause. 'bg4' is a
+-- real scheme in the format, which this build does not implement - refusing it is the honest answer,
+-- and it belongs in the refusals rather than in a silent fallback to lz4.
+-- expect-fail: hf_xet_compression
+SET hf_xet_compression = 'bg4';
+-- expect-fail: hf_xet_compression
+SET hf_xet_compression = 'gzip';
+-- expect-fail: hf_xet_compression
+SET hf_xet_compression = '';
+SET hf_xet_compression = 'LZ4';
+SELECT current_setting('hf_xet_compression') = 'lz4' AS assert_scheme_is_case_insensitive;
+RESET hf_xet_compression;
+SELECT current_setting('hf_xet_compression') = 'lz4' AS assert_lz4_is_the_default;
+SET hf_xet_compression = 'none';
+SELECT current_setting('hf_xet_compression') = 'none' AS assert_none_is_accepted;
+RESET hf_xet_compression;
+SELECT current_setting('hf_xet_compression') = 'lz4' AS assert_reset_restores_it;

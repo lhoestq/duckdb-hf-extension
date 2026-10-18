@@ -570,5 +570,13 @@ uncompressed and is ~370 MB/s on compressible CSV / ~520 MB/s on random bytes. I
 upload's wall clock and is now about 2%, buying 0.42x on the bytes the other 98% waits for. `hf_xet_compression`
 (default `lz4`, accepts `none`) is the switch; `none` reproduces pre-M8 bytes exactly.
 
+The setting is validated when it is set, not when a write finally reads it: `SET hf_xet_compression = 'bg4'`,
+a scheme the format defines and this build does not implement, fails there, and `scripts/smoke_xet.sql`
+pins those refusals next to the case-insensitive `'LZ4'` and the `RESET`. `'auto'` is deliberately not
+taken as a synonym for `lz4`: in the reference client it means a per-chunk decision, which this writer
+does not take, so accepting it would promise a behaviour that never happens. `ChunkCompression` still
+checks the value where it is consumed - the setting can also arrive from a config file, and the last place
+a value is read is the last place it can be wrong.
+
 **Next**: an upload-side dedup query (`POST /v1/chunks/…` before hashing work another repository already
 paid for), and a read prefetch that walks a shard's chunk table instead of issuing one range per window.

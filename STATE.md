@@ -2,11 +2,12 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-18, ~13:10 UTC)
+## Current position (2026-10-18, ~14:20 UTC)
 
-**M8: xorb chunks go out LZ4-compressed.** Version **0.0.2-pre5**, suites at **192 passed / 9 expected
-failures / 0 failed** (xet 4, xet_upload 30, read 55, write 57, models 24, buckets), selftest at **367
-checks**. `docs/XET.md` has the M8 write-up.
+**M8 is done, and 0.0.2-pre6 is the release that ships.** Version **0.0.2-pre6**, suites at **200 passed /
+12 expected failures / 0 failed** (xet 12, xet_upload 30, read 55, write 57, models 24, buckets 22),
+selftest at **367 checks**. Everything below is M8; what landed after the `v0.0.2-pre5` tag is the
+`hf_xet_compression` validation and the packaging fix, at the end.
 
 * **Why this after concurrency**: it is the other multiplier on the thing that measures slow. Measured
   offline with `tools/xet_probe` as the reference writer over a 2,103,723 byte CSV: none 2,105,403,
@@ -40,6 +41,13 @@ checks**. `docs/XET.md` has the M8 write-up.
   (`bytes > uncompressed_bytes`) is false once chunks compress, so it became `sum(bytes) <
   sum(uncompressed_bytes)` under LZ4 and the framing statement moved to the `hf_xet_compression='none'`
   block, where it is still true.
+* **`hf_xet_compression` is checked where it is set** (after the pre5 tag): anything but `lz4`/`none` -
+  including `bg4`, which the format defines and this build does not implement, and `auto`, whose meaning in
+  the reference client is a per-chunk decision this writer never takes - now throws at the `SET` instead of
+  on the next `COPY`. Uses the set-callback `hf_endpoint`/`hf_cache_dir` already register, so it is the
+  file's own pattern; `ChunkCompression` keeps its check as the last line before bytes are made.
+  `smoke_xet.sql` pins the three refusals, `'LZ4'` normalising, and `RESET` restoring → xet 4 → 12 passed,
+  3 expected failures.
 * **A packaging bug found by assembling pre4's artifacts, before publishing anything**: the repository
   script took the DuckDB version from `strings | grep '^v[0-9]'`, and the windows artifact matched a
   mingw fragment `v0.1H` → its 73 MB binary was filed under a directory no client asks for, with a green
@@ -48,10 +56,13 @@ checks**. `docs/XET.md` has the M8 write-up.
   order, 256-byte signature slot), `make_extension_repo.sh` cross-checks `DUCKDB_PLATFORM`/`DUCKDB_VERSION`
   against the binary, and `publish_extension_repo.py` verifies every binary's footer against its directory
   *before* any network call. Re-assembling pre4 filed all three platforms correctly afterwards.
-* Next: **publish pre5 from CI run `39130114709`** (first time linux_amd64 + windows_amd64_mingw binaries
-  go out at all; pre4's artifacts are assembled and install-verified locally at `dist/repo-ci-pre4`, so the
-  pipeline itself is proven), then the upload-side dedup query, then shard-driven read prefetch. macOS
-  binaries still need a `workflow_dispatch` (billing: private repo, 10x minutes) - open decision.
+* Next: **tag `v0.0.2-pre6` and publish the artifacts of the run that commit's own push starts** - first
+  time linux_amd64 and windows_amd64_mingw binaries go out at all, next to a signed linux_arm64 and an
+  unsigned mirror. The pipeline is already proven end to end: pre4's artifacts assembled into a correct
+  tree and `test_install.py` installed, loaded and queried from it. **pre5 was tagged and built green and
+  is deliberately not published**, so that a released binary always comes from the commit its tag names.
+  Then the upload-side dedup query, then shard-driven read prefetch. macOS binaries still need a
+  `workflow_dispatch` (billing: private repo, 10x minutes) - open decision.
 
 ## Position before this (2026-10-18, ~11:25 UTC)
 
@@ -798,4 +809,12 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
 * `13:45` — pre4's CI artifacts downloaded and assembled to validate the publish pipeline before spending
   it on pre5: found the `v0.1H` misfiling bug (see Current position), fixed it with `scripts/ext_footer.py`
   + cross-checks in both repository scripts, re-assembled → three platforms under `v2.0.0-alpha47600/`, and
-  `test_install.py` installs/loads/queries from that tree over `file://` (arm64, unsigned).
+  `test_install.py` installs/loads/queries from that tree over `file://` (arm64, unsigned). Committed
+  `7b52e05`.
+* `14:05` — **pre5's CI run `39130114709` completed green**: linux_amd64, linux_arm64,
+  windows_amd64_mingw, plus the job that runs `hf_xet_selftest()` against the built artifact. LZ4 and the
+  symbol hygiene build clean under mingw and x86_64, not just here.
+* `14:20` — `hf_xet_compression` validated at SET time; `smoke_xet.sql` 4 → 12 passed / 3 expected
+  failures; full `run_all.sh` → **200 passed, 12 expected failures, 0 failed**. Version → **0.0.2-pre6**
+  (constant + the `smoke_write.sql` assertion that pins it), CHANGELOG restructured so the packaging fix
+  sits in the release that carries it rather than in pre5.

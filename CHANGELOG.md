@@ -10,6 +10,29 @@ Two version numbers are in play, and they are independent:
   per DuckDB identifier per platform, and rebuilding for a newer DuckDB pre-release is a rebuild,
   not a version bump.
 
+## 0.0.2-pre6 — a bad setting fails where it was set, and a release tree is checked against its own binaries
+
+* **`SET hf_xet_compression = 'bg4'` fails at the `SET`.** It used to be accepted, and then fail on the next
+  `COPY` - an error a long way from its cause, and one that would have read as a compression bug. The
+  accepted values are `lz4` (default) and `none`, case-insensitively. `bg4` is a real scheme in the format,
+  which this build does not implement, and `'auto'` is not taken as a synonym for `lz4`: in the reference
+  client it means a per-chunk decision this writer never takes, so accepting the word would promise a
+  behaviour that does not happen. `scripts/smoke_xet.sql` pins the refusals, the normalisation of `'LZ4'`,
+  and that `RESET` comes back to `lz4`.
+* **A packaging bug that would have made the first windows release unusable.** The script that assembles a
+  serveable repository read the DuckDB version identifier out of a built binary with `strings | grep
+  '^v[0-9]'`, and in a mingw-built artifact the first such match is some fragment that reads `v0.1H` - so
+  the binary was filed under `v0.1H/windows_amd64_mingw/`, a directory no client will ever ask for, while
+  everything that could report on the run reported success. `scripts/ext_footer.py` now reads the footer as
+  the structure DuckDB's `append_metadata.cmake` defines it (a 534-byte custom section: a
+  `duckdb_signature` marker, eight NUL-padded 32-byte fields appended in reverse order, then the 256-byte
+  signature slot), `make_extension_repo.sh` refuses a `DUCKDB_PLATFORM`/`DUCKDB_VERSION` that disagrees
+  with the binary in front of it, and `publish_extension_repo.py` checks every binary's footer against the
+  directory it is about to upload, before it touches anything remote.
+* **Nothing was published under 0.0.2-pre5.** It was tagged and its CI run went green on all three
+  platforms; these two changes landed before its artifacts went out, so the release that shipped is this
+  one, and what a client downloads is built from the commit the tag names.
+
 ## 0.0.2-pre5 — xorb chunks go out LZ4-compressed
 
 * **Chunk payloads inside an xorb are LZ4 frames now**, on by default, with `hf_xet_compression` as the
@@ -42,17 +65,6 @@ Two version numbers are in play, and they are independent:
   `lz4frame` computes frame checksums with xxhash and this extension shares a process with DuckDB's own
   xxhash and its own namespaced LZ4. DuckDB's copies are inside C++ namespaces so nothing was colliding
   today; the extension now exports zero `LZ4_*`/`XXH*` symbols, which is what keeps it true tomorrow.
-
-* **A packaging bug that would have made the first windows release unusable.** The script that assembles a
-  serveable repository read the DuckDB version identifier out of a built binary with `strings | grep
-  '^v[0-9]'`, and in a mingw-built artifact the first such match is some fragment that reads `v0.1H` - so
-  the binary was filed under `v0.1H/windows_amd64_mingw/`, a directory no client will ever ask for, while
-  everything that could report on the run reported success. `scripts/ext_footer.py` now reads the footer as
-  the structure DuckDB's `append_metadata.cmake` defines it (a 534-byte custom section: a
-  `duckdb_signature` marker, eight NUL-padded 32-byte fields appended in reverse order, then the 256-byte
-  signature slot), `make_extension_repo.sh` refuses a `DUCKDB_PLATFORM`/`DUCKDB_VERSION` that disagrees
-  with the binary in front of it, and `publish_extension_repo.py` checks every binary's footer against the
-  directory it is about to upload before it touches anything remote.
 
 ## 0.0.2-pre4 — writes go out over several streams, and CI's artifacts are the ones a client can load
 
