@@ -137,6 +137,10 @@ successfully uploaded"). Shard format is the second big port after the xorb form
 4. Exact `preupload` response shape for a bucket vs a git repo (`xet_file_data` fields per repo type).
 5. Dedup: is a global dedup query required, or can a first implementation skip it (correct but
    no sharing)? `MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES` suggests it is opportunistic.
+   **Answered by measurement, not inference** (`GET /v1/chunks/…` against the live CAS, two uploads,
+   196 + 5 chunks swept one query per chunk): optional, opportunistic, and the index is sparser than the
+   name suggests — see *M9 (design)* at the end of this file for what the CAS returns and which chunks it
+   answers for.
 
 ## Implementation options
 
@@ -578,5 +582,93 @@ does not take, so accepting it would promise a behaviour that never happens. `Ch
 checks the value where it is consumed - the setting can also arrive from a config file, and the last place
 a value is read is the last place it can be wrong.
 
-**Next**: an upload-side dedup query (`POST /v1/chunks/…` before hashing work another repository already
-paid for), and a read prefetch that walks a shard's chunk table instead of issuing one range per window.
+**Next**: cross-repository dedup on the upload side (M9 below — and note that the endpoint is a per-chunk
+`GET`, not the `POST /v1/chunks/…` batch this section guessed before anyone had read the CAS spec), and a
+read prefetch that walks a shard's chunk table instead of issuing one range per window.
+
+## M9 (design, measured first) cross-repository dedup
+
+Everything in this section was established by asking the live CAS, on 2026-10-18, rather than by reading
+field names out of xet-core. Two files were written through the extension into `lhoestq/hf-smoke-staging`
+(`dedup_probe/payload.csv`, 5 chunks; `dedup_probe/big.txt`, 196 chunks), every one of their chunk hashes
+was computed with `xet-probe xorb`, and each hash was then queried against the CAS.
+
+**The endpoint.** `GET {cas}/v1/chunks/{prefix}/{chunk_hash_hex}`, bearer-authenticated with the same
+write token an upload uses. The token comes from the usual exchange — and the revision is a *path segment*,
+which matters: `api/datasets/<repo>/xet-write-token` answers 404 while
+`api/datasets/<repo>/xet-write-token/main` answers with `casUrl` / `accessToken` / `exp`. `prefix` is the
+same `default` used for xorb uploads, and the hash is the same word-swapped hex the xorb URL uses.
+
+**What a hit is.** 200 with a body that is a **complete metadata shard** — same `HFRepoMetaData` header,
+same 48-byte-entry layout, the format `hf_xet_shard.cpp` already parses. For the 5-chunk file our uploaded
+shard was 576 bytes and the answer was 632; for the 196-chunk file, 9744 against 9800. Both exactly +56, so
+the CAS hands back the shard of the file that contained the chunk, re-serialised with a little more than the
+stripped upload we sent. A miss is a 404 with a 53-byte body.
+
+**Which chunks the index holds — the part that was genuinely surprising.** 1 hit in 196, and 1 in 5, and in
+both files the hit was **chunk 1**. Not a sampling by hash, not a range index: the CAS indexes the chunks a
+shard *flags*, and our writer flags exactly one chunk per file. `hf_xet_shard.hpp` has
+
+```cpp
+//! XorbChunkSequenceEntry.flags, set on a chunk that starts a file. Advisory, and cheap to honour:
+//! the CAS uses it to populate a cross-repository dedup table.
+constexpr uint32_t HF_XET_CHUNK_FLAG_GLOBAL_DEDUP = 0x80000000u;
+```
+
+which is `MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG` (`1 << 31`), applied at `hf_xet_shard.cpp:176` to
+`chunk.starts_a_file`. The producer half of global dedup is therefore already in this extension, added in
+M5 on the strength of a comment in `xorb_structs.rs`; what is missing is that a *reference* client flags far
+more than the file's first chunk, and that nothing here ever reads the table back.
+
+**The reference's own eligibility rule** (`metadata_shard/constants.rs`):
+
+```rust
+pub fn hash_is_global_dedup_eligible(h: &MerkleHash) -> bool { (*h) % 1024 == 0 }   // MDB_SHARD_GLOBAL_DEDUP_CHUNK_MODULUS
+```
+
+and `Rem<u64> for DataHash` is `self[3].to_le() % rhs` — the fourth `u64` of the digest, little-endian, mod
+1024. So eligibility is a 1-in-1024 sample by hash, *or* whatever a client explicitly flags. Checked against
+both files: none of the 201 chunk hashes is eligible under that rule, which is why 196 queries produced one
+answer and why that one answer was the flagged chunk. (Worth stating because the arithmetic is easy to get
+wrong: with the digest read in the *printed* word order the residues of chunk 1 are 158 and 936, neither of
+them zero, and it is the flagged-ness, not the modulus, that put it in the index.)
+
+**How the reference client uses it** (`xet_data/src/processing/`): `global_dedup_query_enabled` defaults to
+`true`, queries are issued at most once per `MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES = 256` chunks, the
+returned shard is registered in a cache shard manager, and `chunk_hash_dedup_query` then matches *runs* of
+chunk hashes against three tiers in order — resumed session, current session, cached global shards — and
+answers with a `FileDataSequenceEntry`, which is a pointer: N chunks live in xorb X at offset Y. A chunk
+matched that way is never uploaded; the new shard simply points at an xorb somebody else already paid for.
+
+**What that buys here, ranked by how sure the win is.**
+1. **Re-uploading an identical file costs nothing.** Its chunk 1 is in the index (we flag it), so one query
+   returns the whole file's shard, the whole file matches as one run, and the upload is a shard of pointers
+   with zero xorbs. This is the case that works *today*, with no change to the producer half.
+2. **Copying a dataset between repositories** is (1) repeated per file, and partitioned writes are file
+   granular, so a re-run of a partitioned `COPY` over unchanged partitions uploads nothing.
+3. **Edited files** need the modulus sampling to be worth anything: flag eligible chunks on the way out and
+   the index stops being one entry per file, which is what makes a 90%-similar file discoverable at all.
+   This is a change to the writer, and it changes what *other* clients can dedup against us as well.
+
+**Order of work.** (A) Flag chunks that satisfy `word[3] % 1024 == 0` in the shard writer — small, pure, and
+unit-testable against `xet-probe`'s hashes with the self-test the way M1/M2 vectors are. (B) Re-run the
+sweep over the same 196 chunks and confirm the CAS now answers for the eligible ones; that is the experiment
+that says the flag is honoured for chunks other than file starts, and it costs one upload and 196 GETs.
+(C) Query while chunking (a sample, spaced like the reference), parse the returned shards with the existing
+parser, match the longest runs. (D) Emit pointer entries for matched runs, and measure: the number that
+matters is `bytes` in `hf_xet_upload` against `uncompressed_bytes` for a dataset copied with one column
+appended.
+
+**(A) and (B) are the gate.** If the CAS ignores the flag on a chunk that does not satisfy its own modulus
+rule, then the honest summary is that cross-repository dedup is a first-chunk-per-file affair for now, and
+step (C) shrinks to "query the first chunk, and dedup whole identical files" — which is still step 1 above,
+and still worth having.
+
+**Reproducing it.** The payloads are seeded generators, not blobs: `docs/fixtures/generate_dedup_probe.py`
+rebuilds both byte-for-byte (`sha256` `b9ac43b3…` for `payload.csv` at 238,180 bytes, `6ca2476f…` for
+`big.txt` at 12,582,987), and `docs/fixtures/{payload_chunks_5,big_chunks_196}.txt` hold the chunk hashes in
+file order exactly as `xet-probe xorb` printed them. The files themselves are still in
+`lhoestq/hf-smoke-staging` under `dedup_probe/`, so the sweep is: exchange a write token with the revision
+appended, then loop `GET {cas}/v1/chunks/default/$(cat big_chunks_196.txt)`. Chunk 1
+(`bae174d08d38265783468cb3068408dab5ad6d087d939c0f643806936c3c2d34`) answers 9800 bytes; the other 195
+answer 404.

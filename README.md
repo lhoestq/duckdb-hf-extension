@@ -805,8 +805,11 @@ the old one; once it has, the version in the field is history.
   cap (see "Concurrency" in docs/XET.md for why one number does both jobs).
 * Uploads do not *query* for deduplication: a file that shares 90% of its chunks with something already
   in the CAS is re-sent whole, and the CAS refuses the duplicate work chunk-for-xorb rather than
-  reusing it. `inserted` in `hf_xet_upload` is the visible symptom. The reconstruction-side dedup query
-  is the missing counterpart, and it costs bytes rather than correctness.
+  reusing it. `inserted` in `hf_xet_upload` is the visible symptom. The other half is already in place —
+  every upload flags the chunk that starts the file, and that flag is what the CAS puts in its
+  cross-repository dedup index, so an *identical* file re-uploaded anywhere could be recognised today with
+  one query. What is missing is the query, and the sampling that would make a merely *similar* file
+  findable at all (`docs/XET.md`, "M9 (design)", measured against the live CAS).
 * A Xet upload is **per file, per statement**: `COPY` publishes when the file closes, so a partitioned
   write publishes one file at a time, each with its own shard.
 * Files ≤ the Hub's inline threshold are sent as base64 in the commit payload; larger ones use

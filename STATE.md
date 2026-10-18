@@ -946,8 +946,8 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
 * `18:49` — **published** (Hub commit `10716b52`), then re-downloaded: sixteen served binaries identical to
   CI's bytes, `INSTALL`/`LOAD` verified over https signed and unsigned. README, CHANGELOG and this file
   changed "three platforms" into "eight" wherever it appeared.
-* **Unstarted next**, in order: the upload-side dedup query (a file sharing 90% of its chunks with something
-  already in the CAS is still re-sent whole), then shard-driven read prefetch.
+* **Unstarted next**: M9 cross-repository dedup, designed and costed (see the 19:2x entry below and
+  `docs/XET.md`); then shard-driven read prefetch.
 * `19:00` — ran the README's own steps verbatim against the live repository in a throwaway home, then a
   second connection in the same home: session 1 installs (both `hf_version` = `0.0.2-pre7` and
   `duckdb_extensions().extension_version` = `v0.0.2-pre7`, so the footer finally carries the tag), session 2
@@ -967,3 +967,30 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
   conclusion, because a wrong exclusion string is green; and in a GitHub expression, keep exactly one
   comparison to the left of `&&` — `!=` on a single event name is the honest way to say "everything except a
   release".
+* `19:20`–`19:40` — **M9 measured before a line of it is written**, which changed what the feature is. The
+  question in the backlog was "add the upload-side dedup query"; the question that mattered first was what
+  the CAS would answer *for* that query. Two seeded payloads written through the extension into
+  `lhoestq/hf-smoke-staging` (5 chunks, 196 chunks), all 201 chunk hashes computed with `xet-probe xorb`
+  (each file's xorb hash came out identical to what our writer produced - a free byte-exactness check, LZ4
+  included), then one `GET {cas}/v1/chunks/default/{hash}` per hash. **One hit in 196, one in 5, and both
+  were chunk 1.** The body is a complete metadata shard in the format we already parse - our uploaded shard
+  plus exactly 56 bytes - so the CAS returns the shard of the file that contained the chunk.
+* `19:45` — the reason is ours: `hf_xet_shard.cpp` sets `HF_XET_CHUNK_FLAG_GLOBAL_DEDUP` (`1 << 31`,
+  `MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG`) on the chunk that *starts a file* and on nothing else, and that flag is
+  what the CAS indexes. xet-core's own rule additionally flags every chunk with `word[3].to_le() % 1024 == 0`
+  (`hash_is_global_dedup_eligible`, a 1-in-1024 sample). Checked: none of the 201 hashes is eligible under
+  that rule - so it was flagged-ness, not the modulus, that got chunk 1 indexed, and the producer half of
+  global dedup has been in this extension since M5 without anyone knowing what it bought. The consumer half
+  was never written.
+* `19:50` — what that means for the work, written up as `docs/XET.md` "M9 (design)": (A) flag
+  modulus-eligible chunks in the shard writer, (B) re-sweep the same 196 hashes and check the CAS answers
+  for them - **that experiment is the gate**, because if the flag is ignored on non-file-start chunks then
+  cross-repo dedup is a whole-identical-file affair, (C) query during chunking and parse the returned shards
+  with the existing parser, (D) emit pointer entries and measure `bytes` / `uncompressed_bytes`. Step 1 of
+  the payoff needs no new producer work at all: re-uploading an identical file today could cost zero bytes,
+  because its chunk 1 is already in the index.
+* Fixtures for the above are committed under `docs/fixtures/` - seeded generators rather than blobs, so
+  `sha256` reproduces them exactly (verified here), plus the chunk-hash lists in file order. Two side notes
+  worth keeping: the token exchange **requires the revision as a path segment** (`…/xet-write-token/main`
+  answers, `…/xet-write-token` 404s), and `xet-probe` needs `cargo` from `~/.cargo/bin`, which is not on
+  PATH in this shell.
