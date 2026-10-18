@@ -948,3 +948,15 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
   contradicted what the README had said an hour earlier ("re-run it to update", with the gate described as
   only a registration-time thing), so the wording moved; the CLI paragraph now says why putting the two setup
   lines in `~/.duckdbrc` is what makes a later `INSTALL` work without extra typing.
+* `19:15` — `e5bb74d`: the conditional exclusion string I wrote in `dbd4d52` was malformed. GitHub binds
+  `&&` tighter than `||`, so `event == push || event == pull_request && ";list" || ""` returned the boolean
+  `true` and the "list" became the four characters `true` glued to the end of `exclude_archs`. Consequences:
+  `wasm_threads` built on every push (~13 min, artifact consumed by nobody) and macOS/`windows_amd64`/musl
+  were **not** excluded on push either — six architectures where three were intended, macOS minutes at 10x.
+  Verified the fix against the live matrix rather than reasoning about it: run `39157627780`'s
+  `Generate matrix` log now reads the full nine-name exclusion string and its job list is
+  `linux_amd64` + `linux_arm64` (+ mingw) with no wasm, no macOS.
+  **Two habits this argues for**: read the matrix job's *inputs* and a run's *job list* rather than its
+  conclusion, because a wrong exclusion string is green; and in a GitHub expression, keep exactly one
+  comparison to the left of `&&` — `!=` on a single event name is the honest way to say "everything except a
+  release".

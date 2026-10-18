@@ -25,11 +25,21 @@ Two version numbers are in play, and they are independent:
   were building next to it and had nothing wrong with them, and macOS jobs were not scheduled until the whole
   linux group finished. A dispatch now passes `reduced_ci_mode: 'disabled'`, which builds all eight in
   parallel and lets each answer for itself; `allow_failure_archs`, not fail-fast, decides the run's colour.
-* **`opt_in_archs` opts an architecture in even when `exclude_archs` names it**, which contradicts that
-  input's own description ("explicit opt-ins override reduced CI, while exclusions take precedence"). The
-  first push under the new matrix queued `linux_amd64_musl` and `linux_arm64_musl` — named explicitly in the
-  exclusion string — which is visible only by reading a run's *job list* rather than its conclusion, since
-  the run was green. The opt-in is now conditional on the event.
+* **A malformed conditional exclusion string, written by me and invisible for six pushes' worth of builds.**
+  GitHub's expression language binds `&&` tighter than `||`, so the natural-looking way to name two events —
+  `event == 'push' || event == 'pull_request' && ';list' || ''` — parses as
+  `(A || (B && ';list')) || ''`, short-circuits on `A`, and returns the **boolean** `true`, which pastes
+  itself onto the string: `exclude_archs: windows_arm64;wasm_mvp;wasm_eh;wasm_threadstrue`. So `wasm_threads`
+  stopped matching and built a browser artifact nothing consumes on every push, and the five expensive
+  architectures — including macOS, at 10x billing — were not excluded either. A poisoned exclusion list
+  cannot fail a build: the run is simply green and twice the size it claims to be, which is why the check
+  here is the `exclude_archs:` line in the matrix job's log, not the run's conclusion.
+  * **A finding from earlier in this release is withdrawn**: "explicit opt-ins override exclusions, contrary
+    to the input's own description". Its entire evidence was a push queueing musl builds that the exclusion
+    string named — which this bug explains completely: on the dispatch that *did* build musl, the suffix
+    evaluated to empty, so musl was never excluded and `opt_in_archs` did exactly what it says. Under the
+    corrected strings the two lists do not overlap, so the precedence question is now genuinely untested
+    rather than answered wrongly.
 * **`windows_amd64` joins `windows_amd64_mingw`, and the difference is not cosmetic.** DuckDB derives the
   platform string it installs by — what `PRAGMA platform` answers — in `platform.hpp`, and the `_mingw`
   postfix is applied `#ifdef __MINGW32__` (plus a `DUCKDB_PLATFORM_RTOOLS` case for the R build). A client
