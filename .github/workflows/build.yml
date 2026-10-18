@@ -65,13 +65,21 @@ jobs:
       # would not be enough for the musl pair and osx_amd64, which a reduced matrix skips. And
       # `allow_failure_archs` keeps one experimental cross-compile from failing the run whose artifacts a
       # release is made of (a failed job uploads nothing, so its platform directory is simply absent).
-      exclude_archs: "windows_arm64;wasm_mvp;wasm_eh;wasm_threads${{ github.event_name == 'push' || github.event_name == 'pull_request' && ';linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64' || '' }}"
-      # opt_in_archs, not exclude_archs, decides: setting both for the same architecture OPTS IT IN, even
-      # though the input's own description says "exclusions take precedence". Observed the hard way - the
-      # first push under this matrix happily queued two musl builds that exclude_archs named explicitly.
-      # So the opt-in is conditional on the event, and exclude_archs is left to do what it does reliably:
-      # name architectures that are never wanted.
-      opt_in_archs: ${{ github.event_name == 'workflow_dispatch' && 'linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64' || '' }}
+      #
+      # A conditional suffix has to be ONE comparison: GitHub binds `&&` tighter than `||`, so
+      # `a || b && ';list' || ''` parses as `(a || (b && ';list')) || ''`, short-circuits on `a`, and
+      # returns the boolean `true`, which then pastes itself onto the end of the string. The shape that
+      # looks natural - naming two events - is the broken one, hence `!= 'workflow_dispatch'` here rather
+      # than `== 'push' || == 'pull_request'`. `exclude_archs: …;wasm_threadstrue` in a build log is what a
+      # poisoned suffix looks like: `wasm_threads` stops matching, everything the suffix named stops being
+      # excluded, and the run is green anyway.
+      exclude_archs: "windows_arm64;wasm_mvp;wasm_eh;wasm_threads${{ github.event_name != 'workflow_dispatch' && ';linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64' || '' }}"
+      # opt_in_archs is conditional for the same billing reason, and because a run that builds all eight is
+      # a release run rather than a push. `reduced_ci_mode: 'disabled'` on a dispatch goes with it: that is
+      # what switches off fail-fast, which the first pre7 release run used to cancel two healthy builds
+      # (osx_amd64, windows_amd64_mingw) after an unrelated architecture failed to compile. Whether the run
+      # is green is allow_failure_archs' job, not fail-fast's.
+      opt_in_archs: ${{ github.event_name == 'workflow_dispatch' && 'linux_amd64_musl;linux_arm64_musl;osx_amd64;windows_amd64' || '' }}
       allow_failure_archs: "linux_amd64_musl;linux_arm64_musl;windows_amd64"
       skip_tests: false
 
