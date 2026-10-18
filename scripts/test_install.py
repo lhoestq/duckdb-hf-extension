@@ -8,7 +8,9 @@
 
 Every run uses a throw-away home directory, so it never touches ~/.duckdb. For signed repositories
 the test also flips a byte in the *installed* binary and checks that DuckDB refuses to load it -
-otherwise "we signed it" would just mean "we appended 256 bytes somewhere".
+otherwise "we signed it" would just mean "we appended 256 bytes somewhere". That refusal is required
+of both ways a repository can be registered: with the key pinned in the statement, and keyless - the form
+the README gives, where DuckDB reads the key from the repository's own .well-known file.
 """
 import json
 import os
@@ -35,13 +37,21 @@ if "--tamper-child" in sys.argv:
     # truncating a file DuckDB has mapped takes the whole process down with it.
     tampered_home = sys.argv[sys.argv.index("--tamper-child") + 1]
     tampered_repo = sys.argv[sys.argv.index("--tamper-child") + 2]
+    # "keyless" reproduces the short form the README tells people to type: CREATE EXTENSION REPOSITORY
+    # without USING PUBLIC KEY(S), where DuckDB reads the key from the repository's own .well-known file.
+    # It is the form most users will use, so it is the one that has to be shown to refuse a tampered
+    # binary - not only the pinned-key form nobody types by hand.
+    keyless = len(sys.argv) > sys.argv.index("--tamper-child") + 3
     os.makedirs(os.path.join(tampered_home, ".duckdb"), exist_ok=True)
     with open(os.path.join(tampered_repo, ".well-known/duckdb-extension-repo.json")) as f:
         tampered_keys = json.load(f)["signature_keys"]
     key = "".join(l for l in tampered_keys[0].splitlines() if not l.startswith("-----")).strip()
     kid = duckdb.connect(config={"home_directory": tampered_home, "allow_extension_repositories": "allowed"})
-    kid.execute(f"CREATE EXTENSION REPOSITORY hf_local WITH PREFIX 'file://{tampered_repo}/' "
-                f"USING PUBLIC KEYS '{key}'")
+    if keyless:
+        kid.execute(f"CREATE EXTENSION REPOSITORY hf_local WITH PREFIX 'file://{tampered_repo}/'")
+    else:
+        kid.execute(f"CREATE EXTENSION REPOSITORY hf_local WITH PREFIX 'file://{tampered_repo}/' "
+                    f"USING PUBLIC KEYS '{key}'")
     kid.execute("INSTALL hf FROM hf_local")
     kid.execute("LOAD hf FROM hf_local")
     # Getting here means the tampered bytes were accepted. Exit 0, deliberately: the parent asserts on a
@@ -141,16 +151,22 @@ if signed and not remote:
             open(path, "wb").write(bytes(data))
             corrupted += 1
     assert corrupted, f"nothing to tamper with under {tampered_repo}/{version}"
-    tampered_home = tempfile.mkdtemp(prefix="hf-ext-tamper-home-")
-    child = subprocess.run([sys.executable, __file__, tampered_repo, "--signed", "--tamper-child",
-                            tampered_home, tampered_repo], capture_output=True, text=True)
-    if child.returncode == 0:
-        raise AssertionError("a tampered extension loaded cleanly:\n" + child.stdout + child.stderr)
-    # "something went wrong" is not the same statement as "the signature was the thing that went wrong"
-    if "signature" not in child.stderr.lower():
-        raise AssertionError("the tampered install failed for a reason unrelated to the signature, so it "
-                             "proves nothing:\n" + child.stderr)
-    reason = next((line for line in child.stderr.splitlines() if "signature" in line.lower()), "?")
-    print(f"tamper check    -> refused ({corrupted} files corrupted):", reason.strip()[:110])
+    # Both ways of registering a repository, since they reach the key differently: one pins it in the
+    # statement, the other lets DuckDB fetch it from the prefix. Acceptance in one and refusal in the
+    # other would make the README's short form the weaker one, quietly.
+    for mode in ("pinned", "keyless"):
+        tampered_home = tempfile.mkdtemp(prefix="hf-ext-tamper-home-")
+        argv = [sys.executable, __file__, tampered_repo, "--signed", "--tamper-child", tampered_home,
+                tampered_repo] + ([mode] if mode == "keyless" else [])
+        child = subprocess.run(argv, capture_output=True, text=True)
+        if child.returncode == 0:
+            raise AssertionError(f"a tampered extension loaded cleanly ({mode} repository):\n"
+                                 + child.stdout + child.stderr)
+        # "something went wrong" is not the same statement as "the signature was the thing that went wrong"
+        if "signature" not in child.stderr.lower():
+            raise AssertionError(f"the tampered install failed ({mode}) for a reason unrelated to the "
+                                 "signature, so it proves nothing:\n" + child.stderr)
+        reason = next((line for line in child.stderr.splitlines() if "signature" in line.lower()), "?")
+        print(f"tamper check ({mode:7}) -> refused ({corrupted} corrupted):", reason.strip()[:95])
 
 print("OK")

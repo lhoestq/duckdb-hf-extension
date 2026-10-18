@@ -724,7 +724,10 @@ Both forms are verified in this tree: the signed run connects *without* `allow_u
 confirms the repository pins `sha256:f007c8016bc2f3a29…`, and the local variant then flips a byte in the
 served binary — in every platform directory and in both the plain and the gzipped copy, because DuckDB 2.0
 sniffs gzip rather than trusting the suffix, and because a client installs the directory of its own
-architecture — and requires a fresh process to refuse it.
+architecture — and requires a fresh process to refuse it. That refusal is required twice, once from a
+repository created with the key pinned in the statement and once from one created keyless, since the two
+reach the key by different routes and an acceptance in either would make one of the README's two forms the
+weaker one in silence.
 
 Two things to know about the key. It is an RSA-2048 private key kept outside the repository
 (`~/.config/duckdb-hf/signing.pem` on the build machine); losing it does not break clients that already
