@@ -2,15 +2,39 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-18, ~14:52 UTC)
+## Current position (2026-10-18, ~16:25 UTC)
 
-**0.0.2-pre6 is built, published and installable.** Version **0.0.2-pre6**, suites at **200 passed /
-12 expected failures / 0 failed** (xet 12, xet_upload 30, read 55, write 57, models 24, buckets 22),
-selftest at **367 checks**. `INSTALL` verified over https from `lhoestq/duckdb-hf-extension`, signed and
-unsigned, on `linux_arm64`; the `linux_amd64` and `windows_amd64_mingw` binaries were re-downloaded and
-compared byte for byte against what was built (this machine cannot load them). Everything in the bullets
-below is M8; what landed after the `v0.0.2-pre5` tag is the `hf_xet_compression` validation, the packaging
-fix, and a signature gate that had stopped testing anything.
+**0.0.2-pre6 is published for three platforms, and 0.0.2-pre7 is building for every architecture DuckDB
+has a runner for.** Version **0.0.2-pre7**, suites at **200 passed / 12 expected failures / 0 failed**
+(xet 12, xet_upload 30, read 55, write 57, models 24, buckets 22), selftest at **367 checks**. pre7 changes
+reach and documentation rather than the extension itself:
+
+* The build matrix is shaped by the event: a push builds `linux_amd64`, `linux_arm64`,
+  `windows_amd64_mingw`; a `workflow_dispatch` adds `osx_amd64`, `osx_arm64`, `linux_amd64_musl`,
+  `linux_arm64_musl`, `windows_amd64`. **`opt_in_archs` beats `exclude_archs`**, contrary to that input's
+  own description - the first push queued two musl builds that `exclude_archs` named explicitly, so the
+  opt-in is now conditional on the event (`2028782`), and the push run `39144427990` is the check that it
+  holds.
+* **`windows_amd64` was missing in a way that mattered, not just absent.** DuckDB composes the platform
+  string that names the directory a client installs from, and the `_mingw` postfix is applied
+  `#ifdef __MINGW32__` (`src/include/duckdb/common/platform.hpp`). A client that is not mingw-built asks
+  for `…/windows_amd64/`; pre6 put no file there, so its mingw artifact could only ever serve a
+  mingw-built DuckDB.
+* **A `## Installation` section** at the top of the README, written by running each step against the live
+  repository: registration persists in `~/.duckdb/extension_repositories/<name>.json` (once per machine,
+  although the `allow_extension_repositories` gate is per-session); the public key is discovered from the
+  repository's `.well-known/duckdb-extension-repo.json`, and a prefix without one cannot be registered at
+  all; a repository-installed extension loads as `LOAD hf FROM hf_repo` because bare `LOAD hf` looks at the
+  flat path and calls the copy under `repositories/hf_repo/` "not found"; **nothing autoloads** for a name
+  outside DuckDB's compiled-in index - the same rule that keeps a bare `INSTALL hf` from working;
+  `SELECT version()` and `PRAGMA platform` are the two directory names; and `allow_unsigned_extensions` is
+  connect-time in Python, not a `SET`.
+* `test_install.py` now demands the tamper refusal from **both** registration forms - key pinned, and
+  keyless (`bfa3556`) - because the README recommends the keyless one.
+
+**In flight:** dispatch run `39144168208` on `dbd4d52` = tag `v0.0.2-pre7`, which is the run whose artifacts
+become the release tree (musl and windows_amd64 ride along under `allow_failure_archs`, so a failing
+cross-compile leaves its platform directory missing instead of sinking the run).
 
 * **Why this after concurrency**: it is the other multiplier on the thing that measures slow. Measured
   offline with `tools/xet_probe` as the reference writer over a 2,103,723 byte CSV: none 2,105,403,
@@ -849,3 +873,16 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
   built - byte-identical, valid gzip, correct footers.
 * Next up, unstarted: the upload-side dedup query, shard-driven read prefetch, and the open macOS
   `workflow_dispatch` decision.
+* `15:00` — the publish written up in `6786098`, including the `--follow-tags` trap and a release procedure
+  for the README, so that the next version does not rediscover it.
+* `16:14` — **0.0.2-pre7** (`dbd4d52`): the event-shaped matrix, `windows_amd64`, and the README
+  installation section. Tagged `v0.0.2-pre7` (annotated, pushed explicitly), pushed, then dispatched: run
+  `39144168208`. The local suite was run against the rebuilt pre7 artifact first — same 200/12/0.
+* `16:18` — `2028782`: `opt_in_archs` opts an architecture in even when `exclude_archs` names it, which is
+  not what `_extension_distribution.yml` says ("exclusions take precedence"). Caught by reading the job list
+  of a run rather than its conclusion: the push run `39144156053` had `linux_amd64_musl` and
+  `linux_arm64_musl` in it, so it was cancelled and the opt-in made conditional.
+* `16:22` — `bfa3556`: the keyless repository form gets its own tamper refusal.
+* **Unstarted next**, in order: publish pre7 from the dispatch run once every architecture's artifact is in
+  (then verify each architecture that cannot run here by re-download + byte comparison, as pre6's were),
+  the upload-side dedup query, and shard-driven read prefetch.
