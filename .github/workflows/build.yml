@@ -52,11 +52,22 @@ jobs:
       # is how a 6-line yaml comment ends up as a build failure.
       override_duckdb_repository: https://github.com/lhoestq/duckdb.git
       duckdb_version: v2.0.0-alpha47600
-      # windows and wasm are not exercised locally, musl needs an extra toolchain. macOS builds are
-      # only run on a tag or a manual dispatch: this repository is private, where GitHub charges macOS
-      # minutes at 10x against a monthly quota, and every job here compiles DuckDB from source (the
-      # prebuilt DuckDB archives only exist for released versions).
-      exclude_archs: "windows_amd64;windows_arm64;linux_amd64_musl;linux_arm64_musl;wasm_mvp;wasm_eh;wasm_threads${{ github.event_name == 'push' && ';osx_amd64;osx_arm64' || '' }}"
+      # The matrix is shaped by the event, because GitHub bills macOS minutes at 10x against a monthly
+      # quota in a private repository and every job here compiles DuckDB from source (the prebuilt DuckDB
+      # archives only exist for released versions). A push therefore builds the three architectures that
+      # are cheap and cover the everyday case; a `workflow_dispatch` builds everything DuckDB has a runner
+      # for except wasm, which is the run that produces a release tree. wasm stays excluded either way:
+      # this extension is a filesystem + HTTP client with a thread pool for uploads, and the shape of those
+      # assumptions does not survive into a browser.
+      #
+      # The extras on a dispatch are opt-ins in extension-ci-tools' own matrix
+      # (config/distribution_matrix.json), so `opt_in_archs` is what turns them on - `exclude_archs` alone
+      # would not be enough on its own for the musl pair and osx_amd64, which a reduced matrix skips, and
+      # `allow_failure_archs` keeps one experimental cross-compile from failing the run whose artifacts a
+      # release is made of (a failed job uploads nothing, so its platform directory is simply absent).
+      exclude_archs: "windows_arm64;wasm_mvp;wasm_eh;wasm_threads${{ github.event_name == 'push' || github.event_name == 'pull_request' && ';linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64' || '' }}"
+      opt_in_archs: "linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64"
+      allow_failure_archs: "linux_amd64_musl;linux_arm64_musl;windows_amd64"
       skip_tests: false
 
   # The matrix does run a test step, but it cannot run test/sql/hf_selftest.test: that file starts with

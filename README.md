@@ -3,7 +3,7 @@
 A native C++ DuckDB extension that makes `hf://` URLs behave like `s3://`:
 
 ```sql
-INSTALL hf; LOAD hf;
+INSTALL hf FROM hf_repo; LOAD hf FROM hf_repo;   -- one-time setup for hf_repo: see "Installation"
 
 SELECT * FROM 'hf://datasets/lhoestq/demo1/*.parquet';
 SELECT * FROM hf_ls('hf://datasets/lhoestq/demo1');
@@ -19,6 +19,88 @@ through the Hub's commit API (`preupload` → git-LFS basic upload → ndjson co
 
 Target: **DuckDB 2.0** (`v2.0.0-alpha…`, codename *Cyanoptera*), including the Python pre-release
 (`pip install duckdb --pre --upgrade`).
+
+## Installation
+
+`hf` is not in DuckDB's official extension index yet, so an install names where to fetch it from. What is
+published is two trees of the same binaries: signed at the root of `lhoestq/duckdb-hf-extension`, and an
+unsigned copy under `unsigned/`. Take the signed one — `INSTALL` then checks the bytes against a key rather
+than trusting whatever the CDN handed back.
+
+A binary is tied to **one** DuckDB version identifier and **one** platform, and those are exactly the two
+directory names a repository serves. Look yours up before installing:
+
+```sql
+SELECT version();      -- v2.0.0-alpha47600   <- the published tree holds this identifier
+PRAGMA platform;       -- linux_arm64         <- one of linux_amd64, linux_arm64, osx_amd64,
+                                               -- osx_arm64, windows_amd64, windows_amd64_mingw,
+                                               -- linux_amd64_musl, linux_arm64_musl
+```
+
+### Once, ever: register the repository
+
+```sql
+SET allow_extension_repositories = 'allowed';   -- the gate that lets you add a repository at all
+CREATE OR REPLACE EXTENSION REPOSITORY hf_repo
+  WITH PREFIX 'https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main';
+```
+
+That is the whole setup, and it is *persistent*: the repository is written to
+`~/.duckdb/extension_repositories/hf_repo.json`, where every later session and every other database on the
+machine finds it. (`SET` is a setting, so it has to be said in the session that creates; a later session
+can skip it and still use the repository. `OR REPLACE` makes the two lines idempotent.)
+
+No public key to paste: the repository serves `.well-known/duckdb-extension-repo.json` and DuckDB reads the
+key from there. That is not a hole — a prefix without that file cannot be registered this way at all, and a
+binary whose bytes were changed after signing is refused at `INSTALL` (both verified in the *Hosting* and
+*Testing* sections below). To pin the key yourself, so that whoever controls the CDN response cannot also
+supply the key that validates it, add `USING PUBLIC KEY '…'` with the same base64 on one line, which `cat`
+of that `.well-known` file gives you.
+
+### Every session
+
+```sql
+INSTALL hf FROM hf_repo;    -- the first time; re-run it to update
+LOAD hf FROM hf_repo;
+SELECT * FROM hf_ls('hf://datasets/lhoestq/demo1');
+```
+
+Two things here are DuckDB 2.0 behaviour, not this extension's:
+
+* `LOAD` names the repository it installed from. A bare `LOAD hf` looks for the flat
+  `…/<version>/<platform>/hf.duckdb_extension` path and reports *not found* while the copy you installed
+  lives under `…/repositories/hf_repo/`.
+* nothing autoloads. An unqualified `hf_ls` before `LOAD` is a `Catalog Error`, because DuckDB only
+  autoloads extension names compiled into its own index — which is also why a third-party extension cannot
+  be in that index until it *is* in the index. `LOAD` is a line you type per session.
+
+### From Python, and from the CLI
+
+```python
+import duckdb
+con = duckdb.connect(config={"allow_extension_repositories": "allowed"})   # the same gate, at connect time
+con.execute("CREATE OR REPLACE EXTENSION REPOSITORY hf_repo WITH PREFIX "
+            "'https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main'")
+con.execute("INSTALL hf FROM hf_repo")
+con.execute("LOAD hf FROM hf_repo")
+```
+
+For the CLI, put the two setup lines in `~/.duckdbrc` — the shell executes it at startup, so every session
+starts with the repository registered and needs only `LOAD hf FROM hf_repo;`.
+
+### The unsigned copy
+
+Some clients cannot pin anything, and a locally built binary is unsigned by definition:
+
+```sql
+SET allow_unsigned_extensions = true;   -- in Python this must be a connect-time config, not a SET
+INSTALL hf FROM 'https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main/unsigned';
+LOAD hf;
+```
+
+This path installs whatever bytes are there, with no signature check, so it is for trying things and not
+for production. It is also refused by default: without the setting, DuckDB rejects the unsigned binary with
+the same message it uses for a broken signature, which is worth knowing because the two look identical.
 
 ## Why not just httpfs?
 

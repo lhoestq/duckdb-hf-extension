@@ -10,6 +10,37 @@ Two version numbers are in play, and they are independent:
   per DuckDB identifier per platform, and rebuilding for a newer DuckDB pre-release is a rebuild,
   not a version bump.
 
+## 0.0.2-pre7 — every architecture DuckDB has a runner for, and an install path written from what clients actually do
+
+* **The build matrix is now shaped by the event rather than by one fixed exclusion list.** A push builds
+  the three cheap artifacts as before; a `workflow_dispatch` builds everything except wasm — `osx_amd64`,
+  `osx_arm64`, `linux_amd64_musl`, `linux_arm64_musl`, `windows_amd64` on top of the three. Two details in
+  extension-ci-tools turned out to matter. `linux_amd64_musl` and `osx_amd64` are marked `opt_in` in its own
+  `config/distribution_matrix.json`, so *removing them from `exclude_archs` is not enough* — they need
+  `opt_in_archs`. And `allow_failure_archs` exists, which is what lets an experimental cross-compile sit in
+  the same run as the artifacts a release is made of: a job allowed to fail uploads nothing, so its platform
+  directory is simply absent from the assembled tree instead of taking the run down.
+* **`windows_amd64` joins `windows_amd64_mingw`, and the difference is not cosmetic.** DuckDB derives the
+  platform string it installs by — what `PRAGMA platform` answers — in `platform.hpp`, and the `_mingw`
+  postfix is applied `#ifdef __MINGW32__` (plus a `DUCKDB_PLATFORM_RTOOLS` case for the R build). A client
+  that is not itself mingw-built therefore asks for `…/<version>/windows_amd64/`, a directory 0.0.2-pre6
+  published no file into: the mingw artifact can only ever serve a mingw-built DuckDB. Both are published now
+  so neither kind of Windows client 404s.
+* **A `## Installation` section at the top of the README**, written by running each step against the live
+  repository instead of transcribing docs, which is how it picked up things the docs do not say: the
+  repository registration is stored in `~/.duckdb/extension_repositories/<name>.json` and so is done once per
+  machine rather than once per session, even though the `allow_extension_repositories` gate that permits it
+  is per-session; the public key needs no copy-paste because DuckDB reads it from the repository's
+  `.well-known/duckdb-extension-repo.json` — and a prefix *without* that file cannot be registered at all,
+  while a binary whose bytes were edited afterwards is still refused (re-checked here by flipping a byte in
+  the local signed tree and watching `INSTALL` refuse it); a repository-installed extension must be loaded as
+  `LOAD hf FROM hf_repo`, because bare `LOAD hf` looks at the flat path and calls the copy under
+  `…/repositories/hf_repo/` *not found*; and nothing autoloads, so `LOAD` is a line per session — the same
+  compiled-in-index rule that makes a third-party extension un-autoloadable is the one that keeps `INSTALL hf`
+  with no prefix from working until this extension is in that index.
+* Version constant and the `scripts/smoke_write.sql` assertion that pins it move to `0.0.2-pre7`; the suites
+  are unchanged at **200 passed / 12 expected failures / 0 failed**.
+
 ## 0.0.2-pre6 — a bad setting fails where it was set, and a release tree is checked against its own binaries
 
 Published to `lhoestq/duckdb-hf-extension`: `v2.0.0-alpha47600` for **linux_amd64**, **linux_arm64** and
