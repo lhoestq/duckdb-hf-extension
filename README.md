@@ -389,6 +389,8 @@ scripts/
   ci_selftest.sh    load a built binary into a plain duckdb shell and run every offline check (what CI
                     runs, since it cannot satisfy `require hf` either)
   make_extension_repo.sh  turn a build into a serveable <version>/<platform>/ repository (+signing)
+  make_extension_repo_from_ci.sh  the same repository assembled from a CI run's artifacts, one directory
+                    per platform the matrix built (this is how `INSTALL hf` starts working for others)
   publish_extension_repo.py  upload such a tree to a Hub dataset, and print the client recipes
   test_install.py   INSTALL + LOAD + query from that repository, local or over https, unsigned and signed
                     (with a tamper check on the local signed run)
