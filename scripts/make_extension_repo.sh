@@ -88,7 +88,7 @@ if [[ -n "${DUCKDB_EXTENSION_SIGNING_PK:-}" ]]; then
 else
   rm -f "$PUBKEY_FILE"
   echo "note: built UNSIGNED - clients need allow_unsigned_extensions=true (set"
-  echo "      DUCKDB_EXTENSION_SIGNING_PK to sign, see README 'Signing')"
+  echo "      DUCKDB_EXTENSION_SIGNING_PK to sign, see README's Distributing section)"
 fi
 
 # DuckDB 2.0 sniffs gzip instead of trusting a .gz suffix, so ship both forms: file:// consumers

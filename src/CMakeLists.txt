@@ -92,7 +92,7 @@ target_compile_definitions(hf_blake3_library PRIVATE ${HF_BLAKE3_DEFINITIONS})
 # compressed length, so any conforming LZ4 frame decodes. What it does have to be is decodable - which
 # is checked two ways, by decompressing every xorb we just serialized before posting it, and by handing
 # dumped xorbs to xet-core's own reader (`scripts/xet_bench.sh <file> lz4 <dir>` then `xet-probe
-# xorb-read`, docs/XET.md "Chunk compression").
+# xorb-read`, the compression part of docs/XET.md's "Xorb format" section).
 #
 # XXH_NAMESPACE=LZ4_ is not decoration: lz4frame computes frame checksums with xxhash, DuckDB links its
 # own xxhash into the same process, and an extension's default-visibility symbols are exported. With

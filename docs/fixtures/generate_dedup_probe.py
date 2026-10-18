@@ -7,8 +7,8 @@
 Both are seeded, so a rerun produces the same bytes and therefore the same chunk hashes - which is the
 whole point: `docs/fixtures/*_chunks_*.txt` were produced by `xet-probe xorb` over this generator's output,
 the same files were uploaded to `lhoestq/hf-smoke-staging` under `dedup_probe/`, and the CAS's answers for
-those hashes are what docs/XET.md "M9 (design)" reports. If this script's output stops matching those hash
-lists, the chunker moved under us and the measurement has to be redone.
+those hashes are what the M9 section of docs/XET.md reports. If this script's output stops matching those
+hash lists, the chunker moved under us and the measurement has to be redone.
 """
 import random
 import sys

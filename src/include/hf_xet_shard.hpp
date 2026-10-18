@@ -39,7 +39,7 @@ constexpr uint32_t HF_XET_FILE_FLAG_WITH_METADATA_EXT = 0x40000000u;
 //! XorbChunkSequenceEntry.flags, set on a chunk that starts a file. Advisory, and cheap to honour:
 //! the CAS uses it to populate a cross-repository dedup table - measured, not assumed, and this flag is
 //! the *only* chunk of ours that table ever answers for, because a reference client also flags chunks whose
-//! hash is 0 mod 1024 and this writer does not (docs/XET.md, "M9 (design)").
+//! hash is 0 mod 1024 and this writer does not (docs/XET.md, the M9 section).
 constexpr uint32_t HF_XET_CHUNK_FLAG_GLOBAL_DEDUP = 0x80000000u;
 //! every entry in both sections is exactly this many bytes
 constexpr idx_t HF_XET_SHARD_ENTRY_SIZE = 48;
