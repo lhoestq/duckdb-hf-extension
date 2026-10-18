@@ -45,10 +45,13 @@ reach and documentation rather than the extension itself:
 
 * The build matrix is shaped by the event: a push builds `linux_amd64`, `linux_arm64`,
   `windows_amd64_mingw`; a `workflow_dispatch` adds `osx_amd64`, `osx_arm64`, `linux_amd64_musl`,
-  `linux_arm64_musl`, `windows_amd64`. **`opt_in_archs` beats `exclude_archs`**, contrary to that input's
-  own description - the first push queued two musl builds that `exclude_archs` named explicitly, so the
-  opt-in is now conditional on the event (`2028782`), and the push run `39144427990` is the check that it
-  holds.
+  `linux_arm64_musl`, `windows_amd64`. **[19:15 correction: the sentence after this colon was wrong, and so
+  was the "check" it pointed at. `opt_in_archs` was never beating `exclude_archs`; the conditional suffix in
+  `exclude_archs` evaluated to the literal `true`, so nothing it named was excluded. Push run `39144427990`
+  did not "show only linux_arm64 and linux_amd64" - its job list also contains `wasm_threads`, `osx_arm64`
+  and `windows_amd64`, and it ended in *failure*, not green. The opt-in being conditional was a real fix
+  against a real symptom (musl jobs on a push), but the diagnosis attached to it was invented. See `e5bb74d`
+  and the 19:15 entry below.]**
 * **`windows_amd64` was missing in a way that mattered, not just absent.** DuckDB composes the platform
   string that names the directory a client installs from, and the `_mingw` postfix is applied
   `#ifdef __MINGW32__` (`src/include/duckdb/common/platform.hpp`). A client that is not mingw-built asks
@@ -912,10 +915,14 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
 * `16:14` — **0.0.2-pre7** (`dbd4d52`): the event-shaped matrix, `windows_amd64`, and the README
   installation section. Tagged `v0.0.2-pre7` (annotated, pushed explicitly), pushed, then dispatched: run
   `39144168208`. The local suite was run against the rebuilt pre7 artifact first — same 200/12/0.
-* `16:18` — `2028782`: `opt_in_archs` opts an architecture in even when `exclude_archs` names it, which is
-  not what `_extension_distribution.yml` says ("exclusions take precedence"). Caught by reading the job list
-  of a run rather than its conclusion: the push run `39144156053` had `linux_amd64_musl` and
-  `linux_arm64_musl` in it, so it was cancelled and the opt-in made conditional.
+* `16:18` — `2028782`: **[19:15 correction: the claimed rule is withdrawn; see `e5bb74d`.]** What was
+  actually observed stands and is worth keeping: reading a run's **job list** instead of its conclusion found
+  `linux_amd64_musl` and `linux_arm64_musl` jobs in the push run `39144156053`, which was cancelled and led
+  to the opt-in being made conditional. What was wrong was the *explanation*. The same reading, done fully,
+  would have shown that run and its successor `39144427990` also carrying `osx_arm64`, `windows_amd64` and
+  `wasm_threads` — six architectures where three were intended — and `39144427990` ending in failure rather
+  than green. Half-reading a job list produced a confident, wrong, and expensive conclusion: the missing
+  exclusions meant macOS minutes on every push for as long as the string was malformed.
 * `16:22` — `bfa3556`: the keyless repository form gets its own tamper refusal.
 * **Unstarted next**, in order: publish pre7 from the dispatch run once every architecture's artifact is in
   (then verify each architecture that cannot run here by re-download + byte comparison, as pre6's were),

@@ -31,9 +31,12 @@ Two version numbers are in play, and they are independent:
   `(A || (B && ';list')) || ''`, short-circuits on `A`, and returns the **boolean** `true`, which pastes
   itself onto the string: `exclude_archs: windows_arm64;wasm_mvp;wasm_eh;wasm_threadstrue`. So `wasm_threads`
   stopped matching and built a browser artifact nothing consumes on every push, and the five expensive
-  architectures — including macOS, at 10x billing — were not excluded either. A poisoned exclusion list
-  cannot fail a build: the run is simply green and twice the size it claims to be, which is why the check
-  here is the `exclude_archs:` line in the matrix job's log, not the run's conclusion.
+  architectures — including macOS, at 10x billing — were not excluded either. Push run `39144427990` listed
+  six architectures: `linux_amd64`, `linux_arm64`, `windows_amd64_mingw`, and then `osx_arm64`,
+  `windows_amd64`, `wasm_threads`. A poisoned exclusion list cannot fail a build; it produces a green (or
+  here, incidentally red) run that is twice the size it claims to be. The check is the `exclude_archs:` line
+  echoed in the matrix job's log — that is where `…;wasm_threadstrue` was finally read — and a run's job
+  list, read all the way down.
   * **A finding from earlier in this release is withdrawn**: "explicit opt-ins override exclusions, contrary
     to the input's own description". Its entire evidence was a push queueing musl builds that the exclusion
     string named — which this bug explains completely: on the dispatch that *did* build musl, the suffix
