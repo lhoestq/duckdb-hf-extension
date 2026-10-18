@@ -14,7 +14,14 @@
 #include <map>
 #include <mutex>
 
+// getpid() lives in different places per toolchain: unistd.h everywhere except MSVC, which has
+// _getpid() in process.h (the mingw build has unistd.h, which is why this only shows up as a windows_amd64
+// failure).
+#if defined(_WIN32)
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace duckdb {
 
@@ -185,15 +192,26 @@ string HFMakeTempPathIn(DatabaseInstance &db, const string &preferred_dir, const
 		dir = DBConfig::GetConfig(db).options.temporary_directory;
 	}
 	if (dir.empty()) {
+		// TMPDIR is the POSIX name for it, TEMP/TMP the Windows one
 		const char *tmpdir = std::getenv("TMPDIR");
-		dir = (tmpdir && *tmpdir) ? tmpdir : "/tmp";
+		if (!tmpdir || !*tmpdir) {
+			tmpdir = std::getenv("TEMP");
+		}
+		if (!tmpdir || !*tmpdir) {
+			tmpdir = std::getenv("TMP");
+		}
+		dir = (tmpdir && *tmpdir) ? string(tmpdir) : string("/tmp");
 	}
-	while (dir.size() > 1 && dir.back() == '/') {
+	while (dir.size() > 1 && (dir.back() == '/' || dir.back() == '\\')) {
 		dir.pop_back();
 	}
 
 	static std::atomic<uint64_t> counter {0};
+#if defined(_WIN32)
+	auto pid = static_cast<uint64_t>(_getpid());
+#else
 	auto pid = static_cast<uint64_t>(getpid());
+#endif
 	auto name = StringUtil::Format("duckdb_hf_%llu_%llu.tmp%s", pid, counter++,
 	                               extension.empty() ? "" : ("." + extension));
 	auto path = HFUtil::Join(dir, name);

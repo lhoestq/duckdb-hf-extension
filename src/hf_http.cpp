@@ -195,7 +195,12 @@ idx_t SkipJSONValue(const string &s, idx_t i) {
 } // namespace
 
 void HFJson::ForEachMember(const string &obj, const std::function<void(const string &, const string &)> &callback) {
-	auto i = obj.find('{');
+	// idx_t is uint64_t (typedefs.hpp), and on Apple's libc++ that is `unsigned long long` while
+	// string::size_type is `unsigned long`: same width, different type, so a value coming out of
+	// string::find() cannot bind to the `idx_t &` these helpers take. On Linux both spellings are
+	// `unsigned long`, so this only fails on the macOS build - which is why the declarations below name
+	// idx_t explicitly instead of taking the type from `auto`.
+	idx_t i = obj.find('{');
 	if (i == string::npos) {
 		return;
 	}
@@ -232,7 +237,7 @@ void HFJson::ForEachMember(const string &obj, const std::function<void(const str
 string HFJson::GetRaw(const string &json, const string &key, bool &found) {
 	found = false;
 	string needle = "\"" + key + "\"";
-	auto pos = json.find(needle);
+	idx_t pos = json.find(needle);
 	if (pos == string::npos) {
 		return "";
 	}
