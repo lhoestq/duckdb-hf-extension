@@ -13,7 +13,7 @@ struct FileOpenerInfo;
 //! Default endpoint. Overridable through the `hf_endpoint` setting, the `HF_ENDPOINT` env var or a secret.
 //! the release of this extension itself, reported by hf_status() and named in CHANGELOG.md - independent of
 //! the DuckDB version identifier the binary is built for, which has to match the running DuckDB exactly
-static constexpr const char *HF_EXTENSION_VERSION = "0.0.2-pre3";
+static constexpr const char *HF_EXTENSION_VERSION = "0.0.2-pre4";
 
 static constexpr const char *HF_DEFAULT_ENDPOINT = "https://huggingface.co";
 
@@ -46,6 +46,13 @@ constexpr idx_t HF_COPY_HASH_BACKOFF = 250;    // ms
 constexpr idx_t HF_COPY_HASH_MAX_BACKOFF = 4000;
 //! Single-PUT (non multipart) LFS uploads are capped by S3 at 5GiB
 constexpr idx_t HF_MAX_SINGLE_UPLOAD_SIZE = 5ULL * 1024 * 1024 * 1024;
+//! How many Xet xorb uploads one file write keeps in flight at once (1 sends them one after another).
+//! The cost of a write is the wire rather than the CPU - 100 MB costs ~0.15 s to chunk, hash and
+//! serialize (scripts/xet_bench.sh measures it) and tens of seconds to reach the CAS - and a single https
+//! stream is what caps that, so the xorbs a file is split into are sent over several streams. In flight
+//! is bounded because each xorb is up to 64 MiB of serialized bytes held in memory while it waits:
+//! this many of those, plus the one being built, is the peak.
+constexpr idx_t HF_DEFAULT_WRITE_MAX_PARALLEL = 3;
 
 //! Secret type name shared with httpfs' read-only `hf://` support, so that a single
 //! `CREATE SECRET (TYPE HUGGINGFACE, ...)` works for both.

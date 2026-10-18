@@ -402,3 +402,82 @@ reads back identical" is the strongest signal the surface gives.
 **Next**: the polish that stops being excusable — parallel xorb uploads, an upload-side dedup query
 (`POST /v1/chunks/…` before hashing work we already paid for elsewhere), LZ4 frames, and a prefetch that
 walks a shard's chunk table on read instead of issuing one range per window.
+
+## M7 a file's xorbs on several streams (done)
+
+M4-M6 made a write correct; how fast it was is a separate question, and the answer came from measuring
+rather than from guessing which of the three remaining optimizations to take first. With
+`scripts/xet_bench.sh` (the CPU phase alone, no network, 100 MB of incompressible bytes):
+
+| phase | time |
+|---|---|
+| gear chunking | 31 ms (3.4 GB/s) |
+| chunk + keyed blake3 per chunk + xorb serialize, NEON | 152 ms (690 MB/s) |
+| same, portable BLAKE3 (all SIMD off) | 177-193 ms |
+| the same upload, end to end | 12,000-70,000 ms, link-dependent |
+
+about 1% of a big write's wall clock is CPU. So SIMD dispatch was worth committing (it is free, and it
+makes the x86 paths' correctness a *tested* thing rather than an assumption - the CI self-test runs the 325
+checks on an amd64 artifact, which nothing local can) and was not worth waiting for. What a user of
+`hf_xet_write` actually waits on is a sequence of xorb POSTs, one per 64 MiB, each on its own connection
+getting what one connection on this link gets. Measured on 200 MB of fresh random content, six runs,
+concurrency alternated so link drift hits both arms:
+
+| `hf_write_max_parallel_uploads` | seconds |
+|---|---|
+| 1 | 29.8, 57.9, 31.2 |
+| 3 | 17.6, 20.9, 18.0 |
+| 4 | 22.2, 19.4 |
+
+median 31 s to 18 s, ~1.7x. Not 3x, because a 200 MB file is four xorbs of 64/64/64/8 MiB - the small
+last one is exposed either way - and because three streams on a link that sheds are not three times a
+stream. Concurrency 4 measured the same as 3, so 3 is the default: it is the point where the curve has
+flattened, and it is the cheaper memory bill.
+
+**What the parallelism is allowed to touch.** Content addressing is the whole license: an xorb's url is
+its content hash, no xorb depends on another, and the order they land in is not observable. The metadata
+shard *is* order-sensitive - it names segments and chunks in file order - so the split is: the thread
+reading the file builds each xorb and writes down everything the shard will say about it, in file order,
+and hands the bytes over; only the CAS's `inserted` answer comes back the other way, and it is collected
+once every POST has landed, before the shard is serialized. A shard that described xorbs in the order the
+network finished them would be describing a different file.
+
+**In flight is the memory bound, and the backpressure bound, with the same number.** A xorb waiting to go
+is up to 64 MiB of serialized bytes held in memory, so `Submit` blocks while three are running. That is
+also the entire reason the reader and chunker cannot run arbitrarily far ahead of the network: a 10 GB
+file costs the same memory as a 100 MB one.
+
+**The thread-affine part.** A worker gets a CAS client without a `FileOpener` (`ForWorkerThread`). A
+`ClientContext`-backed opener reads settings through the client it belongs to, so two threads using one is
+not a thing to discover through a bug report; the read path already made this choice for its parallel range
+fetches (`FetchWindow` in `hf_read.cpp`), including the fallback of running the work inline when a thread
+fails to start. What that costs is transport parameters (retries, user agent, headers) resolved from
+`DBConfig` instead of the session - for one POST per xorb, to a service that inspects none of them.
+Authentication is unaffected: the CAS token comes from the resolved `HFConnection`, and the exchange that
+gets it is deliberately done on the main thread, before any worker exists.
+
+**The shared token.** Several threads share one client, so the token is refreshed under a mutex and
+*copied out* (`Authorize(cas_url, access_token)`) rather than returned by reference - the old `CasUrl()`
+handed back a `const string&` into state that another thread's refresh could be rewriting mid-header. A
+token that expires during an upload is refreshed by whichever worker notices, from the connection alone,
+which is the one thing the dropped opener was not needed for.
+
+**Failure**: the first error any upload had is kept and thrown from `Finish()`; `Submit` stops feeding
+once one exists, since the shard that would reference this file is not going to be posted anyway; and the
+destructor joins unconditionally, because the producer can throw mid-file (a read error, an allocation) and
+a worker holding a reference to the uploader has to be gone before it dies. Whatever such a worker thought
+is not the interesting error - the caller is already reporting something better.
+
+**How it is tested** is worth stating, because the obvious test (a big upload, timed) is not a test:
+`smoke_xet_upload.sql` p6 re-uploads the suite's multi-xorb file with concurrency forced to 1, after the
+default of 3 wrote it, and requires every xorb to answer `inserted = false` and the shard to answer
+`exists`. Xorb identities are content hashes, so a concurrency bug that moved a boundary, reordered a chunk
+into a different xorb, or booked a segment against the wrong object would produce hashes the CAS has never
+seen - and it would answer `true`. It costs no new storage, which is why it can live in a live suite. What
+stays uncovered is a failure *during* a concurrent upload: as with the fallback, nothing in SQL makes one
+happen, and the seam required to try is worse than the gap.
+
+**Next**: LZ4 frames (fewer bytes on the wire, which is the thing that measured slow, and provable offline
+as a byte count), an upload-side dedup query (`POST /v1/chunks/…` before hashing work another repository
+already paid for), and a read prefetch that walks a shard's chunk table instead of issuing one range per
+window.

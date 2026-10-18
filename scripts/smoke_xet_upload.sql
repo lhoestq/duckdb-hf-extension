@@ -115,6 +115,19 @@ SELECT 'p5 the hub sees a xet-written file as xet content' AS t,
 FROM hf_bucket_copy('hf://buckets/lhoestq/playground/duckdb/xet_upload.csv',
                     'hf://buckets/lhoestq/playground/duckdb/xet_copied.csv');
 
+-- Several streams must not change what the content *is*. The file above was written with the default
+-- concurrency (three xorbs in flight); re-uploading it with the uploads serialized has to find every
+-- xorb already stored, since an xorb's url is its content hash and a different xorb order, or a xorb
+-- built against a different boundary, would produce hashes the CAS has never seen and would answer
+-- `inserted: true` to. Cheapest cross-check of the concurrent path that exists: it costs no new storage.
+SET hf_write_max_parallel_uploads = 1;
+SELECT 'p6 concurrency changes how xorbs travel, not what they are' AS t,
+       count(*) >= 2 AS assert_several_xorbs,
+       bool_and(NOT inserted) AS assert_every_xorb_already_stored,
+       bool_and(shard_result = 'exists') AS assert_shard_already_stored
+FROM hf_xet_upload('hf://buckets/lhoestq/playground/duckdb/xet_big.parquet');
+RESET hf_write_max_parallel_uploads;
+
 SELECT count(*) AS cleaned FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_upload.csv');
 SELECT count(*) AS cleaned_again FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_upload_twice.csv');
 SELECT count(*) AS cleaned_again FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_copy.csv');

@@ -10,6 +10,41 @@ Two version numbers are in play, and they are independent:
   per DuckDB identifier per platform, and rebuilding for a newer DuckDB pre-release is a rebuild,
   not a version bump.
 
+## 0.0.2-pre4 — writes go out over several streams, and CI's artifacts are the ones a client can load
+
+* **A file's Xet xorbs are uploaded with several requests in flight**, which is the one thing a Xet write
+  measurably waits on. `scripts/xet_bench.sh` times the CPU phase alone: 100 MB chunks in 31 ms and
+  chunks+hashes+xorbs in 152 ms, against 12-70 s of wall clock for the same upload. Six interleaved 200 MB
+  runs put `hf_write_max_parallel_uploads = 1` at 29.8/57.9/31.2 s and `3` at 17.6/20.9/18.0 s - about
+  1.7x, not 3x, because a 200 MB file is four xorbs and the last one is 8 MiB and exposed either way, and
+  because three streams on a link that sheds traffic are not three times one stream. `4` measured the same
+  as `3`, so the default is the point where the curve flattened: `3`, which is also the smaller memory
+  bill - an in-flight xorb is up to 64 MiB of serialized bytes, and the cap on those is simultaneously the
+  whole backpressure story (the reader and chunker cannot get more than that far ahead of the network, so
+  a 10 GB file costs what a 100 MB one does). Content addressing is what licenses the overlap: no xorb
+  depends on another, and the metadata shard, which does, is built in file order by the thread reading the
+  file and posted only after the last POST has landed.
+* The concurrency's *identity* is what the suite checks, since "upload fast" is not an assertion:
+  `smoke_xet_upload.sql` writes a multi-xorb file at the default of 3 and then re-uploads it at 1,
+  requiring every xorb to answer `inserted = false` and the shard to answer `exists`. Xorb urls are
+  content hashes, so a bug that moved a chunk boundary or described segments against the wrong object would
+  produce hashes the CAS had never seen - and it would answer `true`. It also costs no new storage, which
+  is the only reason it can live in a suite that talks to a real service.
+* BLAKE3 is compiled per ISA: NEON on aarch64, SSE2/SSE4.1/AVX2/AVX-512 with CPUID-time dispatch on
+  x86-64, portable C on MSVC and anywhere else. That is worth little on its own (1.15-1.27x on a phase
+  worth 1% of a write) and a great deal as a side effect: the amd64 artifact now runs all 325 reference
+  checks in CI, which is the first time any x86 SIMD path of this extension's hashing has been executed
+  somewhere other than someone's expectation.
+* **CI artifacts are loadable now, which they were not.** The self-test job failed on its first run with
+  *built specifically for DuckDB version `d4355d01c593…`*: three green matrix runs had produced four
+  platforms of binaries no client can `LOAD`, because DuckDB's Makefile lets the `DUCKDB_VERSION`
+  environment beat `OVERRIDE_GIT_DESCRIBE`, extension-ci-tools exports it as the sha passed in
+  `duckdb_version`, and the footer's version field is written from that variable. `duckdb_tag` creates the
+  git tag and nothing downstream reads it, and `v2.0.0-alpha*` identifiers are tagged nowhere upstream -
+  DuckDB's release CI generates them. CI therefore clones `lhoestq/duckdb`, a one-commit mirror whose tree
+  object *is* upstream's for `d4355d01c5`, tagged with the identifier. Run `39077156438`: four platforms
+  green, and `325 reference checks, every one of them passing` off the artifact a client would download.
+
 ## 0.0.2-pre3 — installable by someone else, and a git repo written through Xet
 
 * **Writing to a git-backed repository now puts the content in Xet.** `COPY (…) TO

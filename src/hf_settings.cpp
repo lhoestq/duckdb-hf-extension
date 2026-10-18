@@ -85,6 +85,9 @@ void HFSettings::Register(DBConfig &config) {
 	config.AddExtensionOption("hf_read_cache_total_size",
 	                          "How many fetched bytes are kept around over all hf:// files (an in-memory cache, nothing is written to disk)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(HF_DEFAULT_READ_CACHE_TOTAL));
+	config.AddExtensionOption("hf_write_max_parallel_uploads",
+	                          "How many Xet xorb uploads one file write keeps in flight at once (each in-flight xorb holds up to 64 MiB of serialized bytes)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(HF_DEFAULT_WRITE_MAX_PARALLEL));
 }
 
 } // namespace duckdb

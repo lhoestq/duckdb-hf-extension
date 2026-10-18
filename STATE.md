@@ -2,7 +2,45 @@
 
 > Living scratchpad. Updated continuously. **Read `PLAN.md` first, then this file, then resume.**
 
-## Current position (2026-10-17, ~21:40 UTC)
+## Current position (2026-10-18, ~11:25 UTC)
+
+**M7: a file's xorbs go out over several streams, and CI is green all the way down to loading the
+artifact.** Version **0.0.2-pre4**, suites at **189 passed / 9 expected failures / 0 failed** (xet 4,
+xet_upload 27, read 55, write 57, models 24, buckets 22). `docs/XET.md` has the M7 write-up.
+
+* **Why concurrency and not LZ4 first: the measurement.** `scripts/xet_bench.sh` (in the repo, links the
+  objects a `make release` produced) says 100 MB costs 31 ms to chunk and 152 ms to chunk+hash+serialize,
+  against 12-70 s of wall clock to upload. So CPU is ~1% of a write. Six interleaved 200 MB runs:
+  concurrency 1 = 29.8/57.9/31.2 s, 3 = 17.6/20.9/18.0 s, 4 = 22.2/19.4 s → default **3** (`hf_write_max_parallel_uploads`),
+  the point where it flattened and the cheaper memory bill. Not 3x: a 200 MB file is 64/64/64/8 MiB xorbs,
+  and the tail is exposed either way.
+* **The design constraint, because it is the part that could be subtly wrong**: the shard is order
+  sensitive, uploads are not. The reading thread builds each xorb and writes down everything the shard will
+  say about it *in file order*, then hands bytes to the pool; only `inserted` comes back, and it is
+  collected after every POST lands (`uploader.Finish()`), before the shard is serialized. In-flight cap =
+  memory cap = backpressure, all one number: 3 × up-to-64 MiB, and a 10 GB file therefore costs what a
+  100 MB one does.
+* **Thread-affinity, learned from the read path rather than rediscovered**: workers get a CAS client with
+  no `FileOpener` (`HFXetCasClient::ForWorkerThread`) - a `ClientContext`-backed opener reads settings
+  through its own client, and `FetchWindow` in `hf_read.cpp` already refuses to share one across threads.
+  The token exchange is done on the main thread before any worker exists. The shared token is refreshed
+  under a mutex and *copied out* (`Authorize(cas_url, access_token)`): the old `CasUrl()` returned a
+  `const string&` into state another thread's refresh could rewrite mid-header.
+* **p6 is the cheap test worth having**: write a multi-xorb file at concurrency 3, re-upload it at 1, and
+  require every xorb to answer `inserted = false` and the shard `exists`. Xorb urls are content hashes, so
+  any reordering/boundary bug shows up as `inserted = true`. Costs no new storage, so it can live in the
+  live suite. Still uncovered: a failure *during* a concurrent upload (as with the LFS fallback, no SQL
+  lever, and the test seam would be worse than the gap).
+* **CI run `39077156438` is the first fully green one in the strongest sense**: four platforms built *and*
+  the self-test job reporting `hf_version|duckdb_version|hf_xet_write = 0.0.2-pre3|v2.0.0-alpha47600|true`
+  plus `325 reference checks, every one of them passing` **off the downloaded artifact** - so the
+  mirror-based version identifier works, and the amd64 AVX/SSE BLAKE3 paths are now executed somewhere
+  that actually runs x86.
+* Next ("C", by value): **publish pre4 from CI's own artifacts** (the first time linux_amd64 and
+  windows_amd64_mingw binaries can go out at all), then LZ4 frames, then the upload-side dedup query,
+  then shard-driven read prefetch.
+
+## Position before this (2026-10-17, ~21:40 UTC)
 
 **pre3 is published, swept, and measured - and its CI was fixed by the job written to catch it.** The
 Hub repository serves 0.0.2-pre3 (`lhoestq/duckdb-hf-extension`, signed at `/`, unsigned at `/unsigned/`),
@@ -43,7 +81,8 @@ cites the observation made with it).
   extension* — the dataset is Xet-stored and the `resolve` redirect for a just-committed file is still
   settling. Both trees verified green on re-run.
 * Next ("C", by value): **parallel xorb uploads** (measured reason above), upload-side dedup query, LZ4
-  frames (provable offline as bytes-on-wire), shard-driven read prefetch, robustness negatives.
+  frames (provable offline as bytes-on-wire), shard-driven read prefetch, robustness negatives. (the
+  uploads part is done above)
 
 ## Position before this (2026-10-17, ~19:45 UTC)
 
@@ -665,3 +704,19 @@ For Xet work: `docs/XET.md` is the protocol reference (format findings, the CAS 
 * `21:25` — BLAKE3 per-ISA (NEON here; CPUID dispatch on x86-64; portable elsewhere) + the offline CPU
   benchmark. `scripts/xet_bench.sh` exists so the "hash-bound?" answer stays a measurement: 152 ms per 100
   MB against 12–70 s of upload. Next thing to parallelize is the xorb POST sequence.
+* `10:20` — CI run `39077156438` finished: four platforms **and** the self-test job green, its log saying
+  `0.0.2-pre3|v2.0.0-alpha47600|true` and `325 reference checks, every one of them passing` about the
+  downloaded artifact. The mirror fix works, and x86 SIMD hashing has now been executed on x86.
+* `10:45` — chose the next optimization by measuring instead of by intuition: `scripts/xet_bench.sh`
+  (CPU phase: 31 ms chunking, 152 ms chunk+hash+xorb per 100 MB) and six interleaved 200 MB uploads
+  (c=1: 29.8/57.9/31.2, c=3: 17.6/20.9/18.0, c=4: 22.2/19.4). Concurrency, then LZ4; not SIMD, which is
+  1.15-1.27x of 1%.
+* `11:05` — `HFXetXorbUploader` (bounded in flight, first error wins, joins in its destructor, runs the
+  send inline when a thread will not start), `Authorize()` copying the token out under a mutex instead of
+  `CasUrl()` handing out a reference into state another thread refreshes, `ForWorkerThread()` dropping the
+  thread-affine opener like the read path does, and `hf_write_max_parallel_uploads` (default 3). p6 added
+  to the live suite: re-uploading a multi-xorb file at concurrency 1 must find every xorb `inserted =
+  false` and the shard `exists` - which is the same-content proof, obtainable for no new storage.
+* `11:20` — bumped to **0.0.2-pre4**; `scripts/run_all.sh --build` → 189 passed, 9 expected failures, 0
+  failed. To publish: pre4 goes out from CI's artifacts, which is the first time amd64 and windows
+  binaries exist at all.

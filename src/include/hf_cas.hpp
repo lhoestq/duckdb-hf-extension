@@ -5,6 +5,8 @@
 #include "hf_xet_shard.hpp"
 #include "hf_xet_xorb.hpp"
 
+#include <mutex>
+
 namespace duckdb {
 
 //! The namespace a xorb is stored under. xet-core keeps it in a config group (`default_prefix`) whose
@@ -22,6 +24,10 @@ namespace duckdb {
 //     the only place that says so. The url is never configured, only fetched.
 //   * It authenticates with its own short-lived token, and the Hub token must not be sent along with
 //     it - the same rule as presigned git-LFS uploads, for the same reason.
+//
+// A third thing, since a file's xorbs go out with several requests in flight: several threads share one
+// of these clients, so the token is read and refreshed under a lock, and a client handed to a worker
+// thread carries no FileOpener (ForWorkerThread below).
 //===----------------------------------------------------------------------===//
 
 //! Current unix time in seconds. Free, and injected rather than read inline, because a token's
@@ -51,9 +57,11 @@ public:
 	: db(db_p), opener(opener_p), connection(std::move(connection_p)), refresh_route(std::move(refresh_route_p)) {
 	}
 
-	//! The CAS base url, exchanging the Hub token for a CAS token on first use and again whenever the
-	//! one in hand is within half a minute of expiring.
-	const string &CasUrl();
+	//! The CAS base url and the token to use with it, exchanging the Hub token for a CAS token on first
+	//! use and again whenever the one in hand is within half a minute of expiring. Copied out rather than
+	//! handed back by reference: the uploads of one file run on several threads against this one client,
+	//! and any of them may be refreshing the token while another is still using it.
+	void Authorize(string &cas_url, string &access_token);
 
 	//! Store one xorb under its own hash. Returns false when the CAS answers `was_inserted: false` -
 	//! not a failure but a hit: those bytes are already content-addressed into the store, which is the
@@ -72,14 +80,27 @@ public:
 	//! the git-backed repo types (a bucket has no revision to name).
 	static string WriteTokenUrl(const HFTarget &target);
 
+	//! A client for the same repository and the same token, built to be shared by worker threads. It
+	//! drops the FileOpener, because a `ClientContext`-backed one reads settings through the client it
+	//! belongs to - which is also why the read path's parallel range fetches construct their per-thread
+	//! clients with no opener (FetchWindow in hf_read.cpp). Nothing about authentication changes: the CAS
+	//! token is exchanged with the already-resolved connection, and an opener was never part of it. What
+	//! does change is that transport parameters (retries, user agent, headers) come from DBConfig rather
+	//! than from this session's settings - for one POST per xorb, to a service that looks at none of
+	//! them, which is the same trade the read path makes.
+	unique_ptr<HFXetCasClient> ForWorkerThread() const;
+
 private:
-	void Refresh();
+	//! Refresh if the token in hand is within 30 seconds of expiring. Callers hold `token_lock`.
+	void EnsureValidLocked();
+	void RefreshLocked();
 
 	DatabaseInstance &db;
 	optional_ptr<FileOpener> opener;
 	HFConnection connection;
 	string refresh_route;
 	HFXetCasToken token;
+	mutable std::mutex token_lock;
 };
 
 //! One uploaded xorb, as reported by `hf_xet_upload`.

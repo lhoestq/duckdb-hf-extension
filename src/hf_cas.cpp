@@ -3,7 +3,13 @@
 #include "hf_http.hpp"
 #include "hf_xet_chunk.hpp"
 
+#include "duckdb/common/file_opener.hpp"
+
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 namespace duckdb {
 
@@ -26,7 +32,7 @@ string HFXetCasClient::WriteTokenUrl(const HFTarget &target) {
 	return route;
 }
 
-void HFXetCasClient::Refresh() {
+void HFXetCasClient::RefreshLocked() {
 	HFClient client(db, opener, connection, refresh_route);
 	// The Hub answers with the CAS url and a token scoped to this repo, in a body (`casUrl`, `exp`,
 	// `accessToken`) and again in X-Xet-* headers. The body is what xet-core parses, so that is what
@@ -62,25 +68,43 @@ void HFXetCasClient::Refresh() {
 	token = std::move(next);
 }
 
-const string &HFXetCasClient::CasUrl() {
+void HFXetCasClient::EnsureValidLocked() {
 	// 30 seconds of slack: an upload that starts with a token about to die is refused mid-flight,
 	// and a large xorb is a long time to be halfway through
 	if (!token.Valid() || token.ExpiresWithin(30)) {
-		Refresh();
+		RefreshLocked();
 	}
-	return token.cas_url;
+}
+
+void HFXetCasClient::Authorize(string &cas_url, string &access_token) {
+	std::lock_guard<std::mutex> guard(token_lock);
+	EnsureValidLocked();
+	// copied out, not returned by reference: the xorbs of one file are uploaded from several threads, and
+	// one of them can be refreshing the token while another is still building a header from it
+	cas_url = token.cas_url;
+	access_token = token.access_token;
+}
+
+unique_ptr<HFXetCasClient> HFXetCasClient::ForWorkerThread() const {
+	auto worker = make_uniq<HFXetCasClient>(db, nullptr, connection, refresh_route);
+	std::lock_guard<std::mutex> guard(token_lock);
+	// carry the exchange over rather than make the worker do it again: it happens on the thread that owns
+	// the opener, and a worker that later has to refresh will do it from the connection alone
+	worker->token = token;
+	return worker;
 }
 
 bool HFXetCasClient::UploadXorb(const HFXetXorb &xorb, const string &prefix) {
-	CasUrl();
+	string cas_url, access_token;
+	Authorize(cas_url, access_token);
 
 	// A xorb is addressed by the hash of its chunks, so the url is derived from the content and the
 	// upload is idempotent by construction: re-sending one is either a second insert of identical
 	// bytes (which the CAS refuses to do twice) or a bug in our writer.
-	auto url = HFUtil::Join(token.cas_url, "v1/xorbs/" + prefix + "/" + xorb.hash.Hex());
+	auto url = HFUtil::Join(cas_url, "v1/xorbs/" + prefix + "/" + xorb.hash.Hex());
 
 	HTTPHeaders headers;
-	headers.Insert("Authorization", "Bearer " + token.access_token);
+	headers.Insert("Authorization", "Bearer " + access_token);
 
 	HFClient client(db, opener, connection, url);
 	bool inserted = true;
@@ -105,11 +129,12 @@ bool HFXetCasClient::UploadXorb(const HFXetXorb &xorb, const string &prefix) {
 }
 
 void HFXetCasClient::UploadShard(const string &shard_bytes, string &shard_hash, string &result) {
-	CasUrl();
+	string cas_url, access_token;
+	Authorize(cas_url, access_token);
 
-	auto url = HFUtil::Join(token.cas_url, "v1/shards");
+	auto url = HFUtil::Join(cas_url, "v1/shards");
 	HTTPHeaders headers;
-	headers.Insert("Authorization", "Bearer " + token.access_token);
+	headers.Insert("Authorization", "Bearer " + access_token);
 
 	HFClient client(db, opener, connection, url);
 	auto response = client.RunWithRetry([&]() {
@@ -131,6 +156,139 @@ void HFXetCasClient::UploadShard(const string &shard_bytes, string &shard_hash, 
 	shard_hash = found ? HFJson::AsString(hash_raw) : "";
 }
 
+namespace {
+
+//! How many of a file's xorbs are on the wire at once.
+//!
+//! A Xet write spends about 0.15 s of CPU per 100 MB - scripts/xet_bench.sh measures chunking, hashing and
+//! serializing at ~690 MB/s - and tens of seconds waiting for the POSTs, one per xorb, to be accepted.
+//! A single https stream is what caps that, which is the wall the read path ran into too and why it fans a
+//! read window out over several requests (FetchWindow in hf_read.cpp). Overlapping xorbs is not just
+//! allowed but the point of content addressing: no xorb depends on any other, and the order they reach
+//! the CAS in is not observable. What *does* depend on all of them is the metadata shard, which is posted
+//! after Finish() below returns.
+//!
+//! The number in flight is bounded because a xorb waiting to go is up to 64 MiB of serialized bytes held
+//! in memory: Submit blocks while `max_in_flight` are already running, which is also the entire
+//! backpressure story - the thread reading and chunking the file cannot get more than that much data
+//! ahead of the network, so a 10 GB file costs the same memory as a 100 MB one.
+class HFXetXorbUploader {
+public:
+	HFXetXorbUploader(HFXetCasClient &cas_p, idx_t max_in_flight_p)
+	: cas(cas_p), max_in_flight(MaxValue<idx_t>(max_in_flight_p, 1)) {
+	}
+
+	//! Get a finished xorb onto the wire. `inserted` receives the CAS's answer whenever it lands: true
+	//! when it took the bytes, false when it already had them (a dedup hit, not a failure). It is
+	//! separately allocated because the caller's list of results grows afterwards, and a flag living in
+	//! that list would move out from under the thread writing it.
+	void Submit(HFXetXorb xorb, shared_ptr<std::atomic<bool>> inserted) {
+		auto payload = make_shared_ptr<HFXetXorb>(std::move(xorb));
+		{
+			std::unique_lock<std::mutex> guard(lock);
+			idle.wait(guard, [&] {
+				return running < max_in_flight || !failure.empty();
+			});
+			if (!failure.empty()) {
+				// something upstream already failed, and the shard that would name this xorb is never
+				// going to be posted: stop feeding rather than upload a file nobody will reference
+				return;
+			}
+			running++;
+		}
+		try {
+			workers.emplace_back([this, payload, inserted]() {
+				Send(*payload, *inserted);
+			});
+		} catch (std::exception &) {
+			// no thread available (a resource limit, or the last one failed to start): send it right here.
+			// Slower, correct, and the same fallback the read path takes in the same situation.
+			Send(*payload, *inserted);
+			GuardedFinishOne();
+		}
+	}
+
+	//! Wait for everything submitted, then report the first failure any of them had.
+	void Finish() {
+		Join();
+		std::lock_guard<std::mutex> guard(lock);
+		if (!failure.empty()) {
+			throw IOException("Xet upload failed: %s", failure);
+		}
+	}
+
+	//! The producer can throw mid-file - a read error, an out of memory - and a worker holding a
+	//! reference to this uploader has to be gone before it dies. Whatever that worker thought is not the
+	//! interesting failure: the caller is already reporting something better.
+	~HFXetXorbUploader() {
+		try {
+			Join();
+		} catch (...) {
+		}
+	}
+
+private:
+	void Send(const HFXetXorb &xorb, std::atomic<bool> &inserted) {
+		string error;
+		try {
+			inserted = cas.UploadXorb(xorb);
+		} catch (std::exception &ex) {
+			error = string(ex.what());
+		}
+		std::lock_guard<std::mutex> guard(lock);
+		if (!error.empty() && failure.empty()) {
+			// the first failure is the one a user sees, which is fair: they are the same request failing
+			failure = error;
+		}
+		running--;
+		idle.notify_all();
+	}
+
+	//! the accounting Send does, for a send that ran on the submitting thread instead of a worker
+	void GuardedFinishOne() {
+		std::lock_guard<std::mutex> guard(lock);
+		running--;
+		idle.notify_all();
+	}
+
+	//! Only ever called by the submitting thread, which is also the only thread that pushes into
+	//! `workers` - so the vector itself needs no lock, only the counters above do.
+	void Join() {
+		for (auto &worker : workers) {
+			if (worker.joinable()) {
+				worker.join();
+			}
+		}
+		workers.clear();
+	}
+
+	HFXetCasClient &cas;
+	idx_t max_in_flight;
+	std::mutex lock;
+	std::condition_variable idle;
+	idx_t running = 0;
+	string failure;
+	std::vector<std::thread> workers;
+};
+
+idx_t ParallelUploads(optional_ptr<FileOpener> opener, const string &path) {
+	if (opener) {
+		Value value;
+		FileOpenerInfo info;
+		info.file_path = path;
+		if (FileOpener::TryGetCurrentSetting(opener, Identifier("hf_write_max_parallel_uploads"), value, info) &&
+		    !value.IsNull()) {
+			auto configured = value.GetValue<idx_t>();
+			if (configured > 0) {
+				return configured;
+			}
+		}
+	}
+	return HF_DEFAULT_WRITE_MAX_PARALLEL;
+}
+
+} // namespace
+
 HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, optional_ptr<FileOpener> opener,
                                          const HFTarget &target, const string &path, const string *sha256_hex) {
 	HFXetUploadResult result;
@@ -138,6 +296,15 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 	// The token route is per repository, so the file being uploaded has to live in one - which is also
 	// the honest scope: a CAS token lets you write content for one repo, not for any file you can read.
 	HFXetCasClient cas(db, opener, target.connection, HFXetCasClient::WriteTokenUrl(target));
+
+	// Exchange the token here, on the thread that owns the opener, before handing a client to the
+	// uploaders below: a FileOpener is thread-affine, so those clients run without one.
+	{
+		string cas_url, access_token;
+		cas.Authorize(cas_url, access_token);
+	}
+	auto worker_cas = cas.ForWorkerThread();
+	HFXetXorbUploader uploader(*worker_cas, ParallelUploads(opener, path));
 
 	// no opener passed: in practice `fs` is the context's OpenerFileSystem, which supplies the opener
 	// itself and refuses a caller-provided one. `opener` is still what the token exchange below reads
@@ -160,6 +327,9 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 	vector<HFXetHashNode> file_chunks;
 	vector<HFXetShardXorb> shard_xorbs;
 	vector<HFXetShardSegment> segments;
+	// one flag per xorb, in the same order as `result.xorbs`: a worker writes its own, and a shared_ptr
+	// keeps it at a stable address while that vector grows
+	vector<shared_ptr<std::atomic<bool>>> insert_flags;
 
 	auto flush_xorb = [&](bool force) {
 		// A xorb is closed when it is full, and only at a chunk boundary otherwise: the 64 MiB and
@@ -170,8 +340,19 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 		}
 		auto uncompressed = builder.UncompressedBytes();
 		auto xorb = builder.Finish();
-		auto inserted = cas.UploadXorb(xorb);
-		result.xorbs.push_back({xorb.hash, xorb.chunks.size(), xorb.bytes.size(), uncompressed, inserted});
+
+		// Everything the shard will say about this xorb is written down *here*, in file order, while the
+		// bytes themselves wait for a free stream: the CAS's answer (`inserted`) is the only fact an
+		// upload comes back with, and it is collected from the flags below once every POST has landed.
+		HFXetXorbUpload uploaded;
+		uploaded.hash = xorb.hash;
+		uploaded.num_chunks = xorb.chunks.size();
+		uploaded.bytes = xorb.bytes.size();
+		uploaded.uncompressed_bytes = uncompressed;
+		uploaded.inserted = false;
+		result.xorbs.push_back(uploaded);
+		auto inserted = make_shared_ptr<std::atomic<bool>>(false);
+		insert_flags.push_back(inserted);
 
 		HFXetShardXorb shard_xorb;
 		shard_xorb.hash = xorb.hash;
@@ -205,6 +386,10 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 		segment.file_chunk_end = uint32_t(file_chunks.size());
 		segments.push_back(segment);
 		shard_xorbs.push_back(std::move(shard_xorb));
+
+		// only now is the xorb handed over - Submit takes it, and the bookkeeping above is the last thing
+		// that reads it here
+		uploader.Submit(std::move(xorb), inserted);
 	};
 
 	while (offset < file_size) {
@@ -228,6 +413,13 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 		builder.AddChunk(data, len);
 	});
 	flush_xorb(true);
+
+	// Nothing names this file to the CAS until every one of its xorbs has landed: the shard below is
+	// resolved against them, and a shard for content still on the wire would be refused.
+	uploader.Finish();
+	for (idx_t i = 0; i < result.xorbs.size(); i++) {
+		result.xorbs[i].inserted = insert_flags[i]->load();
+	}
 
 	// The file's own hash is a keyed hash of its merkle root, un-salted: an upload session has no
 	// reason to pick a salt, and a salt would make the same content hash differently per upload.
