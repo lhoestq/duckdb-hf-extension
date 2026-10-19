@@ -5,41 +5,38 @@ story is `README.md`, the per-release story is `CHANGELOG.md`, the protocol stor
 long form of every decision — the failed attempts and the measurements behind it — is in `git log` bodies.
 This file only holds what is true right now and what to do next.
 
-## Position — 2026-10-19, ~19:05 UTC
+## Position — 2026-10-19, ~22:05 UTC
 
-**0.0.2-pre7 is published, live, for all eight DuckDB client platforms.** **0.0.2-pre8 (M9, cross-repository
-dedup) is committed and tagged, and its release run cannot start** — Actions is currently failing this repo's
-jobs before they reach a runner, see *The release is blocked on Actions, not on code* below.
-
-Tag `v0.0.2-pre8` is at `bcbe681`. Dispatch **on the tag**, `gh workflow run "Build extension" --ref refs/tags/v0.0.2-pre8`,
-and not on `main`: the footer version is `git describe` at the built commit, so a dispatch on `main` (now ahead of
-the tag by the diagnostic-workflow commit) would stamp `v0.0.2-pre8-1-g45c6090` and every client would refuse the
-binary. That is the lagging-tag trap wearing a cap — the tag does not have to lag HEAD to fall into it, it only has
-to differ from what was built.
-
-* **The release is blocked on Actions, not on code.** Since ~18:20 UTC jobs in this repo conclude `failure` in
-  3–6 seconds with `steps: 0`, no runner name, and no log blob (`BlobNotFound`). A build error compiles and
-  writes a log; a test error has steps; neither description fits. The evidence, in order: run `39299553138`
-  built all eight platforms green and lost only the reference-checks job that way; run `39304739130` lost even
-  `Generate matrix`; and `.github/workflows/diagnostic.yml` — two steps, `uname -a`, `ubuntu-24.04` — failed the
-  same way in 5 s (`39305064645`). Nothing in a repo can make `uname` fail to reach a machine, so this is
-  account-level (an Actions spending limit is the likely one: a private repo, every job compiles DuckDB) or
-  GitHub-side. The annotations and check-suites endpoints 404 with this token, so the reason string is not
-  readable from here — read it in the Actions UI.
-  **Before dispatching another matrix run, dispatch `389744541` (`gh workflow run 389744541`) and wait for it to
-  go green.** It costs seconds; a matrix run costs ~25 minutes of metered runner time and fails the same way.
-* What is *done* for pre8, so a resume does not redo it: `HF_EXTENSION_VERSION` = `0.0.2-pre8` and the
-  `smoke_write.sql` assertion with it; suites re-run green on a fresh build; `scripts/xet_oracle.py` fixed so MSVC
-  can compile the generated vectors again; `reduced_ci_mode` actually forwarded on a dispatch; tag created and
-  pushed. What is *not* done: any artifact published, `README.md`'s release line verified live, CHANGELOG heading
-  renamed from *Unreleased* — all three wait for a green run off the tag.
+**0.0.2-pre8 is published, live, for all eight DuckDB client platforms.** It is M9 (cross-repository dedup) plus
+the MSVC generated-file fix and the `reduced_ci_mode` fix, built by CI run `39325221245` — dispatched **on the tag
+ref**, `gh workflow run "Build extension" --ref refs/tags/v0.0.2-pre8`, which is the only way to get the footer to
+say `v0.0.2-pre8`: HEAD is docs ahead of `bcbe681`, and a dispatch there would have stamped
+`v0.0.2-pre8-1-g45c6090`, which every client refuses. The tag does not have to lag HEAD to fall into the
+lagging-tag trap; it only has to differ from what was built.
 
 * Live at `https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main/` (signed) and
-  `…/resolve/main/unsigned/`, from CI run `39153506221`, for `v2.0.0-alpha47600`: `linux_amd64`,
-  `linux_arm64`, `linux_amd64_musl`, `linux_arm64_musl`, `osx_amd64`, `osx_arm64`, `windows_amd64`,
-  `windows_amd64_mingw`. Sixteen served binaries byte-compared against CI's; `INSTALL`/`LOAD` verified over
-  https here. **Everything not `linux_arm64` is verified by byte comparison only** — this machine cannot
-  execute it, and a footer plus a sha256 is not a load test.
+  `…/resolve/main/unsigned/`, for `v2.0.0-alpha47600`: `linux_amd64`, `linux_arm64`, `linux_amd64_musl`,
+  `linux_arm64_musl`, `osx_amd64`, `osx_arm64`, `windows_amd64`, `windows_amd64_mingw`. **33 served files** —
+  8 platforms × plain and gzipped, both trees, plus the signed tree's `.well-known` key — fetched over https and
+  sha256-compared against CI's artifacts, and each served extension's footer checked against the directory it is
+  served from. That is `scripts/verify_published.py`, new this release, and it is now the step between publish and
+  "live": what it replaces was a one-off list of urls I had remembered to check, not a walk of the served tree.
+* Verified over https three ways with `scripts/test_install.py`: the key-pinned repository form (which asserts the
+  pinned fingerprint is ours), the README's `INSTALL hf FROM '<prefix>'`, and `unsigned/` — each followed by a real
+  `hf_ls`. The binary a client installs today reports `hf_version = 0.0.2-pre8` and 1090/1090 selftest. CI's own
+  `reference checks on the built artifact (linux_amd64)` job ran on this run and said the same 1090.
+  **Everything not `linux_arm64` is verified by byte comparison and footer only** — this machine cannot execute it,
+  and a footer plus a sha256 is not a load test.
+* **The release was blocked on Actions for ~3 hours, and the cause was billing, not this repo.** Jobs concluded
+  `failure` in 3–6 s with `steps: 0`, no runner, `BlobNotFound` logs — including the two-step diagnostic
+  (`39305064645`). Fixing the account's billing info cleared it: the diagnostic went green (`39318023750`) and the
+  release run worked first try. Keep `389744541` for exactly this question; it costs seconds and a matrix run costs
+  ~25 minutes of metered time, which on this account is real money.
+* One job of `39318175256` (the first pre8 dispatch) hung: `linux_arm64` sat `in_progress` for 50 minutes where the
+  same build takes 6½, and the second wave of matrix jobs was never created because it waits on the linux jobs.
+  Cancelling and re-dispatching the tag fixed it — run `39325221245` was green in 24 minutes. A hung job is
+  cancelled with `gh api -X POST repos/<owner>/<repo>/actions/runs/<run>/cancel`; `gh run cancel <run> --yes` is a
+  usage error, there is no `--yes`.
 * Suites **212 passed / 13 expected failures / 0 failed** (xet 12, xet_upload 42, read 55, write 57, models 24,
   buckets 22); `hf_xet_selftest()` **1090 checks / 0 failed** — 471 dedup-eligibility rows, 64 HMAC rows, the shard
   rows, 8 rows over the keyed stored-shard fixture in the shard reader plus 12 in the dedup matcher, and one
@@ -70,22 +67,26 @@ to differ from what was built.
 
 ## Next, in order
 
-1. **Release 0.0.2-pre8.** First `gh workflow run 389744541` (the diagnostic) until it is green; then
-   `gh workflow run "Build extension" --ref refs/tags/v0.0.2-pre8`, and once it is green:
+1. **`0.0.2-pre9`, whenever the next milestone lands.** The sequence, now executed once end to end: bump
+   `HF_EXTENSION_VERSION` and the `smoke_write.sql` assertion together, commit, annotate the tag, push both, then
+   `gh workflow run "Build extension" --ref refs/tags/<tag>` (dispatch on the tag, never on HEAD). Once green —
    `RUN=<run> DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" scripts/make_extension_repo_from_ci.sh dist/repo-signed`,
    the same tree unsigned into `dist/repo`, then
-   `HF_REPO=lhoestq/duckdb-hf-extension scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo`.
-   Then byte-compare all sixteen served binaries and re-do the https `INSTALL`/`LOAD` check pre7 got, rename the
-   CHANGELOG's *Unreleased* heading to `0.0.2-pre8`, and note the run id in STATE. The check job that runs
-   `scripts/ci_selftest.sh` may still refuse to schedule; the equivalent check by hand is to download the
-   `linux_arm64` artifact (the one platform this machine executes) and `LOAD` it into the venv duckdb.
-   Nothing in M9 changes a byte for an upload that runs with `hf_xet_upload_dedup = false`, which is a claim worth
-   re-testing on a pre-release rather than asserting.
-2. **Shard-driven read prefetch** — walk a shard's chunk table instead of one range request per window; this
+   `HF_REPO=lhoestq/duckdb-hf-extension scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo`,
+   then `scripts/verify_published.py` with the same two arguments, then `scripts/test_install.py` on both urls.
+   A hung job gets cancelled through the API and the tag re-dispatched.
+2. **A live A/B for the dedup flag.** What is covered today: with `hf_xet_upload_dedup = false` the *offline*
+   byte-identity vectors still pass (that is how `docs/XET.md` describes the suite, and the oracle generator has no
+   dedup path, so it is a real no-dedup baseline), and live the flag is covered only by counters
+   (`assert_nothing_was_pointed_at`, `assert_dedup_was_asked`). What is not covered: one run uploading the *same*
+   file twice, flag on then off, comparing what each reads back. A deduplicated shard is deliberately a different
+   shard, so the assertion is about the bytes at the end of a read, not the bytes written — which is exactly the
+   promise a user of the flag relies on.
+3. **Shard-driven read prefetch** — walk a shard's chunk table instead of one range request per window; this
    is the fix for the `read_blob`-of-a-big-file gap that is still behind httpfs.
-3. Optional: decide whether CI should `strip` the mingw artifact (73 MB unstripped vs 31 MB for the MSVC
+4. Optional: decide whether CI should `strip` the mingw artifact (73 MB unstripped vs 31 MB for the MSVC
    build), and add macOS install notes if anyone ever reports from one.
-4. Failure-path coverage only where a safe test seam exists — see the *Limitations* note in the README about
+5. Failure-path coverage only where a safe test seam exists — see the *Limitations* note in the README about
    why the CAS-failure and LFS-fallback branches are uncovered by choice.
 
 ## Environment
@@ -167,7 +168,16 @@ scripts/ci_selftest.sh build/release/extension/hf/hf.duckdb_extension   # what C
 * **A CI job that fails with `steps: 0`, no runner and no log blob is not a build failure.** Nothing in a commit can
   make a job never reach a machine; `gh workflow run 389744541` (`.github/workflows/diagnostic.yml`, two steps,
   seconds to run) says whether Actions can schedule anything, and until it goes green a 25-minute matrix run is not
-  the experiment to run.
+  the experiment to run. This one was billing; it is fixed, and the runner-side symptom disappears the moment the
+  account can pay a runner again.
+* **The matrix runs in waves, and a wave that has not been created yet is not a failure.** The four linux jobs are
+  scheduled immediately; `osx_*` and `windows_*` appear only when the linux wave is done (`needs:`, and the second
+  wave waits on the first even with `reduced_ci_mode: disabled`). So a `jobs` list of five, forty minutes into an
+  eleven-job run, means a *hung job in wave one* — check `started_at` against history (linux ≈ 7–9 min, the second
+  wave ≈ 7 min) rather than concluding the scheduler is broken again.
+* **`gh run cancel` has no `--yes`.** It prints a usage line and changes nothing; the non-interactive way is
+  `gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/cancel`. Confirm with the run's `status`, not with the
+  exit code of the command you thought cancelled it.
 
 ## Rules
 

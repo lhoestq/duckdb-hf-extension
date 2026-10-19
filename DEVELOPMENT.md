@@ -101,11 +101,17 @@ Three rules the scripts enforce, each because breaking it once failed silently:
   from a repository created with the key pinned *and* keyless.
 
 ```bash
-RUN=39153506221 DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" \
+RUN=<ci-run-id> DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" \
   scripts/make_extension_repo_from_ci.sh dist/repo-signed
-RUN=39153506221 scripts/make_extension_repo_from_ci.sh dist/repo        # same tree, unsigned
+RUN=<ci-run-id> scripts/make_extension_repo_from_ci.sh dist/repo         # same tree, unsigned
 HF_REPO=lhoestq/duckdb-hf-extension scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo
+HF_REPO=lhoestq/duckdb-hf-extension scripts/verify_published.py   dist/repo-signed --unsigned-tree dist/repo
 ```
+
+The last line is the one that cannot be skipped: it re-fetches every file the publish uploaded, from the url a
+client will use, and fails unless the sha256 matches the tree it was built from *and* each served binary's footer
+names the directory it is served from. Its arguments are the publish script's arguments on purpose — a release
+cannot be verified against a different tree than it was published from by accident.
 
 Clients then say `INSTALL hf FROM '<prefix>'; LOAD hf;`. Use `FROM '<prefix>'` rather than
 `SET custom_extension_repository`, which redirects *every* install — including the `httpfs` this extension
@@ -117,12 +123,22 @@ needs as its https transport — to your own tree.
 ```bash
 git commit -am ...; git tag -a v0.0.2-pre8 -m "..."; git push origin main
 git push origin refs/tags/v0.0.2-pre8       # `git push --follow-tags` silently skips a lightweight tag
-gh workflow run build.yml --ref main        # all eight architectures; push builds only three cheap ones
+gh workflow run "Build extension" --ref refs/tags/v0.0.2-pre8
 ```
 
-A push to `main` is not what builds a release tree (`build.yml` has no `tags:` trigger), and the dispatch
-needs the tag already naming the commit being built: the footer's version is `git describe` at HEAD, so a
-lagging tag ships a sha (`v0.0.2-pre7-2-g2d3f242` is the same problem wearing a different hat).
+A push to `main` is not what builds a release tree (`build.yml` has no `tags:` trigger), and the dispatch has to
+build the commit the tag names: the footer's version is `git describe` at the built commit, so a dispatch on a
+`main` that has moved past the tag stamps `v0.0.2-pre8-1-g45c6090` and every client refuses the binary. That is the
+lagging-tag trap wearing a different hat — the tag does not have to be behind, it only has to *differ* from what was
+built. Dispatching the tag ref removes the whole class: the run's `headBranch` is the tag and its `headSha` is the
+tagged commit, which is what `gh run list` is there to confirm before anyone waits 25 minutes.
+
+If a job hangs instead of failing — `in_progress` far past the ~7 minutes that build takes, with the matrix's second
+wave never created because it waits on the first — cancel through the API (`gh api -X POST
+repos/lhoestq/duckdb-hf-extension/actions/runs/<run>/cancel`; `gh run cancel` has no `--yes`) and re-dispatch the
+tag. If *every* job dies in seconds with `steps: 0` and no log, that is not this repo: `gh workflow run 389744541`
+(`.github/workflows/diagnostic.yml`, two steps) answers whether Actions can schedule a runner at all, in seconds
+instead of a metered matrix run's ~25 minutes.
 
 
 ## Layout
@@ -141,9 +157,11 @@ scripts/              try.py run_all.sh check.sh ci_selftest.sh bench.py delete_
                       smoke_{read,write,models,buckets,xet,xet_upload}.{sh,sql}
                       xet_oracle.py (--check = xet-core drift) xet_bench.sh  ext_footer.py
                       cas_dedup_probe.py (is this chunk indexed?) dedup_measure.py (what dedup saves)
-                      make_extension_repo{,_from_ci}.sh publish_extension_repo.py test_install.py
+                      make_extension_repo{,_from_ci}.sh publish_extension_repo.py
+                      test_install.py (installs a tree or a url) verify_published.py (served bytes == CI's)
 tools/xet_probe       Rust probe over xet-core — the oracle (cargo, --release)
 .github/workflows/build.yml   DuckDB's reusable distribution workflow, for the platform matrix
+.github/workflows/diagnostic.yml  two steps: can Actions schedule a runner at all
 ```
 
 The long form of any claim in these files — the failed attempts, the measurements behind a decision, the bug

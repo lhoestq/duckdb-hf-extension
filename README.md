@@ -17,9 +17,9 @@ Hub's commit API (`preupload` → git-LFS or Xet → ndjson commit) — the same
 uses. Targets **DuckDB 2.0** (`v2.0.0-alpha…`, *Cyanoptera*), including the Python pre-release
 (`pip install duckdb --pre --upgrade`).
 
-Current release: **0.0.2-pre7**, built for `v2.0.0-alpha47600` on all eight DuckDB client platforms. HEAD is
-**0.0.2-pre8** (cross-repository dedup), tagged and waiting on a CI run — `INSTALL hf` still gets pre7 until that
-publishes.
+Current release: **0.0.2-pre8**, built for `v2.0.0-alpha47600` on all eight DuckDB client platforms — cross-repository
+dedup (`COPY TO` an upload can point at content another repository already stored: 0 bytes and 1.4 s to re-upload
+237 MB you already have). HEAD may carry fixes beyond it.
 Suites: 212 passed / 13 expected failures / 0 failed, plus 1090 offline reference checks. Release notes in
 [CHANGELOG.md](CHANGELOG.md); the Xet protocol port and its measurements in [docs/XET.md](docs/XET.md).
 

@@ -5,7 +5,17 @@ Two independent version numbers: **this project's** (what the extension can do, 
 one DuckDB identifier, so a release is one binary per identifier per platform, and rebuilding for a newer
 pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
 
-## Unreleased — cross-repository dedup (M9): an upload can now point at content it did not store
+## 0.0.2-pre8 — cross-repository dedup (M9): an upload can now point at content it did not store
+
+Published from CI run `39325221245` to `lhoestq/duckdb-hf-extension` for `v2.0.0-alpha47600`:
+`linux_amd64`, `linux_arm64`, `linux_amd64_musl`, `linux_arm64_musl`, `osx_amd64`, `osx_arm64`,
+`windows_amd64`, `windows_amd64_mingw` — signed at the root, unsigned under `unsigned/`. **Thirty-three served
+files** — eight platforms × plain and gzipped, both trees, plus the signed tree's `.well-known` key — re-downloaded
+and confirmed byte-identical to CI's bytes, every served extension's footer checked against the directory serving
+it, and `INSTALL`/`LOAD` verified over https in all three client forms (key-pinned repository, plain
+`INSTALL hf FROM '<prefix>'`, and `unsigned/`). That is `scripts/verify_published.py`, new here: pre7's comparison
+was ad hoc and had no view of the served tree, only of files I had remembered to list. The architectures that
+cannot run on this machine are covered by that byte comparison and nothing else.
 
 `hf_xet_upload()` asks the CAS whether it already holds each sampled chunk, and for the chunks it does, writes a
 pointer instead of the bytes. `SET hf_xet_upload_dedup = false` turns the asking off; it is on by default, and the
@@ -68,6 +78,27 @@ result columns report the file rather than the xorb, so they repeat on every row
 * **Correcting pre7's entry**: it claimed a dispatch passes `reduced_ci_mode: 'disabled'`. Nothing passed it —
   `build.yml` had the sentence in a comment and no such line, so every dispatch through pre7 ran with `fail-fast`
   on. The input is forwarded from the same event test as `opt_in_archs` as of this release.
+* **Version constant and the `scripts/smoke_write.sql` assertion move to `0.0.2-pre8`; suites are unchanged at 212
+  passed / 13 expected failures / 0 failed, with `hf_xet_selftest()` at 1090.** The need for the bump is the
+  lesson: the first pre8 dispatch's artifact loaded here answered `hf_version` `0.0.2-pre7` while its footer said
+  `v0.0.2-pre8`. The footer comes from `git describe` at the built commit and decides whether a client accepts the
+  binary; `hf_version` is a constant only a release commit moves. Artifacts from a run before the bump are not
+  that release's artifacts, whatever their footers claim.
+* **The release run could not start for three hours, and nothing in this repo was wrong.** Jobs concluded `failure`
+  in 3–6 s with `steps: 0`, no runner name and no log blob (`BlobNotFound`) — including
+  `.github/workflows/diagnostic.yml`, two steps added to answer precisely "can Actions schedule a runner at all"
+  and kept because it answers it in seconds. The cause was the account's billing. After that was fixed the
+  diagnostic went green (`39318023750`) and the release run worked on the first try.
+* **Dispatch a release on its tag**: `gh workflow run "Build extension" --ref refs/tags/v0.0.2-pre8`. HEAD carries
+  commits after the tag, and `git describe` there stamps `v0.0.2-pre8-1-g45c6090` into every footer — the
+  lagging-tag trap, with the tag and the build merely differing rather than one lagging the other.
+* **A job can hang rather than fail.** `linux_arm64` sat `in_progress` for 50 minutes where that build takes 6½, and
+  the matrix's second wave (`osx_*`, `windows_*`) was never created because it waits on the linux jobs — a five-job
+  list forty minutes in is a hung job in wave one, not a scheduler that is broken again. Cancelled through the API
+  (`gh run cancel` has no `--yes`, it just prints a usage line) and re-dispatched: green in 24 minutes.
+  `verify_published.py` found its own first false red on the way — it stat'ed a temp file before closing it and
+  reported the 499-byte key file as 0 bytes, a truncated upload that was never one. A check is code, and code gets
+  tested or lies.
 
 ## 0.0.2-pre7 — every architecture DuckDB has a runner for
 
