@@ -36,10 +36,11 @@ constexpr idx_t HF_XET_SHARD_HEADER_SIZE = 48;
 //! metadata extension is a single trailing entry carrying the file's sha256.
 constexpr uint32_t HF_XET_FILE_FLAG_WITH_VERIFICATION = 0x80000000u;
 constexpr uint32_t HF_XET_FILE_FLAG_WITH_METADATA_EXT = 0x40000000u;
-//! XorbChunkSequenceEntry.flags, set on a chunk that starts a file. Advisory, and cheap to honour:
-//! the CAS uses it to populate a cross-repository dedup table - measured, not assumed, and this flag is
-//! the *only* chunk of ours that table ever answers for, because a reference client also flags chunks whose
-//! hash is 0 mod 1024 and this writer does not (docs/XET.md, the M9 section).
+//! XorbChunkSequenceEntry.flags. The CAS reads it as "this chunk is in the cross-repository dedup index",
+//! which the reference sets two ways: on the chunk that starts a file, and on every chunk whose hash
+//! samples as eligible (HFXetGlobalDedupEligible). Naming it after the first case only is how this
+//! port stayed at identical-files-only dedup for a milestone: the flag field's name described one of its
+//! two causes, and the other one went unimplemented.
 constexpr uint32_t HF_XET_CHUNK_FLAG_GLOBAL_DEDUP = 0x80000000u;
 //! every entry in both sections is exactly this many bytes
 constexpr idx_t HF_XET_SHARD_ENTRY_SIZE = 48;
@@ -54,6 +55,10 @@ constexpr idx_t HF_XET_SHARD_ENTRY_SIZE = 48;
 //!    segment's verification hash is computed over. The shard does not store them.
 struct HFXetShardSegment {
 	HFXetHash xorb_hash;
+	//! XorbFileEntry.flags of the xorb this segment points into, carried per segment as the format
+	//! insists. Zero for anything this writer produces itself; a dedup pointer has to carry whatever the
+	//! xorb it borrowed actually has, because the CAS checks the segment against the stored xorb.
+	uint32_t xorb_flags = 0;
 	uint32_t unpacked_bytes = 0;
 	uint32_t chunk_index_start = 0;
 	uint32_t chunk_index_end = 0;
@@ -123,6 +128,74 @@ public:
 private:
 	vector<HFXetShardFile> files;
 	vector<HFXetShardXorb> xorbs;
+};
+
+//===----------------------------------------------------------------------===//
+// Reading a shard
+//===----------------------------------------------------------------------===//
+//
+// The CAS answers a dedup query with a shard's bytes - the same object it was given at upload, plus the
+// 56-byte footer it was stripped of (measured: 576 -> 632 and 9744 -> 9800 bytes). So reading is not a
+// curiosity; it is what makes another upload's shard into something this upload can point into. The
+// writer above cannot be reused for this: sections come back in hash order, and the xorb entries are the
+// lookup table a reader needs, keyed by hash rather than by position.
+
+//! A chunk entry as stored. `global_dedup` is read, never set - and note it does not mean "starts a
+//! file" here, only that the CAS indexed the chunk for cross-repository queries.
+struct HFXetShardChunkView {
+	HFXetHash hash;
+	uint32_t byte_range_start = 0;
+	uint32_t unpacked_bytes = 0;
+	uint32_t flags = 0;
+
+	bool GlobalDedup() const {
+		// Both causes of eligibility, which is the reference's own predicate (`is_global_dedup_eligible`):
+		// the stored bit marks the chunk that starts a file, and one hash in 1024 is eligible without any
+		// bit being set, because that rule is recomputed here rather than written into the shard. A reader
+		// that looks only at the flag still works - it just never finds the sampled share of what a CAS
+		// index can serve, and nothing about that failure is visible.
+		return (flags & HF_XET_CHUNK_FLAG_GLOBAL_DEDUP) != 0 || HFXetGlobalDedupEligible(hash);
+	}
+};
+
+//! One xorb and every chunk it carries, in xorb order (which is ascending byte_range_start).
+struct HFXetShardXorbView {
+	HFXetHash hash;
+	uint32_t flags = 0;
+	vector<HFXetShardChunkView> chunks;
+};
+
+//! One file entry. Segments address xorbs by hash, and their `file_chunk_start/end` are recovered by
+//! accumulating segment lengths in order - the format stores xorb-local indices and lets the tiling
+//! imply the file-wide positions.
+struct HFXetShardFileView {
+	HFXetHash file_hash;
+	uint32_t flags = 0;
+	vector<HFXetShardSegment> segments;
+	//! one per segment, the range hash over that segment's slice of the file's chunks
+	vector<HFXetHash> verification;
+	bool has_sha256 = false;
+	uint8_t sha256[32] = {0};
+
+	bool WithVerification() const {
+		return (flags & HF_XET_FILE_FLAG_WITH_VERIFICATION) != 0;
+	}
+	//! A parsed shard cannot know the file's chunk hashes - the shard never stored them, only the
+	//! per-segment range hashes - so anything that needs the full list (a file hash, say) has to
+	//! reassemble it from the xorbs the segments point into.
+};
+
+struct HFXetShardView {
+	vector<HFXetShardFileView> files;
+	vector<HFXetShardXorbView> xorbs;
+
+	//! Parse the bytes a session uploads, optionally with the footer and lookup tables a *stored* shard
+	//! carries (which is what a CAS query response looks like). Throws IOException on anything that is
+	//! not a shard, is truncated, or has counts that do not fit - the input came over the network.
+	static HFXetShardView Parse(const string &bytes);
+
+	//! The xorb a segment names, or nullptr. Linear: a shard carries a handful of xorbs.
+	const HFXetShardXorbView *FindXorb(const HFXetHash &hash) const;
 };
 
 //===----------------------------------------------------------------------===//

@@ -46,6 +46,7 @@ struct HFXetHash {
 	//! True when this hash triggers a natural cut in the mean tree (word 3 % branching factor).
 	bool IsNaturalCut() const;
 
+
 	bool operator==(const HFXetHash &other) const {
 		for (idx_t i = 0; i < 32; i++) {
 			if (bytes[i] != other.bytes[i]) {
@@ -58,6 +59,17 @@ struct HFXetHash {
 		return !(*this == other);
 	}
 };
+
+//! The CAS keeps a cross-repository dedup index over a *sample* of chunk hashes: a chunk is findable
+//! by a later, unrelated upload when its hash reduces to zero modulo this, or when an uploader flags
+//! it explicitly (HF_XET_CHUNK_FLAG_GLOBAL_DEDUP). Both halves are the reference's own -
+//! `hash_is_global_dedup_eligible`, and `Rem<u64> for DataHash = self[3].to_le() % rhs` - but which
+//! word that reduction reads, and in what byte order, is not something to interpret: a wrong word
+//! still yields a 1-in-1024 sample, just of the wrong chunks, and nothing downstream ever notices.
+//! So the answer is replayed from xet-core (HFXetDedupVectors: 100 000 candidate hashes through
+//! `xet-probe dedup`, all of them agreeing with this function) rather than re-derived from Rust text.
+constexpr uint64_t HF_XET_GLOBAL_DEDUP_MODULUS = 1024;
+bool HFXetGlobalDedupEligible(const HFXetHash &hash);
 
 //! One node of the merkle tree: a chunk hash (or an interior hash) plus the size it covers.
 struct HFXetHashNode {
@@ -165,6 +177,14 @@ struct HFXetTreeVector {
 const vector<HFXetHashVector> &HFXetHashVectors();
 const vector<HFXetInternalHashVector> &HFXetInternalHashVectors();
 const vector<HFXetRenderingVector> &HFXetRenderingVectors();
+
+//! (a hash as the reference prints it, whether xet-core calls it dedup eligible)
+struct HFXetDedupVector {
+	const char *hash;
+	bool eligible;
+};
+
+const vector<HFXetDedupVector> &HFXetDedupVectors();
 const vector<HFXetTreeVector> &HFXetTreeVectors();
 
 //! Reproduce a vector's input bytes.

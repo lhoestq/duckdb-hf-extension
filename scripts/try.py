@@ -13,12 +13,22 @@ A statement that is expected to fail is written as
 which is how the suites assert that a refusal happens *and* says the right thing. The exit code is 1 as
 soon as one statement behaves other than advertised.
 """
+import os
 import sys
+import time
 import duckdb
 
 EXT = "/home/quentin/hf/hf-duckdb-extension/dist/hf.duckdb_extension"
 if len(sys.argv) > 1:
     EXT = sys.argv[1]
+
+# Say which bytes are under test before anything else. A suite that grades an artifact built yesterday reads
+# exactly like one that graded this morning's change, and `smoke_*.sh` load dist/, which is only refreshed by
+# run_all.sh or a deliberate copy - so "all green" here has once meant "the previous release still works".
+stat = os.stat(EXT)
+print(f"-- testing {EXT}\n--   {stat.st_size} bytes, modified "
+      f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_mtime))}",
+      flush=True)
 
 con = duckdb.connect(config={"allow_unsigned_extensions": True})
 con.execute(f"LOAD '{EXT}'")

@@ -27,7 +27,7 @@ use xet_core_structures::metadata_shard::xorb_structs::{
 };
 use std::fs::File;
 use std::ops::Deref;
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, Cursor, Read, Seek, SeekFrom, Write};
 use xet_core_structures::merklehash::{
     compute_data_hash, compute_internal_node_hash, file_hash, xorb_hash, DataHash, MerkleHash,
 };
@@ -59,6 +59,36 @@ fn report(hash: &MerkleHash) {
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "data".to_string());
+    // Which chunks does the CAS's cross-repository dedup index hold? `hash_is_global_dedup_eligible`
+    // reduces a DataHash modulo MDB_SHARD_GLOBAL_DEDUP_CHUNK_MODULUS, and *which word* it reduces - and
+    // in which byte order - is exactly the kind of thing that reads fine and computes wrong. So the C++
+    // does not interpret the reference here; it replays these answers as compiled-in vectors, the same
+    // way the M1 hash vectors pin the keyed BLAKE3 chain. Reads one hex hash per line from stdin.
+    //
+    //   dedup   < hexes   -> "<hex> <0|1>"       the eligibility answer itself
+    //   words   < hexes   -> "<hex> w0 w1 w2 w3"  how the hex string maps to the four words
+    if mode == "dedup" || mode == "words" {
+        use xet_core_structures::metadata_shard::hash_is_global_dedup_eligible;
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            let line = line.expect("probe dedup/words: stdin").trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            let hash = DataHash::from_hex(&line).unwrap_or_else(|e| panic!("probe {mode}: '{line}': {e}"));
+            if mode == "dedup" {
+                println!("{line} {}", hash_is_global_dedup_eligible(&hash) as u8);
+            } else {
+                let words: [u64; 4] = (*hash).into();
+                println!(
+                    "{line} {} {} {} {} {}",
+                    words[0], words[1], words[2], words[3],
+                    words[3].to_le() % *xet_core_structures::metadata_shard::MDB_SHARD_GLOBAL_DEDUP_CHUNK_MODULUS
+                );
+            }
+        }
+        return;
+    }
     if mode == "pattern" {
         let mut bytes = [0u8; 32];
         for (i, b) in bytes.iter_mut().enumerate() {
@@ -79,6 +109,21 @@ fn main() {
     }
     let mut data = Vec::new();
     std::io::stdin().read_to_end(&mut data).unwrap();
+    if mode == "chunks" {
+        // Every chunk of a file, as the reference chunker and hasher see it: "<index> <size> <hex>".
+        // scripts/cas_dedup_probe.py reads this to ask the CAS what it can already serve, and the
+        // reference is used here on purpose: an answer about the CAS must not depend on our own chunker
+        // being right, or a wrong chunker would still make the experiment look like success.
+        let mut chunker = xet_data::deduplication::Chunker::new(64 * 1024);
+        let mut chunks = chunker.next_block(&data, false);
+        if let Some(last) = chunker.finish() {
+            chunks.push(last);
+        }
+        for (i, c) in chunks.iter().enumerate() {
+            println!("{} {} {}", i, c.data.len(), c.hash.hex());
+        }
+        return;
+    }
     if mode == "xorb" {
         // The reference xorb, from the reference chunker and the reference writer, for the same bytes the
         // C++ writer will be given. Byte-exactness is the whole test here: a xorb the hub accepts is not

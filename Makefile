@@ -22,6 +22,21 @@ else
 CI_TOOLS_DIR := ./extension-ci-tools
 endif
 
+# The DuckDB version this extension is built *for*. It has to be stated out loud: the loader compares a
+# version string baked into the artifact with its own, and the alpha tags are not published upstream, so a
+# checkout of the right commit cannot describe itself as that release (the CI-side of the same argument, plus
+# its workaround, is in .github/workflows/build.yml). Left unset when CI provides its own pin - CI is the one
+# that knows which duckdb it built with, and an env var here would outrank its OVERRIDE_GIT_DESCRIBE.
+#
+# Without it a local build produces an artifact stamped with the duckdb commit sha, which the pre-release
+# duckdb refuses to load - and the failure is silent in the wrong direction: `make` succeeds.
+ifeq ($(origin DUCKDB_VERSION),undefined)
+ifeq ($(origin OVERRIDE_GIT_DESCRIBE),undefined)
+DUCKDB_VERSION = v2.0.0-alpha47600
+export DUCKDB_VERSION
+endif
+endif
+
 # Only the extension itself is built; test deps are pulled in ad hoc
 BUILD_EXTENSION_TEST_DEPS ?= none
 

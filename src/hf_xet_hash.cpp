@@ -148,6 +148,13 @@ bool HFXetHash::IsNaturalCut() const {
 	return Word(3) % MEAN_TREE_BRANCHING_FACTOR == 0;
 }
 
+bool HFXetGlobalDedupEligible(const HFXetHash &hash) {
+	// The same word the mean tree reads for a natural cut, at the reference's dedup sampling rate. That
+	// this word is the one the CAS indexes by - and not merely *a* word, which would still produce a
+	// plausible 1-in-1024 sample - is what HFXetDedupVectors exists to prove.
+	return hash.Word(3) % HF_XET_GLOBAL_DEDUP_MODULUS == 0;
+}
+
 string HFXetHash::Hex() const {
 	static const char *HEX_DIGITS = "0123456789abcdef";
 	string out;
@@ -322,6 +329,23 @@ idx_t HFXetHashSelfTest(vector<std::tuple<string, bool, string, string>> &result
 		check(string(test.name) + " base64 is unpadded", "false",
 		      HFXetHash::FromHex(test.hex).Base64().find('=') != string::npos ? "true" : "false");
 	}
+
+	// Which chunks the CAS's cross-repository dedup index answers for. The rule is a modulus over one
+	// 64-bit word of the hash, so every wrong version of it - wrong word, wrong byte order, wrong
+	// modulus - still produces *a* 1-in-1024 sample, of chunks the CAS has never heard of. Nothing on
+	// the upload path can detect that; only the reference's own answers can, which is why these vectors
+	// exist and why they are checked before anything that uses them.
+	idx_t dedup_positives = 0;
+	for (auto &test : HFXetDedupVectors()) {
+		check(string("dedup eligible ") + test.hash, test.eligible ? "true" : "false",
+		      HFXetGlobalDedupEligible(HFXetHash::FromHex(test.hash)) ? "true" : "false");
+		dedup_positives += test.eligible ? 1 : 0;
+	}
+	// a vectors file that had silently lost its positives would prove nothing, and 100 000 candidates
+	// at 1/1024 is far too many positives to survive a rule change unnoticed
+	check("dedup vectors hold both classes", "true",
+	      (dedup_positives >= 16 && dedup_positives * 3 < idx_t(HFXetDedupVectors().size())) ? "true"
+	                                                                                         : "false");
 
 	for (auto &test : HFXetInternalHashVectors()) {
 		check(string(test.name) + " internal hash", test.hash,

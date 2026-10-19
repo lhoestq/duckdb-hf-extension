@@ -242,6 +242,49 @@ def build_renderings():
     return [("bytes 0x00..0x1f", fields["plain_hex"], fields["hex"], fields["base64"])]
 
 
+def build_dedup_vectors():
+    """Which chunks the CAS's cross-repository dedup index is expected to hold.
+
+    `hash_is_global_dedup_eligible` reduces a DataHash modulo 1024, and the word and byte order that
+    reduction picks is precisely the sort of detail that reads correctly and computes wrongly - a wrong
+    word still yields a 1-in-1024 sample, just of the wrong chunks, so nothing downstream notices. So
+    the C++ does not decide this from the Rust text: it replays the reference's own answers.
+
+    The hashes are generated, not digests of anything - eligibility is a pure function of the hash
+    value - and they come from a fixed seed, so the same 100 000 candidates go to the probe every run
+    and the same rows land in the vector file.
+    """
+    probe = os.path.join(ROOT, "tools", "xet_probe", "target", "release", "xet-probe")
+    state = 0x9E3779B97F4A7C15
+    mask = (1 << 64) - 1
+    hexes = []
+    for _ in range(100000):
+        words = []
+        for _ in range(4):
+            state = (state * 6364136223846793005 + 1442695040888963407) & mask
+            z = state
+            z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & mask
+            z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & mask
+            z ^= z >> 31
+            words.append(z)
+        hexes.append("".join("%016x" % w for w in words))
+    out = subprocess.run([probe, "dedup"], input=("\n".join(hexes) + "\n").encode(),
+                         check=True, capture_output=True).stdout.decode()
+    answers = [(line.split()[0], line.split()[1] == "1") for line in out.splitlines() if line.strip()]
+    eligible = [h for h, e in answers if e]
+    if not eligible:
+        raise SystemExit("no hash in 100 000 was dedup-eligible - the probe's answer, or the modulus, changed")
+    rows = [(h, True) for h in eligible]
+    # a handful of ineligible ones per eligible one: a rule that flagged everything would otherwise
+    # pass a vectors file made only of positives
+    step = max(1, (len(answers) - len(eligible)) // (4 * len(eligible)))
+    ineligible = [h for h, e in answers if not e][::step][: 4 * len(eligible)]
+    rows += [(h, False) for h in ineligible]
+    rows.sort()
+    return rows
+
+
+
 def build_tree_vectors():
     """xet-core's own saved (chunk list -> xorb hash, file hash) table from its correctness test."""
     source = open(os.path.join(XET_CORE, "xet_core_structures", "src", "merklehash",
@@ -279,6 +322,7 @@ def main():
     internal = build_internal()
     renderings = build_renderings()
     trees = build_tree_vectors()
+    dedup = build_dedup_vectors()
     shards = build_shards()
 
     out = []
@@ -288,6 +332,10 @@ def main():
     add("// no longer match what the reference implementation produces.")
     add('#include "hf_xet_hash.hpp"')
     add('#include "hf_xet_xorb.hpp"')
+    # named, not inherited: MSVC does not hand out uint64_t through the duckdb headers, and this file is
+    # generated - an include added to the output by hand would vanish on the next regeneration (which is
+    # exactly what happened once, in `39706a5`, and only the MSVC build would have noticed)
+    add("#include <cstdint>")
     add("")
     add("namespace duckdb {")
     add("")
@@ -339,7 +387,16 @@ def main():
     add("\treturn vectors;")
     add("}")
     add("")
+    add("const vector<HFXetDedupVector> &HFXetDedupVectors() {")
+    add("\tstatic const vector<HFXetDedupVector> vectors = {")
+    for hex_hash, eligible in dedup:
+        add("\t\t{\"%s\", %s}," % (hex_hash, "true" if eligible else "false"))
+    add("\t};")
+    add("\treturn vectors;")
+    add("}")
+    add("")
     for index, (name, chunks, cas_hash, salt_hex, file_hash) in enumerate(trees):
+
         add("static const char *const HF_XET_TREE_%d_HASHES[] = {" % index)
         for hex_hash, _ in chunks:
             add("\t\"%s\"," % hex_hash)
@@ -406,8 +463,8 @@ def main():
     with open(OUT_SHARD, "w") as f:
         f.write(shard_text)
     print("wrote src/hf_xet_vectors.cpp: %d input vectors, %d xorb vectors, %d tree vectors, "
-          "%d internal, %d rendering"
-          % (len(inputs), len(xorbs), len(trees), len(internal), len(renderings)))
+          "%d internal, %d rendering, %d dedup"
+          % (len(inputs), len(xorbs), len(trees), len(internal), len(renderings), len(dedup)))
     print("wrote src/hf_xet_shard_vectors.cpp: %d shard vectors" % len(shards))
     return 0
 
