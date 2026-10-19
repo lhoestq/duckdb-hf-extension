@@ -75,11 +75,14 @@ jobs:
       # excluded, and the run is green anyway.
       exclude_archs: "windows_arm64;wasm_mvp;wasm_eh;wasm_threads${{ github.event_name != 'workflow_dispatch' && ';linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64' || '' }}"
       # opt_in_archs is conditional for the same billing reason, and because a run that builds all eight is
-      # a release run rather than a push. `reduced_ci_mode: 'disabled'` on a dispatch goes with it: that is
-      # what switches off fail-fast, which the first pre7 release run used to cancel two healthy builds
+      # a release run rather than a push. `reduced_ci_mode` below is set by the same test: on a dispatch it
+      # switches off fail-fast, which the first pre7 release run used to cancel two healthy builds
       # (osx_amd64, windows_amd64_mingw) after an unrelated architecture failed to compile. Whether the run
-      # is green is allow_failure_archs' job, not fail-fast's.
+      # is green is allow_failure_archs' job, not fail-fast's. (This line existed only as a comment for four
+      # releases: the input was never forwarded, so the dispatch that produced pre7 still ran with fail-fast
+      # on. A workflow comment describing an input nobody passes is a wish, not a configuration.)
       opt_in_archs: ${{ github.event_name == 'workflow_dispatch' && 'linux_amd64_musl;linux_arm64_musl;osx_amd64;windows_amd64' || '' }}
+      reduced_ci_mode: ${{ github.event_name == 'workflow_dispatch' && 'disabled' || 'auto' }}
       allow_failure_archs: "linux_amd64_musl;linux_arm64_musl;windows_amd64"
       skip_tests: false
 
