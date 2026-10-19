@@ -59,7 +59,7 @@ CREATE OR REPLACE EXTENSION REPOSITORY hf_repo
 The registration is written to `~/.duckdb/extension_repositories/hf_repo.json`, so later sessions find it.
 No public key to paste: DuckDB reads it from the repository's
 `.well-known/duckdb-extension-repo.json` (a prefix without that file cannot be registered at all, and a
-binary modified after signing is refused at `INSTALL` — both verified, see *Distributing*). Add
+binary modified after signing is refused at `INSTALL` — both verified, *Distributing* in DEVELOPMENT.md). Add
 `USING PUBLIC KEY '<base64 DER>'` if you would rather pin the key yourself than take it from the same
 response.
 
@@ -193,151 +193,15 @@ as a plain git blob has no hash to point at, so it comes back `skipped: …` rat
 Writes never delete the previous content: rewriting a path publishes the new file hash, and the chunks the
 old version used stay in the CAS — which is what content addressable storage is for.
 
-## Reading performance
+## Where the rest is
 
-The Hub's CDN costs roughly **0.3 s of latency per range request** regardless of size (1 MB range ≈ 2 MB/s,
-full GET ≈ 72 MB/s), so reading a large file is a matter of issuing few, large, *shared* requests:
-
-* a **per-file cache** keyed by resolved url, shared by every handle and thread — DuckDB reads one file with
-  several concurrent tasks, and unshared each of them re-downloads the same bytes;
-* **fetches on a fixed grid** of `hf_read_buffer_size` blocks: a window doubles on a miss but only by adding
-  whole blocks, and is trimmed at the first already-cached boundary, so two windows of one file are always
-  disjoint or nested — a strided scan costs one request per block and never re-downloads a byte;
-* a read straddling a window edge is served from both; a window another thread is downloading is **waited
-  for, not re-requested**; a missing window is pulled into up to `hf_read_max_parallel_requests` parallel
-  range requests (one connection pulls ~15 MB/s) inside the read that needed it — no background threads, no
-  bytes nobody asked for;
-* caches **outlive the handle** under the process-wide budget (LRU; entries being read are left alone), and a
-  commit invalidates exactly the repository it changed. The cache is **in-memory only**; DuckDB keeps a cache
-  of its own *above* every filesystem (`enable_external_file_cache`, on by default).
-
-Measured on a 287 MB parquet file
-(`hf://datasets/open-thoughts/OpenThoughts3-1.2M/data/train-00017-of-00120.parquet`), this extension
-against `httpfs` on the same URL, same conditions:
-
-| query | `hf` | `httpfs` |
-| --- | --- | --- |
-| full scan (`count(*), sum(len(...))`) | **4.5 s** | 5.4 s |
-| whole file through `read_blob` | 6.0 s | 4.3 s |
-| footer only (`parquet_metadata`) | 0.7 s | 0.7 s |
-| small file (1.2 MB) | 0.9 s | 0.8 s |
-
-The full scan fetches 287 412 556 bytes for a 287 412 556 byte file — **exactly 1.000×** — and every
-setting combination measured (64 KiB to 8 MiB windows, fan-out on and off) fetched the file once and no
-more. `read_blob` of a whole file is the pattern still behind httpfs: one cursor reads strictly in order,
-so each window is fetched when its turn comes rather than ahead of it; raising `hf_read_buffer_size` shrinks
-the stalls, and true read-ahead across windows is the remaining gap (*Limitations*).
-
-```bash
-scripts/bench.py hf|httpfs <url> <sql> [settings]   # prints timing + hf_read_stats()
-```
-
-## Testing
-
-The suites run against the **live Hub** — they write to scratch repositories and clean up, so they need a
-write-capable token (`~/.cache/huggingface/token` or `HF_TOKEN`).
-
-```bash
-scripts/run_all.sh --build     # build once, then every suite
-bash scripts/smoke_read.sh     # or one suite on its own; each .sh makes and removes its own fixtures
-```
-
-```
-xet         12 passed,  3 expected failures   # offline: 367 reference checks, no token needed
-xet_upload  30 passed,  1 expected failures   # against the production CAS
-read        55 passed,  0 expected failures
-write       57 passed,  6 expected failures
-models      24 passed,  0 expected failures
-buckets     22 passed,  2 expected failures
-```
-
-`xet_upload` is the suite that cannot pass on a wrong byte: the CAS re-hashes every xorb and re-derives the
-verification hash of every shard segment it is sent — which is how a shard that indexed chunks by file
-position instead of xorb position was caught.
-
-`scripts/try.py` executes one statement per line-group and grades it: a column named `assert*` must be
-`TRUE`, and a `-- expect-fail: <substring>` comment above a statement means it must raise with that
-substring — so a refusal that stops refusing starts failing. Scratch state: `lhoestq/playground` is kept and
-reused; `hf-smoke-staging` and `hf-ext-write-probe` are created per run and removed by
-`scripts/delete_repo.sh`.
-
-The offline checks exist three times because the CI matrix can run neither of the first two: a sqllogictest
-opening with `require hf` is only satisfiable by extensions on DuckDB's compiled-in autoload list, so the
-matrix's test step *skips* `test/sql/hf_selftest.test` — and a skipped file counts as a pass. So
-`scripts/ci_selftest.sh` runs them against **the built artifact**, loaded into the `duckdb` shell that
-artifact ships in its own `test-support.tar.gz`, comparing numbers instead of trusting a verdict.
-
-## Building
-
-```bash
-# duckdb + extension-ci-tools are either checked out beside this Makefile (./duckdb, ./extension-ci-tools,
-# as in CI) or vendored one level up in ../vendor
-. .venv/bin/activate                      # the version to build against comes from the running duckdb
-make release OVERRIDE_GIT_DESCRIBE="$(python -c 'import duckdb;print(duckdb.sql("PRAGMA version").fetchall()[0][0])')"
-# -> build/release/extension/hf/hf.duckdb_extension (copied to dist/)
-```
-
-A locally built extension is unsigned, so loading it needs the flag:
-
-```python
-con = duckdb.connect(config={"allow_unsigned_extensions": True})
-con.execute("LOAD '/path/to/hf.duckdb_extension'")
-```
-
-`scripts/check.sh` is a compile-only syntax check of every source file.
-
-## Distributing
-
-A repository is a static file tree, `<prefix>/<duckdb_version>/<platform>/hf.duckdb_extension[.gz]` — any
-web server, `file://` directory, or Hub repo. `scripts/make_extension_repo.sh` assembles one from a build;
-`scripts/make_extension_repo_from_ci.sh` assembles one from a CI run's artifacts (how the published tree is
-made, since one machine cannot build eight architectures); `scripts/publish_extension_repo.py` uploads a
-tree to a Hub dataset and prints the client recipes.
-
-Three rules the scripts enforce, each because breaking it once failed silently:
-
-* **A directory must equal the footer of what it serves.** `scripts/ext_footer.py` reads the footer as the
-  structure DuckDB's `append_metadata.cmake` defines, `make_extension_repo.sh` refuses a
-  `DUCKDB_VERSION`/`DUCKDB_PLATFORM` that disagrees with the binary, and the publish script checks every
-  binary against its directory before touching the remote. (An earlier version read the version with
-  `strings | grep '^v[0-9]'`; in a mingw artifact the first match is `v0.1H`, which filed a 73 MB binary
-  where no client would ever look — green run, happy script.)
-* **The version identifier must match the running DuckDB** or `LOAD` refuses the binary. For a released
-  DuckDB, build against its tag. For a dev pre-release the identifier is generated by DuckDB's release CI and
-  tagged nowhere upstream, while extension-ci-tools exports `DUCKDB_VERSION` into the build (the Makefile
-  prefers it over `OVERRIDE_GIT_DESCRIBE`, and `duckdb_tag` does not help — nothing downstream reads the tag
-  it creates). CI therefore clones <https://github.com/lhoestq/duckdb>, a one-commit mirror whose tree equals
-  upstream's for the target sha and which *carries the tag*; a released DuckDB retires both inputs.
-* **Signing is what makes `INSTALL` safe.** `make_extension_repo.sh` signs when
-  `DUCKDB_EXTENSION_SIGNING_PK` is set (RSA-2048 over a two-level sha256, in the binary's last 256 bytes) and
-  publishes the key at `<prefix>/.well-known/duckdb-extension-repo.json`. `scripts/test_install.py` verifies a
-  tree or a url end to end — install, load, a real query, throwaway home — and on the signed run flips a byte
-  in *every* platform directory and both file forms (DuckDB sniffs gzip), demanding a fresh process refuse it
-  from a repository created with the key pinned *and* keyless.
-
-```bash
-RUN=39153506221 DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" \
-  scripts/make_extension_repo_from_ci.sh dist/repo-signed
-RUN=39153506221 scripts/make_extension_repo_from_ci.sh dist/repo        # same tree, unsigned
-HF_REPO=lhoestq/duckdb-hf-extension scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo
-```
-
-Clients then say `INSTALL hf FROM '<prefix>'; LOAD hf;`. Use `FROM '<prefix>'` rather than
-`SET custom_extension_repository`, which redirects *every* install — including the `httpfs` this extension
-needs as its https transport — to your own tree.
-
-**Cutting a release:** bump `HF_EXTENSION_VERSION` in `src/include/hf_common.hpp` and the assertion in
-`scripts/smoke_write.sql` together, then
-
-```bash
-git commit -am ...; git tag -a v0.0.2-pre8 -m "..."; git push origin main
-git push origin refs/tags/v0.0.2-pre8       # `git push --follow-tags` silently skips a lightweight tag
-gh workflow run build.yml --ref main        # all eight architectures; push builds only three cheap ones
-```
-
-A push to `main` is not what builds a release tree (`build.yml` has no `tags:` trigger), and the dispatch
-needs the tag already naming the commit being built: the footer's version is `git describe` at HEAD, so a
-lagging tag ships a sha (`v0.0.2-pre7-2-g2d3f242` is the same problem wearing a different hat).
+| file | what it answers |
+| --- | --- |
+| [BENCHMARKS.md](BENCHMARKS.md) | what reading costs, measured against httpfs, and how to re-measure |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | the test suites, building from source, publishing an extension repository, source layout |
+| [docs/XET.md](docs/XET.md) | the Xet protocol port: hash chain, formats, upload, verification, M9 |
+| [CHANGELOG.md](CHANGELOG.md) | what each release changed |
+| [STATE.md](STATE.md) | working handover: current position, next steps, constraints |
 
 ## Limitations
 
@@ -365,7 +229,7 @@ lagging tag ships a sha (`v0.0.2-pre7-2-g2d3f242` is the same problem wearing a 
   per process, so a file another client rewrote keeps serving stale bytes until eviction; writes from *this*
   process invalidate immediately. All cache state is guarded because DuckDB hands one handle to several
   concurrent tasks — an unguarded `std::string` cache corrupted itself into a `SIGSEGV`.
-* Sequential whole-file reads (`read_blob` of a big file) are behind httpfs — see *Reading performance*.
+* Sequential whole-file reads (`read_blob` of a big file) are behind httpfs — see `BENCHMARKS.md`.
 * Listings come from `/api/{type}/{repo}/tree/...` with `Link` pagination; a folder entry that stops resolving
   mid-glob is treated as empty rather than failing the query. Creating a Space needs an sdk, so create-on-write
   sends `sdk = static` and infers nothing else (private, named after the url).
@@ -375,25 +239,7 @@ lagging tag ships a sha (`v0.0.2-pre7-2-g2d3f242` is the same problem wearing a 
 * `hf_xet_write`'s fallback cannot be *made* to fail from SQL, so that branch is covered by reading and by the
   explicit `hf_xet_write = false` route; a test-only seam in the upload path seemed worse than the gap.
 
-## Layout
 
-```
-src/hf_url            hf:// parsing, resolve/tree urls        src/hf_secrets   secret type, settings, env, token file
-src/hf_crypto         self-contained sha256/base64/JSON       src/hf_http      HTTPUtil: auth, retries, errors
-src/hf_fs             FileSystem: dispatch, list, glob, rm    src/hf_read      the per-file window cache
-src/hf_commit         preupload -> lfs batch -> commit        src/hf_write     temp buffering, upload on Close
-src/hf_xet_hash       keyed BLAKE3 + mean tree (M1)           src/hf_xet_chunk gear-hash chunking (M2)
-src/hf_xet_xorb       xorb + footer + LZ4 (M3, M8)            src/hf_xet_shard metadata shard (M5)
-src/hf_cas            token exchange, uploads, dedup (M4,M7)  src/hf_functions the hf_* table functions
-test/sql/hf_selftest.test   the offline checks as a sqllogictest (see Testing)
-scripts/              try.py run_all.sh check.sh ci_selftest.sh bench.py delete_repo.sh
-                      smoke_{read,write,models,buckets,xet,xet_upload}.{sh,sql}
-                      xet_oracle.py (--check = xet-core drift) xet_bench.sh  ext_footer.py
-                      make_extension_repo{,_from_ci}.sh publish_extension_repo.py test_install.py
-tools/xet_probe       Rust probe over xet-core — the oracle (cargo, --release)
-.github/workflows/build.yml   DuckDB's reusable distribution workflow, for the platform matrix
-```
-
-The long form of any claim in this file — the failed attempts, the measurements behind a decision, the bug
-each caveat came from — is in `git log`, whose commit bodies carry ~9 000 words of it, and in the
-CHANGELOG's per-release entries.
+The long form of any claim in these files — the failed attempts, the measurements behind a decision,
+the bug each caveat came from — is in `git log`, whose commit bodies carry ~9 000 words of it, and in
+the CHANGELOG's per-release entries.

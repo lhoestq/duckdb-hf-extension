@@ -6,7 +6,7 @@
 #   DUCKDB_EXTENSION_SIGNING_PK="$(cat key.pem)" scripts/make_extension_repo.sh   # signed + metadata
 #
 # The resulting directory is a plain static file tree, so any web server (or an HF dataset/bucket,
-# see README "Distributing") works as the repository:
+# see DEVELOPMENT.md "Distributing") works as the repository:
 #
 #   <prefix>/<duckdb_version>/<platform>/hf.duckdb_extension.gz
 #   <prefix>/.well-known/duckdb-extension-repo.json        (only when signing)
@@ -88,7 +88,7 @@ if [[ -n "${DUCKDB_EXTENSION_SIGNING_PK:-}" ]]; then
 else
   rm -f "$PUBKEY_FILE"
   echo "note: built UNSIGNED - clients need allow_unsigned_extensions=true (set"
-  echo "      DUCKDB_EXTENSION_SIGNING_PK to sign, see README's Distributing section)"
+  echo "      DUCKDB_EXTENSION_SIGNING_PK to sign, see DEVELOPMENT.md's Distributing section)"
 fi
 
 # DuckDB 2.0 sniffs gzip instead of trusting a .gz suffix, so ship both forms: file:// consumers
