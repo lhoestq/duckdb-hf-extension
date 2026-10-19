@@ -59,6 +59,15 @@ result columns report the file rather than the xorb, so they repeat on every row
   reported 1053 chunks pointed in the column case — that was the *previous run's* widened file, same generator, same
   prefix, deleted from the bucket and still in the CAS. A dedup benchmark over deterministic fixtures measures reuse
   of your own last run, so the added column in `dedup_measure.py` carries per-run noise.
+* **`windows_amd64` broke on generated output, and only there.** `cl.exe` refuses a zero-length array (`error
+  C2466`) where gcc and clang accept it, so the two count-0 tree vectors' empty leaf-hash arrays failed the MSVC
+  build while linux, both musl cross-builds, macOS and mingw were green. `v0.0.2-pre7` had carried a placeholder
+  string in exactly those spots — typed into the generated file by hand, never into `xet_oracle.py`, so this
+  release's regeneration deleted it and `--check` called the result up to date. The generator emits the placeholder
+  now and refuses outright to write a file declaring an empty array.
+* **Correcting pre7's entry**: it claimed a dispatch passes `reduced_ci_mode: 'disabled'`. Nothing passed it —
+  `build.yml` had the sentence in a comment and no such line, so every dispatch through pre7 ran with `fail-fast`
+  on. The input is forwarded from the same event test as `opt_in_archs` as of this release.
 
 ## 0.0.2-pre7 — every architecture DuckDB has a runner for
 

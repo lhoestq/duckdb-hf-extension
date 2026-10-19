@@ -13,7 +13,7 @@ struct FileOpenerInfo;
 //! Default endpoint. Overridable through the `hf_endpoint` setting, the `HF_ENDPOINT` env var or a secret.
 //! the release of this extension itself, reported by hf_status() and named in CHANGELOG.md - independent of
 //! the DuckDB version identifier the binary is built for, which has to match the running DuckDB exactly
-static constexpr const char *HF_EXTENSION_VERSION = "0.0.2-pre7";
+static constexpr const char *HF_EXTENSION_VERSION = "0.0.2-pre8";
 
 static constexpr const char *HF_DEFAULT_ENDPOINT = "https://huggingface.co";
 

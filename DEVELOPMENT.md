@@ -57,6 +57,19 @@ con.execute("LOAD '/path/to/hf.duckdb_extension'")
 
 `scripts/check.sh` is a compile-only syntax check of every source file.
 
+### Generated files, and the toolchain that checks them
+
+`src/hf_xet_vectors.cpp` and `src/hf_xet_shard_vectors.cpp` are output of `scripts/xet_oracle.py`, which
+replays `../xet-core` and fails (`--check`) when the port's stored vectors drift from the reference.
+Two rules follow from how that file has broken twice:
+
+* Nothing in a generated file is fixed by editing it. A hand-typed workaround is a pending failure: the
+  next regeneration deletes it, and `--check` then reports the file as up to date, because it is.
+* gcc and clang accept constructs ISO C++ does not, and `windows_amd64` is built with `cl.exe`, which
+  does not. A zero-length array compiles here, on linux and under mingw, and stops MSVC with `error
+  C2466`. So portability checks that only run locally are not portability checks; the generator now
+  refuses to write an empty array (and once did catch it: it names the same two lines cl.exe did).
+
 
 ## Distributing
 

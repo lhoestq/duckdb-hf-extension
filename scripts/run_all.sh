@@ -23,6 +23,14 @@ if [ "${1:-}" = "--build" ]; then
   fi
   cp build/release/extension/hf/hf.duckdb_extension dist/hf.duckdb_extension
 fi
+# The suites load dist/, so dist/ must never be older than the build tree. Without this the suites can
+# report a result that belongs to a binary nobody built: a release bump changes one string, a build
+# forgets to copy, and `assert_version` fails against last week's artifact.
+built=build/release/extension/hf/hf.duckdb_extension
+if [ -f "$built" ] && [ "$built" -nt dist/hf.duckdb_extension ]; then
+  echo "dist/ is older than the build tree, copying $built"
+  cp "$built" dist/hf.duckdb_extension
+fi
 ls -l dist/hf.duckdb_extension | awk '{print "extension:", $5, "bytes"}'
 
 run() { # name, command...

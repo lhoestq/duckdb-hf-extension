@@ -17,7 +17,7 @@ Hub's commit API (`preupload` → git-LFS or Xet → ndjson commit) — the same
 uses. Targets **DuckDB 2.0** (`v2.0.0-alpha…`, *Cyanoptera*), including the Python pre-release
 (`pip install duckdb --pre --upgrade`).
 
-Current release: **0.0.2-pre7**, built for `v2.0.0-alpha47600` on all eight DuckDB client platforms.
+Current release: **0.0.2-pre8**, built for `v2.0.0-alpha47600` on all eight DuckDB client platforms.
 Suites: 212 passed / 13 expected failures / 0 failed, plus 1090 offline reference checks. Release notes in
 [CHANGELOG.md](CHANGELOG.md); the Xet protocol port and its measurements in [docs/XET.md](docs/XET.md).
 
