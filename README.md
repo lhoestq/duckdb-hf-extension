@@ -210,13 +210,14 @@ old version used stay in the CAS — which is what content addressable storage i
   needs the file on disk to chunk it), and upload + commit — or the Xet publish — happen on `Close()`. One
   commit per file, serialized per repository in a process; concurrent writers rely on the Hub's conflict
   detection. A Xet upload is per file, per statement, so a partitioned write publishes one file at a time.
-* **Dedup finds an identical file cheaply and a *similar* file rarely.** An upload queries the CAS for its first
-  chunk and for chunks whose hash clears the format's 1-in-1024 rule, at most one query per 256 chunks; everything
-  those queries return is pointed at rather than re-sent. Re-uploading the same bytes — including into a different
-  repository — costs one small shard and nothing else (measured live, p7 in `scripts/smoke_xet_upload.sql`). A file
-  with an inserted byte in the middle keeps every chunk boundary ahead of the change and is found by the sample
-  alone: expect ~1 shared chunk in 1024, which is what the reference client has too, not a shortfall of this port.
-  The reference's defragment heuristics are deliberately not ported — every match is taken, which costs segments.
+* **Dedup is strong on content that repeats and weak on content that is merely similar.** An upload queries the CAS
+  for its first chunk and for chunks whose hash clears the format's 1-in-1024 rule, at most one query per 256
+  chunks, and points at what comes back instead of re-sending it. Measured (`scripts/dedup_measure.py`, 237 MB):
+  an identical re-upload costs **0 bytes and 1.4 s instead of 235 MB and 21.5 s**; appending 20 000 lines to a file
+  costs **0.2 MB**; adding a column to every row dedups **nothing** (0 of 6889 chunks), because a per-line change
+  moves every boundary after it and content-defined chunking has nothing to anchor on. Inserting bytes mid-file keeps
+  the prefix and loses the rest. Asking is not the cost: seven queries and no hit changed the wire time per MB by
+  less than the run-to-run noise.
 * `hf_write_max_parallel_uploads` is a fixed client-side policy, not the reference client's adaptive limiter,
   and it applies per file: a `COPY` of ten files does not get thirty streams. The in-flight cap is also the
   memory cap.

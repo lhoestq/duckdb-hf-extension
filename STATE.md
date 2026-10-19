@@ -19,7 +19,8 @@ version is `git describe` at HEAD and a lagging tag ships a commit sha.
   execute it, and a footer plus a sha256 is not a load test.
 * Suites **212 passed / 13 expected failures / 0 failed** (xet 12, xet_upload 42, read 55, write 57, models 24,
   buckets 22); `hf_xet_selftest()` **1090 checks / 0 failed** — 471 dedup-eligibility rows, 64 HMAC rows, the shard
-  rows, 24 rows over the keyed stored-shard fixture, and one non-vacuous `sampled-eligible chunks` row
+  rows, 8 rows over the keyed stored-shard fixture in the shard reader plus 12 in the dedup matcher, and one
+  non-vacuous `sampled-eligible chunks` row
   (`splitmix64 n=4000000 seed=11`, 1 of 1) which is what keeps the persisted chunk flag file-start-only. The expected
   count lives in `test/sql/hf_selftest.test`; `scripts/ci_selftest.sh` reads it from there, so a check that silently
   disappears is a failed run rather than a quieter green one.
@@ -27,6 +28,10 @@ version is `git describe` at HEAD and a lagging tag ships a commit sha.
   then the same bytes published from a bucket repo — one row, no xorbs, `deduped_chunks > 0`, shard of pointers, and
   `read_blob` over `hf://` returns identical bytes. p8: the same file with two rows appended — partial dedup, the
   uploaded `uncompressed_bytes` strictly below the file size, mixed shard reads back byte-identical.
+* **M9 is measured** (`scripts/dedup_measure.py 300`, table in `docs/XET.md`): a 237 MB re-upload of identical
+  bytes costs **0 bytes and 1.4 s** against the baseline's **235 MB and 21.5 s**; appending 20 000 lines costs
+  **0.2 MB**; adding a per-row column dedups **0 of 6889 chunks**. One answered query is not one chunk but a whole
+  file's shard — two answers named all four xorbs of the 237 MB file.
 * **The reason it took two attempts: stored shard chunk hashes are keyed, xorb hashes are not.** A CAS dedup answer
   is another client's shard — footer 200 bytes, `chunk_hash_hmac_key` at offset 72 of it, file section a lone
   bookend, all three lookup tables empty — and every chunk hash inside it is `keyed_hash(footer_key, hash)`. The
@@ -46,14 +51,11 @@ version is `git describe` at HEAD and a lagging tag ships a commit sha.
    `reduced_ci_mode: 'disabled'`, publish from the run, and re-do the byte-compare plus https `INSTALL`/`LOAD`
    verification pre7 got. Nothing in M9 changes a byte for an upload that runs with `hf_xet_upload_dedup = false`,
    which is a claim worth re-testing on a pre-release rather than asserting.
-2. **Measure what dedup saves on the copy case**: a dataset copied with one extra column, xorb bytes and wall clock
-   with `hf_xet_upload_dedup` on and off. The 1-in-1024 sample is thin by construction; the number to know is how
-   thin, and whether segment count rather than xorb count is what a big partitioned rewrite pays for.
-3. **Shard-driven read prefetch** — walk a shard's chunk table instead of one range request per window; this
+2. **Shard-driven read prefetch** — walk a shard's chunk table instead of one range request per window; this
    is the fix for the `read_blob`-of-a-big-file gap that is still behind httpfs.
-4. Optional: decide whether CI should `strip` the mingw artifact (73 MB unstripped vs 31 MB for the MSVC
+3. Optional: decide whether CI should `strip` the mingw artifact (73 MB unstripped vs 31 MB for the MSVC
    build), and add macOS install notes if anyone ever reports from one.
-5. Failure-path coverage only where a safe test seam exists — see the *Limitations* note in the README about
+4. Failure-path coverage only where a safe test seam exists — see the *Limitations* note in the README about
    why the CAS-failure and LFS-fallback branches are uncovered by choice.
 
 ## Environment
@@ -119,6 +121,10 @@ scripts/ci_selftest.sh build/release/extension/hf/hf.duckdb_extension   # what C
 * **A graded SQL suite parses line by line**, so a section header must be a `--` comment: `//===…===//` is SQL to
   the runner and swallows the statement under it — which is how a `SET hf_xet_upload_dedup = true` once vanished
   from a suite while every assertion still reported OK.
+* **Deleting a file does not delete its chunks.** The CAS is content-addressed and outlives the file that referenced
+  it, so a dedup benchmark built from a deterministic generator measures reuse of your own previous run — which is
+  how a "column added to every row" case once came out at 1053 chunks shared instead of the 0 it really has.
+  Noise per run in anything the benchmark expects *not* to find.
 
 ## Rules
 

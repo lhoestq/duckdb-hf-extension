@@ -42,10 +42,23 @@ result columns report the file rather than the xorb, so they repeat on every row
   an unchanged tree. It also exports from the *full* local shard rather than the truncated upload, because the
   export copies the input header verbatim and an upload has `footer_size` zeroed — that would have shipped a shard
   carrying a footer it does not advertise.
-* `hf_xet_selftest()` is **1090 checks / 0 failed** (from 972): 64 HMAC pairs, the keyed-collection rules, and 24
-  rows over the stored-shard fixture — parse, key, register-without-a-file-section, whole-xorb run, run starting
-  mid-xorb, run breaking at a changed hash, keyed and unkeyed collections side by side, and a shard whose footer
-  key does not match its hashes answering nothing.
+* `hf_xet_selftest()` is **1090 checks / 0 failed** (from 972): 64 HMAC pairs, the keyed-collection rules, and 20
+  rows over the stored-shard fixture — 8 in the shard reader (parse, key, key-not-the-zero-sentinel, no file
+  entries, one xorb, every chunk, stored hash is not the plain one, stored hash is `keyed(key, chunk hash)`) and 12
+  in the matcher (register with no file section, know the file's own hashes, whole-xorb run, run starting mid-xorb,
+  run breaking at a changed hash, one collection per key, and a shard keyed differently than its own hashes
+  answering nothing).
+* **Measured, with `scripts/dedup_measure.py`** (237 MB of hex digests, random per run, LZ4 on, one run): an
+  identical re-upload costs **0 bytes on the wire and 1.4 s** where the `dedup = false` baseline cost **235 MB and
+  21.5 s**; appending 20 000 lines to the file costs **0.2 MB** (18 chunks sent, 3616 pointed); adding a per-row
+  column dedups **nothing at all** — 0 of 6889 chunks, because changing every line moves every boundary after it.
+  Asking is not the expense: seven queries and zero hits moved the wire time per MB less than run-to-run noise.
+  One answered query buys more than a chunk because the answer is *the shard of the file holding that chunk*, which
+  names every xorb that file posted — two answers covered all four xorbs of the 237 MB file.
+* **Which is also the measurement trap**: content-addressed storage survives `hf_delete`. The first 300 MB run
+  reported 1053 chunks pointed in the column case — that was the *previous run's* widened file, same generator, same
+  prefix, deleted from the bucket and still in the CAS. A dedup benchmark over deterministic fixtures measures reuse
+  of your own last run, so the added column in `dedup_measure.py` carries per-run noise.
 
 ## 0.0.2-pre7 — every architecture DuckDB has a runner for
 

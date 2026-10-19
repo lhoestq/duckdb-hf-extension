@@ -316,6 +316,39 @@ The Hub served a file whose content is entirely pointers into xorbs another repo
 format exists for. p8: that file with two rows appended — `deduped_chunks >= 1`, the sum of `uncompressed_bytes`
 over the xorbs that *were* uploaded strictly less than the file's size, and the mixed shard reads back byte-identical.
 
+**What it saves** (`scripts/dedup_measure.py 300`, live, 237.6 MB of hex digests regenerated per run, LZ4 on,
+default settings; the numbers are from one run, and the wire numbers are LZ4 frames):
+
+| the same content, uploaded four ways | file | wall | xorbs posted | on the wire | chunks sent | chunks pointed | queries / answered |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| baseline, `hf_xet_upload_dedup = false` | 237.6 MB | 21.5 s | 4 | 235.1 MB | 3617 | 0 | 0 / 0 |
+| byte-identical, after the baseline | 237.6 MB | 1.4 s | 0 | 0 | 0 | 3617 | 2 / 2 |
+| a tail of 20 000 lines appended | 238.9 MB | 1.5 s | 1 | 0.2 MB | 18 | 3616 | 2 / 2 |
+| a per-row column added | 453.6 MB | 29.7 s | 7 | 363.9 MB | 6889 | 0 | 7 / 0 |
+
+* **One hit is not one chunk, it is a file.** The CAS answers a chunk query with the shard of the *file that
+  contains* that chunk, which describes every xorb that file posted. Two answers named all four xorbs of the
+  237.6 MB file, so the identical re-upload cost 0 bytes and 1.4 s instead of 235 MB and 21.5 s — 20× — and its
+  shard read back byte-identical.
+* **A run stops where the bytes stop agreeing**, which is why the append costs 18 chunks and 0.2 MB: the last
+  chunk of the old content absorbed the appended bytes, everything before it is a pointer.
+* **Asking is free at this scale.** Seven queries, none answered, and the wire time per MB came out *better* than
+  the baseline's (0.065 vs 0.090 s/MB, which is network, not the feature). A query is one small GET, at most one
+  per 256 chunks; a miss is a 404.
+* **A rewritten column is the honest bad case: 0 of 6889 chunks.** Adding a column changes every line, so every
+  boundary downstream of the first line moves, and content-defined chunking has nothing to hold onto. The 1-in-1024
+  hash sample is not the binding constraint here — boundary agreement is.
+* **The trap in measuring this**: the first 300 MB run reported 1053 chunks pointed at in the *column* case, which
+  reads like the feature working. It was this script's own previous run — same generator, so the same file with more
+  rows appended, deleted from the bucket afterwards but **not from the CAS**, which keeps bytes after every file
+  that referenced them is gone. Any benchmark on deterministic fixtures measures reuse of your own last run; the
+  added column carries per-run noise now for exactly that reason. (The upside, if you want it: re-exporting a
+  dataset that appends to itself dedups across runs, unseen by any single run's file listing.)
+
+At 60 MB the same script produces one xorb, and then a single query reclaims the whole file (720 chunks pointed,
+1 query) — one run reaches only to the end of the xorb it came from, so a file that fits in one xorb needs only its
+first chunk answered.
+
 **Reproducing the format facts.** `docs/fixtures/generate_dedup_probe.py` rebuilds the two 2026-10-18 payloads
 byte-for-byte (sha256 `b9ac43b3…`, 238 180 B for `payload.csv`; `6ca2476f…`, 12 582 987 B for `big.txt`), and
 `docs/fixtures/{payload_chunks_5,big_chunks_196}.txt` hold their chunk hashes in file order. They are still in

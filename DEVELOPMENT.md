@@ -121,11 +121,13 @@ src/hf_fs             FileSystem: dispatch, list, glob, rm    src/hf_read      t
 src/hf_commit         preupload -> lfs batch -> commit        src/hf_write     temp buffering, upload on Close
 src/hf_xet_hash       keyed BLAKE3 + mean tree (M1)           src/hf_xet_chunk gear-hash chunking (M2)
 src/hf_xet_xorb       xorb + footer + LZ4 (M3, M8)            src/hf_xet_shard metadata shard (M5)
-src/hf_cas            token exchange, uploads, dedup (M4,M7)  src/hf_functions the hf_* table functions
+src/hf_cas            token exchange, uploads, dedup (M4,M7)  src/hf_xet_dedup  CAS queries, keyed shards, runs (M9)
+src/hf_xet_vectors    generated reference vectors             src/hf_functions the hf_* table functions
 test/sql/hf_selftest.test   the offline checks as a sqllogictest (see Testing)
 scripts/              try.py run_all.sh check.sh ci_selftest.sh bench.py delete_repo.sh
                       smoke_{read,write,models,buckets,xet,xet_upload}.{sh,sql}
                       xet_oracle.py (--check = xet-core drift) xet_bench.sh  ext_footer.py
+                      cas_dedup_probe.py (is this chunk indexed?) dedup_measure.py (what dedup saves)
                       make_extension_repo{,_from_ci}.sh publish_extension_repo.py test_install.py
 tools/xet_probe       Rust probe over xet-core — the oracle (cargo, --release)
 .github/workflows/build.yml   DuckDB's reusable distribution workflow, for the platform matrix
