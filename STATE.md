@@ -5,11 +5,34 @@ story is `README.md`, the per-release story is `CHANGELOG.md`, the protocol stor
 long form of every decision — the failed attempts and the measurements behind it — is in `git log` bodies.
 This file only holds what is true right now and what to do next.
 
-## Position — 2026-10-19, ~15:10 UTC
+## Position — 2026-10-19, ~19:05 UTC
 
-**0.0.2-pre7 is published, live, for all eight DuckDB client platforms.** HEAD carries M9 (cross-repository dedup,
-unreleased); tag `v0.0.2-pre7` is at `39706a5` — move the tag to HEAD before the next dispatch, because the footer's
-version is `git describe` at HEAD and a lagging tag ships a commit sha.
+**0.0.2-pre7 is published, live, for all eight DuckDB client platforms.** **0.0.2-pre8 (M9, cross-repository
+dedup) is committed and tagged, and its release run cannot start** — Actions is currently failing this repo's
+jobs before they reach a runner, see *The release is blocked on Actions, not on code* below.
+
+Tag `v0.0.2-pre8` is at `bcbe681`. Dispatch **on the tag**, `gh workflow run "Build extension" --ref refs/tags/v0.0.2-pre8`,
+and not on `main`: the footer version is `git describe` at the built commit, so a dispatch on `main` (now ahead of
+the tag by the diagnostic-workflow commit) would stamp `v0.0.2-pre8-1-g45c6090` and every client would refuse the
+binary. That is the lagging-tag trap wearing a cap — the tag does not have to lag HEAD to fall into it, it only has
+to differ from what was built.
+
+* **The release is blocked on Actions, not on code.** Since ~18:20 UTC jobs in this repo conclude `failure` in
+  3–6 seconds with `steps: 0`, no runner name, and no log blob (`BlobNotFound`). A build error compiles and
+  writes a log; a test error has steps; neither description fits. The evidence, in order: run `39299553138`
+  built all eight platforms green and lost only the reference-checks job that way; run `39304739130` lost even
+  `Generate matrix`; and `.github/workflows/diagnostic.yml` — two steps, `uname -a`, `ubuntu-24.04` — failed the
+  same way in 5 s (`39305064645`). Nothing in a repo can make `uname` fail to reach a machine, so this is
+  account-level (an Actions spending limit is the likely one: a private repo, every job compiles DuckDB) or
+  GitHub-side. The annotations and check-suites endpoints 404 with this token, so the reason string is not
+  readable from here — read it in the Actions UI.
+  **Before dispatching another matrix run, dispatch `389744541` (`gh workflow run 389744541`) and wait for it to
+  go green.** It costs seconds; a matrix run costs ~25 minutes of metered runner time and fails the same way.
+* What is *done* for pre8, so a resume does not redo it: `HF_EXTENSION_VERSION` = `0.0.2-pre8` and the
+  `smoke_write.sql` assertion with it; suites re-run green on a fresh build; `scripts/xet_oracle.py` fixed so MSVC
+  can compile the generated vectors again; `reduced_ci_mode` actually forwarded on a dispatch; tag created and
+  pushed. What is *not* done: any artifact published, `README.md`'s release line verified live, CHANGELOG heading
+  renamed from *Unreleased* — all three wait for a green run off the tag.
 
 * Live at `https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main/` (signed) and
   `…/resolve/main/unsigned/`, from CI run `39153506221`, for `v2.0.0-alpha47600`: `linux_amd64`,
@@ -47,10 +70,17 @@ version is `git describe` at HEAD and a lagging tag ships a commit sha.
 
 ## Next, in order
 
-1. **Release 0.0.2-pre8** with M9 in it: annotate HEAD as `v0.0.2-pre8`, dispatch build.yml with
-   `reduced_ci_mode: 'disabled'`, publish from the run, and re-do the byte-compare plus https `INSTALL`/`LOAD`
-   verification pre7 got. Nothing in M9 changes a byte for an upload that runs with `hf_xet_upload_dedup = false`,
-   which is a claim worth re-testing on a pre-release rather than asserting.
+1. **Release 0.0.2-pre8.** First `gh workflow run 389744541` (the diagnostic) until it is green; then
+   `gh workflow run "Build extension" --ref refs/tags/v0.0.2-pre8`, and once it is green:
+   `RUN=<run> DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" scripts/make_extension_repo_from_ci.sh dist/repo-signed`,
+   the same tree unsigned into `dist/repo`, then
+   `HF_REPO=lhoestq/duckdb-hf-extension scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo`.
+   Then byte-compare all sixteen served binaries and re-do the https `INSTALL`/`LOAD` check pre7 got, rename the
+   CHANGELOG's *Unreleased* heading to `0.0.2-pre8`, and note the run id in STATE. The check job that runs
+   `scripts/ci_selftest.sh` may still refuse to schedule; the equivalent check by hand is to download the
+   `linux_arm64` artifact (the one platform this machine executes) and `LOAD` it into the venv duckdb.
+   Nothing in M9 changes a byte for an upload that runs with `hf_xet_upload_dedup = false`, which is a claim worth
+   re-testing on a pre-release rather than asserting.
 2. **Shard-driven read prefetch** — walk a shard's chunk table instead of one range request per window; this
    is the fix for the `read_blob`-of-a-big-file gap that is still behind httpfs.
 3. Optional: decide whether CI should `strip` the mingw artifact (73 MB unstripped vs 31 MB for the MSVC
@@ -125,6 +155,19 @@ scripts/ci_selftest.sh build/release/extension/hf/hf.duckdb_extension   # what C
   it, so a dedup benchmark built from a deterministic generator measures reuse of your own previous run — which is
   how a "column added to every row" case once came out at 1053 chunks shared instead of the 0 it really has.
   Noise per run in anything the benchmark expects *not* to find.
+* **Two version numbers, one of them hand-moved.** The footer's is `git describe` at the built commit and decides
+  whether a client accepts the binary; `hf_version` in `hf_status()` comes from `HF_EXTENSION_VERSION` in
+  `src/include/hf_common.hpp` and only moves when a release commit moves it, with the `smoke_write.sql` assertion
+  beside it. Bump both or ship a release that reports the previous one — an artifact from the first pre8 dispatch
+  loaded here and answered `0.0.2-pre7` while its footer said `v0.0.2-pre8`.
+* **The suites load `dist/`, not `build/`.** `scripts/run_all.sh` copies a newer build artifact over it now; before
+  that the copy happened only under `--build`, so a direct `cmake --build` left the suites testing the previous
+  binary — one changed string in the version constant, and `assert_version` failed against a file that no build had
+  produced. Same reason `try.py` prints path, size and mtime before it loads anything.
+* **A CI job that fails with `steps: 0`, no runner and no log blob is not a build failure.** Nothing in a commit can
+  make a job never reach a machine; `gh workflow run 389744541` (`.github/workflows/diagnostic.yml`, two steps,
+  seconds to run) says whether Actions can schedule anything, and until it goes green a 25-minute matrix run is not
+  the experiment to run.
 
 ## Rules
 
