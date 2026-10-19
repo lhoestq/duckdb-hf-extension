@@ -1,0 +1,37 @@
+name: Diagnostic — is Actions able to run anything at all
+
+# A three-line job whose only purpose is to answer "did Actions schedule a runner?" when a real run
+# fails in seconds with no logs, no runner assigned, and zero steps executed. That failure signature
+# is not a build error (a build error compiles, and writes a log), and it is not a test error (a test
+# error has steps). It is the job dying before it reaches a machine, which has exactly two families of
+# cause: a GitHub-side scheduling problem, and an account-level one — an Actions spending limit or a
+# disabled runner pool turns every job into that same silent instant failure.
+#
+# Nothing here compiles DuckDB, so it costs seconds rather than the ~20 minutes a matrix run costs, and
+# it is dispatch-only so it never rides along with a push.
+#
+#   gh workflow run "Diagnostic — is Actions able to run anything at all"
+#
+# If this fails the way the builds fail, the builds are not the problem and no commit will fix them.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runner:
+    runs-on: ubuntu-24.04 # the exact label the release pipeline's check job asks for
+    steps:
+      - name: report the machine
+        run: |
+          set -euo pipefail
+          echo "this job reached a runner, so Actions can schedule work"
+          uname -a
+          echo "disk: $(df -h "$PWD" | tail -1)"
+          echo "cpus: $(nproc)"
+      - name: report the runner pool's view of the run
+        run: |
+          echo "GITHUB_RUN_ID=$GITHUB_RUN_ID GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT"
+          echo "GITHUB_SHA=$GITHUB_SHA GITHUB_REF=$GITHUB_REF"
