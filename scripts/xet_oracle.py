@@ -485,6 +485,10 @@ def main():
         add("static const char *const HF_XET_TREE_%d_HASHES[] = {" % index)
         for hex_hash, _ in chunks:
             add("\t\"%s\"," % hex_hash)
+        if not chunks:
+            # MSVC has no zero-length arrays, and a count-0 tree vector has no leaf hashes to emit.
+            # Nothing reads this element; it exists so the declaration is legal on every toolchain.
+            add('\t"" /* count is %d, nothing reads this */,' % len(chunks))
         add("};")
         add("static const uint64_t HF_XET_TREE_%d_SIZES[] = {" % index)
         add("\t" + " ".join("%sULL," % size for _, size in chunks) if chunks else "\t0ULL,")
@@ -544,6 +548,18 @@ def main():
 
     text = "\n".join(out)
     shard_text = "\n".join(shard_out)
+
+    # An empty `[] = { };` is a GNU extension: gcc and clang build it, MSVC stops with
+    # "error C2466: cannot allocate an array of constant size 0". So a generated file that emits one is
+    # a build that only breaks on the toolchain nobody here can run - and a manual fix for it is worse,
+    # because a hand-added placeholder inside a generated file is gone the next time someone regenerates
+    # (that is exactly how `windows_amd64` came to fail the first pre8 run: the placeholder was in the
+    # pre7 tree, the regeneration for the HMAC vectors dropped it, and every local check was green).
+    for path, body in ((OUT, text), (OUT_SHARD, shard_text)):
+        for match in re.finditer(r"\[\] = \{\n\};", body):
+            raise SystemExit("%s would declare an empty array at line %d - emit a placeholder element"
+                             % (path, body.count("\n", 0, match.start()) + 1))
+
     def stale(path, generated):
         current = open(path).read() if os.path.exists(path) else ""
         return current != generated

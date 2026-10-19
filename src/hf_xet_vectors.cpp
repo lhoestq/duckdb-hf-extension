@@ -642,11 +642,13 @@ const vector<HFXetDedupVector> &HFXetDedupVectors() {
 }
 
 static const char *const HF_XET_TREE_0_HASHES[] = {
+	"" /* count is 0, nothing reads this */,
 };
 static const uint64_t HF_XET_TREE_0_SIZES[] = {
 	0ULL,
 };
 static const char *const HF_XET_TREE_1_HASHES[] = {
+	"" /* count is 0, nothing reads this */,
 };
 static const uint64_t HF_XET_TREE_1_SIZES[] = {
 	0ULL,
