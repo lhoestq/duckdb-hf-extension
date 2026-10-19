@@ -28,6 +28,13 @@ public:
 
 	//! GET a whole resource into memory. `throw_on_error` throws a descriptive exception on >=400.
 	string Get(const string &url, const HTTPHeaders &headers = HTTPHeaders(), bool throw_on_error = true);
+	//! GET a whole resource into memory and hand back the status without deciding what it means. `Get`'s
+	//! `throw_on_error = false` cannot answer the question a Xet dedup query asks: it returns an empty body
+	//! both when the resource is absent (404, "nobody has stored this chunk", which is a reason to upload)
+	//! and when the server refuses to answer (401, "this token may not ask", which is a reason to stop).
+	//! A transport failure still throws - there is no status to report in that case.
+	int GetStatus(const string &url, string &body, const HTTPHeaders &headers = HTTPHeaders(),
+	              bool with_auth = true);
 	//! GET a byte range `[offset, offset + len)` appending to `out`. Returns false on a non-2xx response.
 	bool GetRange(const string &url, idx_t offset, idx_t len, string &out, const HTTPHeaders &headers = HTTPHeaders());
 	//! GET a byte range straight into a caller-provided buffer of exactly `len` bytes. Returns false on a

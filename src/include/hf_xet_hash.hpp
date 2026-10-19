@@ -71,6 +71,18 @@ struct HFXetHash {
 constexpr uint64_t HF_XET_GLOBAL_DEDUP_MODULUS = 1024;
 bool HFXetGlobalDedupEligible(const HFXetHash &hash);
 
+//! The key a *stored* shard indexes its chunk hashes under: `DataHash::hmac` = BLAKE3 keyed hash with
+//! the shard's footer key over the 32 bytes of the chunk hash. Both operands are byte-order traps: a
+//! hash enters as the little-endian bytes of its four words (which is what `HFXetHash::bytes` holds),
+//! a key read out of a footer means those same bytes, and a key *hex* string means them byte-reversed
+//! inside every word. That is why the CAS's answer for a chunk is not the keyed hash of the hex the
+//! query URL carries, and why the construction is replayed from xet-core (HFXetHmacVectors).
+HFXetHash HFXetChunkHmac(const HFXetHash &chunk_hash, const HFXetHash &key);
+
+//! `MDBShardInfo::keyed_chunk_hash`: the form a stored shard really holds. An all-zero footer key is
+//! the "this shard is unkeyed" sentinel, under which the hash is stored as it was given.
+HFXetHash HFXetKeyedChunkHash(const HFXetHash &chunk_hash, const HFXetHash &hmac_key);
+
 //! One node of the merkle tree: a chunk hash (or an interior hash) plus the size it covers.
 struct HFXetHashNode {
 	HFXetHash hash;
@@ -184,6 +196,15 @@ struct HFXetDedupVector {
 	bool eligible;
 };
 
+//! (a key, a chunk hash, and what xet-core's `DataHash::hmac` keys it into)
+struct HFXetHmacVector {
+	const char *key;
+	const char *hash;
+	const char *keyed;
+};
+
+const vector<HFXetHmacVector> &HFXetHmacVectors();
+
 const vector<HFXetDedupVector> &HFXetDedupVectors();
 const vector<HFXetTreeVector> &HFXetTreeVectors();
 
@@ -192,6 +213,10 @@ const vector<HFXetTreeVector> &HFXetTreeVectors();
 //! self-tests, so both run the same bytes the oracle ran.
 string HFXetTestInputBytes(HFXetTestInput kind, uint64_t size, uint64_t seed, const char *pattern);
 string HFXetVectorInput(const HFXetHashVector &vector);
+
+//! Plain hex back into bytes. Generated fixtures that are whole byte streams - a stored shard, a xorb -
+//! are carried as hex, and more than one self-test has to read them back.
+string HFXetSelfTestBytesFromHex(const char *hex);
 
 //! Check every stored vector. One row per check: (name, passed, expected, got). Surfaced by the
 //! hf_xet_selftest() table function so these run in CI like any other test. Returns failures.

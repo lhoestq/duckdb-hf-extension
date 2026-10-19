@@ -1,6 +1,7 @@
 #include "hf_xet_shard.hpp"
 
 #include "duckdb/common/string_util.hpp"
+#include "hf_xet_chunk.hpp"
 
 #include <algorithm>
 
@@ -375,6 +376,37 @@ HFXetShardView HFXetShardView::Parse(const string &bytes) {
 		}
 		view.xorbs.push_back(std::move(xorb));
 	}
+
+	// The footer, when there is one. It sits at the very end of the shard (the reference seeks to
+	// `End(-footer_size)` to find it, and the lookup tables live in front of it), and reading it is not
+	// optional: the key inside it is what every chunk hash in the sections above is stored under. An
+	// uploaded shard advertises a footer size of zero and carries none; a stored one advertises 200.
+	if (footer_size == HF_XET_SHARD_FOOTER_SIZE) {
+		ShardCursor footer(const_data_ptr_cast(bytes.data()) + (bytes.size() - HF_XET_SHARD_FOOTER_SIZE),
+		                   HF_XET_SHARD_FOOTER_SIZE);
+		auto footer_version = footer.U64();
+		if (footer_version != HF_XET_SHARD_FOOTER_VERSION) {
+			throw IOException("Xet metadata shard footer has version %llu, this build reads %llu",
+			                  static_cast<unsigned long long>(footer_version),
+			                  static_cast<unsigned long long>(HF_XET_SHARD_FOOTER_VERSION));
+		}
+		// The key sits 72 bytes into the footer, and the version field has already been consumed, so the
+		// skip is measured from offset 8 rather than from the start - which is the kind of off-by-8 that
+		// reads a key from the wrong place and then matches nothing while looking entirely healthy.
+		footer.Skip(HF_XET_SHARD_FOOTER_KEY_OFFSET - 8);
+		view.chunk_hash_hmac_key = footer.Hash();
+		// 88 bytes between the key and the last field: two timestamps, six reserved slots, three byte
+		// counts. The last field says where the footer started, the one claim here that can be checked
+		// against the buffer rather than against the format - a shard lying about its own length is not
+		// one whose key should be trusted.
+		footer.Skip(HF_XET_SHARD_FOOTER_SIZE - HF_XET_SHARD_FOOTER_KEY_OFFSET - 32 - 8);
+		auto claimed_start = footer.U64();
+		if (claimed_start + HF_XET_SHARD_FOOTER_SIZE != bytes.size()) {
+			throw IOException("Xet metadata shard footer claims to start at %llu in a %llu byte shard",
+			                  static_cast<unsigned long long>(claimed_start),
+			                  static_cast<unsigned long long>(bytes.size()));
+		}
+	}
 	return view;
 }
 
@@ -429,16 +461,7 @@ idx_t HFXetShardSelfTest(vector<std::tuple<string, bool, string, string>> &resul
 
 			// Build the file the way an upload does: chunk it, group the chunks into xorbs within the
 			// format's limits, and describe the file as one segment per xorb it landed in.
-			struct ChunkRecord {
-				HFXetHash hash;
-				idx_t size;
-			};
-			vector<ChunkRecord> chunks;
-			HFXetChunker chunker;
-			chunker.Process(const_data_ptr_cast(input.data()), input.size(), [&](const_data_ptr_t data, idx_t len) {
-				chunks.push_back({HFXetChunkHash(data, len), len});
-			});
-			chunker.Finish([&](const_data_ptr_t data, idx_t len) { chunks.push_back({HFXetChunkHash(data, len), len}); });
+			auto chunks = HFXetSelfTestChunks(input);
 
 			auto max_xorb_bytes = test.max_xorb_bytes == 0 ? HF_XET_MAX_XORB_BYTES : test.max_xorb_bytes;
 
@@ -500,7 +523,7 @@ idx_t HFXetShardSelfTest(vector<std::tuple<string, bool, string, string>> &resul
 			}
 
 			HFXetShardFile file;
-			auto root_nodes_for_file = [](const vector<ChunkRecord> &all) {
+			auto root_nodes_for_file = [](const vector<HFXetHashNode> &all) {
 				vector<HFXetHashNode> nodes;
 				for (auto &chunk : all) {
 					nodes.push_back({chunk.hash, uint64_t(chunk.size)});
@@ -692,6 +715,54 @@ idx_t HFXetShardSelfTest(vector<std::tuple<string, bool, string, string>> &resul
 		}
 	}
 
+	// A shard in the shape a dedup query answers with. These bytes are xet-core's own keyed export, and
+	// nothing on this port's upload path can produce them: a session writes an unkeyed shard, uploads it,
+	// and reads back only what it wrote. What a query returns is somebody else's shard - footered, with no
+	// file sections to speak of, and with every chunk hash keyed under a key the footer carries. The key is
+	// not optional reading: a matcher that compares plain hashes against these bytes finds nothing, and
+	// reports that as "the CAS had nothing to give" while the CAS answered every query. That is a real
+	// regression this port shipped, offline-green and live-zero, before this fixture existed.
+	for (auto &test : HFXetStoredShardVectors()) {
+		auto name = string("stored shard ") + test.name;
+		try {
+			auto bytes = HFXetSelfTestBytesFromHex(test.shard_hex);
+			if (bytes.size() != test.stored_bytes) {
+				check(name + " fixture length", to_string(test.stored_bytes), to_string(bytes.size()));
+				continue;
+			}
+			auto view = HFXetShardView::Parse(bytes);
+			// the key is the footer's own 32 bytes, read as bytes: taking them through a hex string would
+			// reverse them inside every word and still look like a key
+			HFXetHash claimed;
+			memcpy(claimed.bytes,
+			       const_data_ptr_cast(bytes.data()) + bytes.size() - (HF_XET_SHARD_FOOTER_SIZE - HF_XET_SHARD_FOOTER_KEY_OFFSET),
+			       32);
+			check(name + " reads the footer's key", "true", view.chunk_hash_hmac_key == claimed ? "true" : "false");
+			check(name + " key is not the zero sentinel", "false", view.chunk_hash_hmac_key.IsZero() ? "true" : "false");
+			check(name + " hex matches the key it was exported with", test.key, view.chunk_hash_hmac_key.Hex());
+			// the file section of a CAS answer is a bookend and nothing else, measured live twice over: the
+			// xorbs are the whole of the answer, so a reader that needed a file entry would register nothing
+			check(name + " holds no file entries", "0", to_string(view.files.size()));
+			auto chunks = HFXetSelfTestChunks(HFXetTestInputBytes(test.kind, test.size, test.seed, test.pattern));
+			check(name + " holds one xorb", "1", to_string(view.xorbs.size()));
+			check(name + " xorb holds every chunk", to_string(chunks.size()), to_string(view.xorbs[0].chunks.size()));
+			// the one fact the matcher lives or dies on: these stored hashes are keyed, and the file's own
+			// hashes are not. Both halves - "they differ" and "they differ in exactly this way" - matter,
+			// since a broken keying would also make them differ.
+			if (!view.xorbs.empty() && !view.xorbs[0].chunks.empty()) {
+				check(name + " stored hash is not the plain chunk hash", "false",
+				      view.xorbs[0].chunks[0].hash == chunks[0].hash ? "true" : "false");
+				check(name + " stored hash is keyed(key, chunk hash)",
+				      HFXetKeyedChunkHash(chunks[0].hash, view.chunk_hash_hmac_key).Hex(),
+				      view.xorbs[0].chunks[0].hash.Hex());
+			}
+		} catch (std::exception &ex) {
+			// a stored shard this parser cannot read is a failed row, not a thrown selftest: see the note in
+			// the vector loop above about what an exception reports
+			check(name + " parses", "no exception", ex.what());
+		}
+	}
+
 	// And the rejections. A parser that has only ever met well-formed bytes has not been tested, and the
 	// bytes a dedup query returns come off a network: a truncated answer that parses anyway becomes a
 	// shard with a plausible xorb table and chunks in it that are not in it.
@@ -727,21 +798,44 @@ idx_t HFXetShardSelfTest(vector<std::tuple<string, bool, string, string>> &resul
 			}
 			check("shard with an impossible segment count", "rejected", outcome(inflated));
 
-			// The shape a dedup query actually answers with: a *stored* shard, the same sections with a
-			// footer bolted on (measured against the live CAS: 576 -> 632 and 9744 -> 9800 bytes). The
-			// footer is not read, but it has to be tolerated, and its advertised length has to be believed
-			// just enough to notice when the bytes do not back it up.
+			// The synthetic version of the same shape: a footer of a size the reader does not know, which
+			// has to be *tolerated* (an uploaded shard advertises zero and carries none, and the real stored
+			// shape above is what a 200 byte footer looks like). The advertised length is believed just
+			// enough to notice when the bytes do not back it up.
 			auto stored = sample;
 			uint64_t advertised = 56;
 			for (idx_t shift = 0; shift < 64; shift += 8) {
 				stored[40 + (shift / 8)] = char(uint8_t(advertised >> shift));
 			}
 			stored.append(56, '\x5a');
-			check("stored shard with a footer reads", "accepted", outcome(stored));
+			check("stored shard with an unknown footer reads", "accepted", outcome(stored));
 			auto with_footer = HFXetShardView::Parse(stored);
 			auto without = HFXetShardView::Parse(sample);
+			check("a footer of a size this reader does not know yields no key", "true",
+			      with_footer.chunk_hash_hmac_key.IsZero() ? "true" : "false");
 			check("the footer changes nothing", to_string(without.files.size()) + "/" + to_string(without.xorbs.size()),
 			      to_string(with_footer.files.size()) + "/" + to_string(with_footer.xorbs.size()));
+
+			// The real stored shape, tampered with where only a footer-reader would notice. Both of these
+			// arrive over the network as bytes that look exactly like a shard.
+			for (auto &test : HFXetStoredShardVectors()) {
+				auto keyed = HFXetSelfTestBytesFromHex(test.shard_hex);
+				auto wrong_footer_version = keyed;
+				wrong_footer_version[keyed.size() - HF_XET_SHARD_FOOTER_SIZE] = char(9);
+				check("stored shard with a footer from the future", "rejected", outcome(wrong_footer_version));
+				// the last field says where the footer began; a shard that lies about its own length is not
+				// one whose key should be trusted, and the key is the only thing read out of it
+				auto lying_offset = keyed;
+				for (idx_t i = 0; i < 8; i++) {
+					lying_offset[keyed.size() - 8 + i] = char(0xFF);
+				}
+				check("stored shard whose footer miscounts itself", "rejected", outcome(lying_offset));
+				// and the check must be about the footer rather than about the whole buffer: drop one byte
+				// off the end and the advertised 200 no longer fits at all
+				// and one byte off the end moves the footer to where it does not start: the parse is
+				// rejected, though which of the footer's own fields notices first is not the point
+				check("stored shard truncated by one byte", "rejected", outcome(keyed.substr(0, keyed.size() - 1)));
+			}
 		}
 	}
 

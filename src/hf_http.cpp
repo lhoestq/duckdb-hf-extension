@@ -581,6 +581,30 @@ string HFClient::Get(const string &url, const HTTPHeaders &headers, bool throw_o
 	return body;
 }
 
+int HFClient::GetStatus(const string &url, string &body, const HTTPHeaders &headers, bool with_auth) {
+	HTTPHeaders final_headers = with_auth ? WithAuth(headers) : headers;
+	body.clear();
+	auto response = RunWithRetry([&]() {
+		body.clear();
+		GetRequestInfo get(url, final_headers, *params,
+		                   [](const HTTPResponse &response) {
+			                   // the status is what the caller reads, and SendRequest hands back a response
+			                   // carrying it; the body is collected by the handler below
+			                   return true;
+		                   },
+		                   [&](const_data_ptr_t data, idx_t data_length) {
+			                   body.append(const_char_ptr_cast(data), data_length);
+			                   return true;
+		                   });
+		get.try_request = true;
+		return SendRequest(get);
+	});
+	if (response->HasRequestError()) {
+		ThrowHTTPError(*response, "GET", url);
+	}
+	return static_cast<int>(response->status);
+}
+
 bool HFClient::GetRange(const string &url, idx_t offset, idx_t len, string &out, const HTTPHeaders &headers) {
 	HTTPHeaders final_headers = WithAuth(headers);
 	final_headers.Insert("Range", StringUtil::Format("bytes=%llu-%llu", offset, offset + len - 1));

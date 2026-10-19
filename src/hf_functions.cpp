@@ -7,6 +7,7 @@
 #include "hf_xet_hash.hpp"
 #include "hf_xet_xorb.hpp"
 #include "hf_xet_shard.hpp"
+#include "hf_xet_dedup.hpp"
 
 #include "duckdb/common/file_opener.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -1162,7 +1163,8 @@ static unique_ptr<FunctionData> HFXetUploadBind(ClientContext &context, TableFun
 	return_types.push_back(LogicalType::BIGINT);
 	names.emplace_back("inserted");
 	return_types.push_back(LogicalType::BOOLEAN);
-	//! The last four describe the upload as a whole, so they repeat on every row.
+	//! Everything up to `inserted` is about one xorb; from `xet_hash` on it describes the upload as a whole,
+	//! so it repeats on every row.
 	names.emplace_back("xet_hash");
 	return_types.push_back(LogicalType::VARCHAR);
 	names.emplace_back("shard_bytes");
@@ -1175,6 +1177,18 @@ static unique_ptr<FunctionData> HFXetUploadBind(ClientContext &context, TableFun
 	return_types.push_back(LogicalType::VARCHAR);
 	names.emplace_back("published");
 	return_types.push_back(LogicalType::BOOLEAN);
+	//! And these are dedup, also file-level: chunks the content store already had (so no xorb carries
+	//! them), how many chunks it was asked about, how many answers came back, and how many of those could
+	//! not be read. The last one is why the three before it can be trusted to say "nothing to dedup"
+	//! rather than "dedup is broken".
+	names.emplace_back("deduped_chunks");
+	return_types.push_back(LogicalType::BIGINT);
+	names.emplace_back("dedup_queries");
+	return_types.push_back(LogicalType::BIGINT);
+	names.emplace_back("dedup_hits");
+	return_types.push_back(LogicalType::BIGINT);
+	names.emplace_back("dedup_shard_failures");
+	return_types.push_back(LogicalType::BIGINT);
 	return std::move(bind_data);
 }
 
@@ -1203,8 +1217,9 @@ static void HFXetUploadFunction(ClientContext &context, TableFunctionInput &data
 	}
 
 	idx_t count = 0;
-	// An empty file is a file: it has no xorbs, but the shard was still uploaded and the bucket still
-	// got an entry, so the answer is one row saying so rather than no rows at all.
+	// One row rather than no rows, because there are two ways an upload sends no xorb at all: the file is
+	// empty, or dedup covered all of it. Either way a shard was uploaded, content was named, and the
+	// caller deserves to see that rather than an empty result.
 	auto total = state.result.xorbs.empty() ? idx_t(1) : state.result.xorbs.size();
 	while (state.next < total && count < STANDARD_VECTOR_SIZE) {
 		if (state.next < state.result.xorbs.size()) {
@@ -1226,6 +1241,10 @@ static void HFXetUploadFunction(ClientContext &context, TableFunctionInput &data
 		output.data[7].SetValue(count, state.result.shard_hash.empty() ? Value() : Value(state.result.shard_hash));
 		output.data[8].SetValue(count, Value(state.result.shard_result));
 		output.data[9].SetValue(count, Value::BOOLEAN(state.published));
+		output.data[10].SetValue(count, Value::BIGINT(state.result.deduped_chunks));
+		output.data[11].SetValue(count, Value::BIGINT(state.result.dedup_queries));
+		output.data[12].SetValue(count, Value::BIGINT(state.result.dedup_hits));
+		output.data[13].SetValue(count, Value::BIGINT(state.result.dedup_shard_failures));
 		state.next++;
 		count++;
 	}
@@ -1262,6 +1281,7 @@ static unique_ptr<FunctionData> HFXetSelfTestBind(ClientContext &, TableFunction
 	bind_data->failures = HFXetHashSelfTest(bind_data->results);
 	bind_data->failures += HFXetXorbSelfTest(bind_data->results);
 	bind_data->failures += HFXetShardSelfTest(bind_data->results);
+	bind_data->failures += HFXetDedupSelfTest(bind_data->results);
 
 	names.push_back(Identifier("check_name"));
 	return_types.push_back(LogicalType::VARCHAR);

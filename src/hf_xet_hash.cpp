@@ -155,6 +155,21 @@ bool HFXetGlobalDedupEligible(const HFXetHash &hash) {
 	return hash.Word(3) % HF_XET_GLOBAL_DEDUP_MODULUS == 0;
 }
 
+HFXetHash HFXetChunkHmac(const HFXetHash &chunk_hash, const HFXetHash &key) {
+	// DataHash::hmac: keyed_hash(key, self.as_bytes()) - the hash's own 32 bytes as message, not the
+	// bytes behind whatever produced it
+	return HFBlake3Keyed(key.bytes, const_data_ptr_cast(chunk_hash.bytes), 32);
+}
+
+HFXetHash HFXetKeyedChunkHash(const HFXetHash &chunk_hash, const HFXetHash &hmac_key) {
+	if (hmac_key.IsZero()) {
+		// an unkeyed shard: the footer's zero means "stored as given", which is a decision of the
+		// reader's - the hash function itself happily keys with a zero key (see HFXetHmacVectors)
+		return chunk_hash;
+	}
+	return HFXetChunkHmac(chunk_hash, hmac_key);
+}
+
 string HFXetHash::Hex() const {
 	static const char *HEX_DIGITS = "0123456789abcdef";
 	string out;
@@ -312,6 +327,28 @@ string HFXetVectorInput(const HFXetHashVector &test) {
 	return HFXetTestInputBytes(test.kind, test.size, test.seed, test.pattern);
 }
 
+string HFXetSelfTestBytesFromHex(const char *hex) {
+	string out;
+	auto digit = [](char c) {
+		if (c >= '0' && c <= '9') {
+			return uint8_t(c - '0');
+		}
+		if (c >= 'a' && c <= 'f') {
+			return uint8_t(c - 'a' + 10);
+		}
+		// a fixture is generated, so anything else means the file was edited by hand - which is a louder
+		// failure than quietly hashing bytes that are half a digit's worth of garbage
+		throw InternalException("non-hex character in a generated Xet fixture");
+	};
+	for (idx_t i = 0; hex[i] != '\0'; i += 2) {
+		if (hex[i + 1] == '\0') {
+			throw InternalException("odd-length hex in a generated Xet fixture");
+		}
+		out.push_back(char(uint8_t(digit(hex[i]) * 16 + digit(hex[i + 1]))));
+	}
+	return out;
+}
+
 idx_t HFXetHashSelfTest(vector<std::tuple<string, bool, string, string>> &results) {
 	auto check = [&](const string &name, const string &expected, const string &got) {
 		results.emplace_back(name, expected == got, expected, got);
@@ -351,6 +388,20 @@ idx_t HFXetHashSelfTest(vector<std::tuple<string, bool, string, string>> &result
 		check(string(test.name) + " internal hash", test.hash,
 		      HFXetInternalHash(const_data_ptr_cast(test.input), strlen(test.input)).Hex());
 	}
+
+	// The keying a stored shard applies to every chunk hash it indexes. Getting the key or the message
+	// bytes wrong costs dedup silently and completely: the shard parses, its chunk table reads, and no
+	// query ever matches - which is exactly how this was first found against the live CAS.
+	for (auto &test : HFXetHmacVectors()) {
+		check(string("chunk hmac ") + test.hash, test.keyed,
+		      HFXetChunkHmac(HFXetHash::FromHex(test.hash), HFXetHash::FromHex(test.key)).Hex());
+	}
+	// the zero key is a sentinel to the reader, not a hash of nothing: keyed_chunk_hash passes through
+	check("keyed chunk hash passes an unkeyed shard through", HFXetHmacVectors()[0].hash,
+	      HFXetKeyedChunkHash(HFXetHash::FromHex(HFXetHmacVectors()[0].hash), HFXetHash()).Hex());
+	check("keyed chunk hash keys when the shard is keyed", HFXetHmacVectors()[2].keyed,
+	      HFXetKeyedChunkHash(HFXetHash::FromHex(HFXetHmacVectors()[2].hash),
+	                           HFXetHash::FromHex(HFXetHmacVectors()[2].key)).Hex());
 
 	for (auto &test : HFXetHashVectors()) {
 		auto name = string(test.name);

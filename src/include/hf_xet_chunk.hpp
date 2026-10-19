@@ -11,6 +11,7 @@
 #pragma once
 
 #include "hf_common.hpp"
+#include "hf_xet_hash.hpp"
 
 namespace duckdb {
 
@@ -50,5 +51,11 @@ private:
 	uint64_t hash = 0;
 	std::vector<uint8_t> buffer;
 };
+
+//! Chunk and hash a whole buffer the way an upload does: a hash and a size per chunk, in file order,
+//! including the last chunk - which only arrives at Finish, and a test that forgets it disagrees with
+//! every real upload about the tail. Shared by the self-tests that need "the chunks an upload would
+//! make": the shard test to build shards, the dedup test to build the hashes it queries with.
+vector<HFXetHashNode> HFXetSelfTestChunks(const string &input);
 
 } // namespace duckdb

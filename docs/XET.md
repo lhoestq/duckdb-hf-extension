@@ -188,7 +188,7 @@ silent. Vectors are **generated** by `scripts/xet_oracle.py` into `src/hf_xet_ve
 committed so CI needs no cargo; `--check` is what notices xet-core drifting. Inputs are reproducible specs (literal
 bytes, a repeated pattern, splitmix64) and are fed to the chunker in deliberately awkward piece sizes (1, 4, 19, …)
 requiring identical chunk lists, because the write path feeds it from a file cursor. `hf_xet_selftest()` replays
-them inside the extension: **367 checks**.
+them inside the extension: **1090 checks**.
 
 What that caught, worth knowing before touching this code: the two key constants are load-bearing invisibly (one
 transcribed wrongly made every hash wrong and every hash *plausible*); the chunk mask's high bits, above; `hex()`
@@ -198,6 +198,14 @@ xorb cannot distinguish xorb-local from file-global chunk indices. That is also 
 recomputes every xorb hash and re-derives every shard segment's verification hash, so an accepted upload is a
 confirmation from code we did not write (a deliberately wrong hash came back
 `400 BadRequest: xorb hash mismatch: expected fc79…, got 4bf3…`).
+
+It happened twice over, in the same shape. The first was a shard that passed every byte vector and was rejected by
+the real CAS. The second was dedup: a matcher that queried correctly, parsed the shard the CAS returned, registered
+it, and matched nothing — `deduped_chunks = 0` with every query answered 200 — because stored chunk hashes are keyed
+and it compared them with unkeyed ones. Both were invisible to tests that only exercise *this port's own* bytes.
+The remedies are the same two: ask the real service a question whose answer it composes itself, and compile the
+answer's shape in as a fixture (`HFXetStoredShardVectors()`) so the offline suite covers bytes no upload of ours
+produces.
 
 Two tests are worth copying as patterns, because "upload it and time it" is not an assertion:
 
@@ -212,7 +220,7 @@ Two tests are worth copying as patterns, because "upload it and time it" is not 
 What stays uncovered: a failure *during* a concurrent upload, and the LFS fallback firing. Nothing in SQL makes a
 CAS upload fail, and a test-only seam in the upload path is worse than the gap.
 
-## M9 — cross-repository dedup (measured; the rules are pinned, the consumer is next)
+## M9 — cross-repository dedup (shipped; the producer's rules were measured first, the reader's key came last)
 
 Established against the live CAS rather than by reading field names: 2026-10-18 for what a query *returns*,
 2026-10-19 for *which chunks it answers about at all* — the gate that decides how much of the feature is available.
@@ -253,6 +261,35 @@ write token, and sweeps `GET {cas}/v1/chunks/default/{chunk_hash_hex}` one hash 
 * **Deliberately not copied:** the reference's `Defragmenter`/`allow_dedup_on_next_range` heuristics, which refuse
   matches that would fragment a file into too many segments. That is a read-performance tuning layer; taking every
   match is correct, and costs segments.
+* **A returned shard is *keyed*, and the key is in its footer.** The first consumer of the above passed every
+  offline check and reported `deduped_chunks = 0` against the live CAS while the CAS answered 200 to every query:
+  the shard came back, parsed, registered — and matched nothing. Stored chunk hashes are not the file's chunk
+  hashes. They are `blake3_keyed_hash(footer_key, hash)`, and xorb hashes are not (`72fe5a36…` in a CAS answer is
+  the hash the uploader computed for that xorb). Read from two live responses, then reproduced offline:
+  * the answer's header advertises `footer_size = 200` (an *uploaded* shard advertises 0 — a session rewrites that
+    field to zero and appends nothing); footer version 1; `chunk_hash_hmac_key` is the footer's own 32 bytes at
+    offset **72** of its 200, and the footer's last field is its own start offset, which has to add up.
+  * a CAS answer holds xorbs and nothing else: `file_info_offset` 48 and `xorb_info_offset` 96 — the file section is
+    one bookend — and all three lookup tables are present with **0 entries**. So the answer cannot be looked up by
+    file, and a reader that needed a file entry to register a shard would register nothing at all.
+  * **the byte-order trap**: a key *read out of the footer* means those 32 bytes; a key *parsed from a hex string*
+    means the same bytes reversed inside every 8-byte word (`DataHash::from_hex` reads four LE words). The two
+    agree only for a key that is palindromic per word, and `HFXetChunkHmac` takes `.bytes` — so a key that arrives
+    by the wrong route produces a hash that is confidently wrong. `HFXetHmacVectors()` (64 pairs, generated from
+    `DataHash::hmac`, first key all-zero, second all-`f`) pins the construction; `xet-probe hmac` produces them.
+  * `MDBShardInfo::keyed_chunk_hash` applies the key only when it is non-zero, and `ShardFileManager` keeps one
+    `KeyedShardCollection` **per distinct key**, answering from the first that resolves. `HFXetDedupTable` copies
+    that: stored hashes are registered exactly as the shard spells them, only *queries* are keyed, and a zero key is
+    the sentinel for "stored as given" (`HFXetKeyedChunkHash` owns that case, vector-tested both ways).
+* **The fixture that makes this testable offline** is compiled in as `HFXetStoredShardVectors()`: one 300 000-byte
+  file, six chunks, one xorb, exported by the reference's own `export_as_keyed_shard_streaming` (680 bytes, key
+  `22…22`) through `xet-probe shard <max_xorb_bytes> <sha256> <key>`. It is the same shape as the live answers
+  above — footer 200, bookend-only file section, empty lookup tables, keyed chunks — and it is fed to the parse,
+  register and match checks that a session's own round trip can never reach, because a session uploads an unkeyed
+  shard and reads back only what it wrote. Two details of the probe matter for reproducibility: it exports from the
+  *full* local shard rather than the truncated upload (the export copies the input header verbatim, and an upload has
+  `footer_size` zeroed — that would ship a shard carrying a footer it does not advertise), and it zeroes the
+  footer's two validity timestamps, which come off the clock and would make every regeneration drift.
 
 **What this buys, ranked by certainty.** (1) Re-uploading an *identical* file costs nothing — chunk 0 is indexed, one
 query returns the whole file's shard, everything matches as one run, and the upload is a shard of pointers with zero
@@ -263,9 +300,21 @@ reference has too, and it is what makes a shifted boundary discoverable at all.
 
 **Order of work.** (A) ~~Flag eligible chunks in the shard writer~~ — *replaced*: the rule belongs to the reader
 (`HFXetShardChunkView::GlobalDedup()` = persisted bit **or** rule), pinned by the byte vectors above. (B) the gate
-above — **passed**. (C) query the CAS while chunking, spaced like the reference, register the shards through
-`HFXetShardView::Parse`, match longest forward runs. (D) emit pointer segments for matched runs, upload only the
-rest, and measure what a copied-with-one-extra-column dataset costs afterwards.
+above — **passed**. (C) the query and the match — **passed**: `HFXetDedupQuery`/`HFXetDedupTable` in
+`src/hf_xet_dedup.cpp`, spaced 256 like the reference, keyed collections as above. (D) pointer segments — **passed**:
+the upload is two passes now (pass A chunks and hashes the whole file, pass B re-reads only the ranges that still
+need uploading), a matched run becomes an ordinary segment naming an xorb the shard does not carry, and
+`hf_xet_upload()` reports `deduped_chunks`, `dedup_queries`, `dedup_hits` and `dedup_shard_failures` per file.
+`hf_xet_upload_dedup` (BOOLEAN, default `true`) turns the queries off; the byte-identity suites run with it off,
+because a deduplicated shard is deliberately not the same shard.
+
+**Live proof, both shapes** (`scripts/smoke_xet_upload.sql`, p7 and p8). p7: 60 000 rows chunked and uploaded against
+`hf://datasets/lhoestq/hf-smoke-staging` and never published, then the same bytes uploaded from
+`hf://buckets/lhoestq/playground/duckdb` — one result row, `xorb IS NULL` for all of them, `deduped_chunks > 0`,
+`dedup_shard_failures = 0`, a shard hash named, and `read_blob` over `hf://` returns the same md5 as the local file.
+The Hub served a file whose content is entirely pointers into xorbs another repository posted, which is the claim the
+format exists for. p8: that file with two rows appended — `deduped_chunks >= 1`, the sum of `uncompressed_bytes`
+over the xorbs that *were* uploaded strictly less than the file's size, and the mixed shard reads back byte-identical.
 
 **Reproducing the format facts.** `docs/fixtures/generate_dedup_probe.py` rebuilds the two 2026-10-18 payloads
 byte-for-byte (sha256 `b9ac43b3…`, 238 180 B for `payload.csv`; `6ca2476f…`, 12 582 987 B for `big.txt`), and
@@ -284,6 +333,8 @@ python3 scripts/cas_dedup_probe.py --sample 12 datasets/lhoestq/hf-smoke-staging
 
 ## Next
 
-1. M9 (C) and (D): the query, the match, and the pointer segments.
+1. **Measure what dedup saves on the copy case** — a dataset copied with one extra column, xorb bytes and wall
+   clock with `hf_xet_upload_dedup` on and off. The 1-in-1024 sample is thin by construction; the number to know is
+   how thin.
 2. **Shard-driven read prefetch**: walk a shard's chunk table to decide what to fetch, instead of one range request
    per window — the fix for the sequential `read_blob` gap in the README's *Limitations*.

@@ -33,11 +33,24 @@ SELECT count(*) >= 1                                  AS assert_xorbs_uploaded,
        -- is built over, which is why the two can move apart without anything about the content moving.
        sum(bytes) < sum(uncompressed_bytes)           AS assert_lz4_shrinks_the_wire,
        bool_and(bytes > 0)                               AS assert_serialized_is_positive,
-       count(DISTINCT xorb) = count(*)                AS assert_each_xorb_is_distinct
+       count(DISTINCT xorb) = count(*)                AS assert_each_xorb_is_distinct,
+       -- Dedup is on by default, so this upload asked: a file's first chunk is always worth a query. It
+       -- found nothing, and that is three separate things to check - that a shard this build cannot read
+       -- is not silently the same as a miss, and that nothing was pointed at content that is not there.
+       max(dedup_queries) >= 1                        AS assert_dedup_was_asked,
+       max(dedup_shard_failures) = 0                  AS assert_dedup_answers_are_readable,
+       max(deduped_chunks) = 0                        AS assert_nothing_was_pointed_at
 FROM hf_xet_upload('hf://datasets/lhoestq/hf-smoke-staging/xet_upload_probe.csv');
 
 -- The same content again: the CAS holds it already, and says so. Same layout too, which is the
 -- chunker being deterministic rather than getting lucky.
+--
+-- Dedup is switched off for this and the repeats below, which is the subject rather than a hedge: those
+-- tests are about which *xorbs* an upload asks the CAS for, and with dedup on that question is never
+-- reached - the file is answered out of the index before an object is posted. An upload with nothing to
+-- post is a real outcome and is tested for on its own, further down.
+SET hf_xet_upload_dedup = false;
+
 SELECT bool_and(NOT inserted)                            AS assert_repeat_is_already_stored,
        sum(bytes) = (SELECT sum(bytes)
                     FROM hf_xet_upload('hf://datasets/lhoestq/hf-smoke-staging/xet_upload_probe.csv'))
@@ -80,6 +93,12 @@ SELECT count(*) AS deleted FROM hf_delete('hf://datasets/lhoestq/hf-smoke-stagin
 
 -- Publishing: content in the CAS is addressable but nameless; a shard describes it as a file, and a
 -- bucket's `addFile` gives that file a path.
+--
+-- Dedup stays off through p1-p6 as well: what they check is that the *shard* for given content is the
+-- same shard a second time (`shard_result = 'exists'`), and a deduplicated upload legitimately writes a
+-- different shard - one whose segments point at content already stored, and which therefore carries no
+-- xorb tables of its own.
+SET hf_xet_upload_dedup = false;
 
 -- random() again, so that the *first* publish of a run really inserts and the second really does not
 COPY (SELECT md5((i * random())::VARCHAR) AS a, random()::VARCHAR AS b FROM range(5000) t(i))
@@ -147,8 +166,79 @@ SELECT 'p6 concurrency changes how xorbs travel, not what they are' AS t,
 FROM hf_xet_upload('hf://buckets/lhoestq/playground/duckdb/xet_big.parquet');
 RESET hf_write_max_parallel_uploads;
 
+--===----------------------------------------------------------------------===
+-- Cross-repository dedup: the half a test of your own uploads cannot see
+--===----------------------------------------------------------------------===#
+
+-- Everything above asks the CAS about content this same run uploaded. That proves the bytes and the
+-- determinism, and it cannot prove the thing dedup is for: pointing at content *someone else* stored,
+-- and a shard whose segments name xorbs this upload never posted.
+--
+-- So: content stored against one repository and never published anywhere, then the same bytes published
+-- from another. VARCHAR columns throughout, because the edited file below is rebuilt by reading the
+-- first one back - a float that round-trips into different text is different bytes, and different bytes
+-- are different content, and the test would quietly be about nothing.
+SET hf_xet_upload_dedup = true;
+
+COPY (SELECT md5((i * random())::VARCHAR) AS a, md5(random()::VARCHAR) AS b FROM range(60000) t(i))
+     TO '/tmp/hf_xet_dedup_src.csv' (FORMAT CSV);
+
+SELECT count(*) >= 1 AS assert_stored_by_the_first_repository,
+       bool_and(inserted) AS assert_the_first_upload_is_new
+FROM hf_xet_upload('/tmp/hf_xet_dedup_src.csv', scope := 'hf://datasets/lhoestq/hf-smoke-staging');
+
+-- One row with no xorb in it is what an upload with nothing left to do looks like: the whole file was
+-- answered by the shard the upload above left in the index, and what this one wrote is a shard of
+-- pointers into xorbs that a *different* repository posted.
+SELECT count(*) = 1                                     AS assert_one_row,
+       bool_and(xorb IS NULL)                           AS assert_nothing_was_uploaded,
+       max(deduped_chunks) > 0                          AS assert_chunks_were_pointed_at,
+       max(dedup_queries) >= 1                          AS assert_the_cas_was_asked,
+       max(dedup_hits) >= 1                             AS assert_the_cas_answered,
+       max(dedup_shard_failures) = 0                    AS assert_the_answers_parsed,
+       bool_and(published)                              AS assert_the_file_was_still_published,
+       bool_and(len(shard_hash) = 64)                   AS assert_a_shard_was_named
+FROM hf_xet_upload('/tmp/hf_xet_dedup_src.csv',
+                   scope := 'hf://buckets/lhoestq/playground/duckdb/xet_dedup.csv', publish := true);
+
+-- The claim being settled: a dedup pointer is not a dangling reference. The Hub serves a file published
+-- from one repository out of content another repository stored.
+SELECT 'p7 a file deduplicated against another repository reads back' AS t,
+       md5(content) = (SELECT md5(content) FROM read_blob('/tmp/hf_xet_dedup_src.csv')) AS assert_same_bytes
+FROM read_blob('hf://buckets/lhoestq/playground/duckdb/xet_dedup.csv');
+
+-- The case the format exists for, which is not an identical file but a changed one. Chunk boundaries are
+-- content-defined and depend only on the bytes before them, so appending at the end leaves every
+-- boundary ahead of the change exactly where it was: the tail is new, everything before it is not.
+COPY (SELECT * FROM read_csv('/tmp/hf_xet_dedup_src.csv', columns := {'a': 'VARCHAR', 'b': 'VARCHAR'})
+      UNION ALL SELECT 'appended at the end', 'a changed tail')
+     TO '/tmp/hf_xet_dedup_edited.csv' (FORMAT CSV);
+
+SELECT count(*) >= 1                                    AS assert_the_change_was_uploaded,
+       max(deduped_chunks) >= 1                         AS assert_the_rest_was_not,
+       -- The file's chunks tile it, so the sum over uploaded xorbs is exactly the part that had to go
+       -- up: strictly less than the file's own size means bytes were skipped rather than resent.
+       sum(uncompressed_bytes) < (SELECT octet_length(content)
+                                  FROM read_blob('/tmp/hf_xet_dedup_edited.csv'))
+                                                      AS assert_less_than_the_whole_file,
+       bool_and(published)                              AS assert_published
+FROM hf_xet_upload('/tmp/hf_xet_dedup_edited.csv',
+                   scope := 'hf://buckets/lhoestq/playground/duckdb/xet_dedup_edited.csv', publish := true);
+
+-- A shard mixing pointers and new xorbs is the harder thing for a reader to assemble, and the more
+-- ordinary file. It is read back through `hf://` rather than trusted because the upload was accepted.
+SELECT 'p8 a shard of pointers and new xorbs reads back' AS t,
+       md5(content) = (SELECT md5(content) FROM read_blob('/tmp/hf_xet_dedup_edited.csv')) AS assert_same_bytes
+FROM read_blob('hf://buckets/lhoestq/playground/duckdb/xet_dedup_edited.csv');
+
+-- expected failure: the setting is a boolean, and dedup with a threshold would be a different feature
+-- expect-fail: Could not convert string 'sometimes' to BOOL
+SET hf_xet_upload_dedup = 'sometimes';
+
 SELECT count(*) AS cleaned FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_upload.csv');
 SELECT count(*) AS cleaned_again FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_upload_twice.csv');
 SELECT count(*) AS cleaned_again FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_copy.csv');
 SELECT count(*) AS cleaned_again FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_big.parquet');
 SELECT count(*) AS cleaned_again FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_copied.csv');
+SELECT count(*) AS cleaned_again FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_dedup.csv');
+SELECT count(*) AS cleaned_again FROM hf_delete('hf://buckets/lhoestq/playground/duckdb/xet_dedup_edited.csv');

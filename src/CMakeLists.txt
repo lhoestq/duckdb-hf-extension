@@ -15,6 +15,7 @@ set(HF_SOURCES
     hf_cas.cpp
     hf_xet_xorb.cpp
     hf_xet_shard.cpp
+    hf_xet_dedup.cpp
     hf_xet_shard_vectors.cpp
     hf_xet_vectors.cpp)
 

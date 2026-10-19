@@ -18,7 +18,7 @@ uses. Targets **DuckDB 2.0** (`v2.0.0-alpha…`, *Cyanoptera*), including the Py
 (`pip install duckdb --pre --upgrade`).
 
 Current release: **0.0.2-pre7**, built for `v2.0.0-alpha47600` on all eight DuckDB client platforms.
-Suites: 200 passed / 12 expected failures / 0 failed, plus 367 offline reference checks. Release notes in
+Suites: 212 passed / 13 expected failures / 0 failed, plus 1090 offline reference checks. Release notes in
 [CHANGELOG.md](CHANGELOG.md); the Xet protocol port and its measurements in [docs/XET.md](docs/XET.md).
 
 ## Why not just httpfs
@@ -133,6 +133,7 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | `hf_xet_write` | `true` | send file content through Xet (content-defined, deduplicated chunks). If the content store is unreachable the write falls back to a plain LFS upload, so a dead CAS costs time, not correctness. `false` forces LFS |
 | `hf_write_max_parallel_uploads` | `3` | how many of a file's xorbs are on the wire at once (`1` = sequential). Each one waiting costs up to 64 MiB in memory, which is also how far ahead of the network the chunker may run |
 | `hf_xet_compression` | `lz4` | chunk payloads inside an xorb: LZ4 frames, or `none`. Changes bytes on the wire and nothing else — an xorb's hash covers uncompressed content, so dedup, shards and other clients are unaffected. Incompressible chunks come out ~16 B larger (stored raw inside a frame, as reference clients do). Anything else, including `bg4`, is refused at the `SET` |
+| `hf_xet_upload_dedup` | `true` | ask the content store whether it already holds a chunk before uploading it, and write a pointer instead of the bytes when it does. Costs one small request per 256 chunks (plus the file's first chunk); `false` uploads everything and produces the byte-identical shard an upload without the feature would have written |
 
 ## Table functions
 
@@ -149,8 +150,8 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | `hf_status()` | version, DuckDB version, endpoint, token source, whoami, transport, every read/write setting — never the token |
 | `hf_read_stats(reset := false)` | the read path's counters: `bytes_fetched / <file size>` is the amplification (a scan should be 1.0), `evictions` says the cache is too small, `retained_bytes` what it still holds |
 | `hf_read_cache_clear()` | `cleared_bytes, cleared_files` |
-| `hf_xet_upload(path[, scope := 'hf://…'][, publish := bool])` | `xorb, num_chunks, bytes, uncompressed_bytes, inserted, xet_hash, shard_bytes, shard_hash, shard_result, published` — the Xet write path by hand; `inserted`/`shard_result` are the CAS's dedup answers, `scope` names the repository whose token the bytes go up against, `publish` registers it as a bucket file |
-| `hf_xet_selftest()` | 367 rows of `(check_name, assert_passed, expected, got, …)` — the Xet port replayed against reference vectors generated from `xet-core`. Offline, no token |
+| `hf_xet_upload(path[, scope := 'hf://…'][, publish := bool])` | `xorb, num_chunks, bytes, uncompressed_bytes, inserted, xet_hash, shard_bytes, shard_hash, shard_result, published, deduped_chunks, dedup_queries, dedup_hits, dedup_shard_failures` — the Xet write path by hand; `inserted`/`shard_result` are the CAS's dedup answers, `scope` names the repository whose token the bytes go up against, `publish` registers it as a bucket file, and the last four are per *file* (they repeat on every xorb row; a fully deduplicated upload is one row with `xorb` NULL) |
+| `hf_xet_selftest()` | 1090 rows of `(check_name, assert_passed, expected, got, …)` — the Xet port replayed against reference vectors generated from `xet-core`. Offline, no token |
 
 `HF_READ_DEBUG=1` logs every window the read path claims on stderr. `hf_delete` groups paths by
 `(endpoint, repo_type, repository, revision)` and commits once per repository; a directory is deleted file
@@ -209,11 +210,13 @@ old version used stay in the CAS — which is what content addressable storage i
   needs the file on disk to chunk it), and upload + commit — or the Xet publish — happen on `Close()`. One
   commit per file, serialized per repository in a process; concurrent writers rely on the Hub's conflict
   detection. A Xet upload is per file, per statement, so a partitioned write publishes one file at a time.
-* **Uploads do not *query* for dedup**: a file sharing 90% of its chunks with something already in the CAS is
-  re-sent whole, and `inserted` in `hf_xet_upload` is the visible symptom. The producer half is in place —
-  every upload flags the chunk that starts the file, and that flag is what populates the CAS's
-  cross-repository index — so an *identical* file could be recognised today with one query. What is missing is
-  the query, and the sampling that would make a merely *similar* file findable: *M9* in `docs/XET.md`.
+* **Dedup finds an identical file cheaply and a *similar* file rarely.** An upload queries the CAS for its first
+  chunk and for chunks whose hash clears the format's 1-in-1024 rule, at most one query per 256 chunks; everything
+  those queries return is pointed at rather than re-sent. Re-uploading the same bytes — including into a different
+  repository — costs one small shard and nothing else (measured live, p7 in `scripts/smoke_xet_upload.sql`). A file
+  with an inserted byte in the middle keeps every chunk boundary ahead of the change and is found by the sample
+  alone: expect ~1 shared chunk in 1024, which is what the reference client has too, not a shortfall of this port.
+  The reference's defragment heuristics are deliberately not ported — every match is taken, which costs segments.
 * `hf_write_max_parallel_uploads` is a fixed client-side policy, not the reference client's adaptive limiter,
   and it applies per file: a `COPY` of ten files does not get thirty streams. The in-flight cap is also the
   memory cap.

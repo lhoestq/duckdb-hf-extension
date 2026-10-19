@@ -16,6 +16,10 @@
 //                    write the shard with xet-core's own writer. `max_xorb_bytes` splits the file into
 //                    several xorbs so a small input still produces a multi-segment shard; 0 means the
 //                    format's real limit. Prints the bytes a session would send to `POST /v1/shards`.
+//                    A 4th argument, a 64-hex key, additionally emits `keyed_shard_hex`: the same shard
+//                    exported by `export_as_keyed_shard_streaming` with no file info and no lookup tables,
+//                    which is the shape a CAS dedup query answer has - the form a reader has to cope with
+//                    and the form nothing in a session's own round trip ever produces.
 use xet_core_structures::metadata_shard::chunk_verification::range_hash_from_chunks;
 use xet_core_structures::metadata_shard::file_structs::{
     FileDataSequenceEntry, FileDataSequenceHeader, FileMetadataExt, FileVerificationEntry, MDBFileInfo,
@@ -86,6 +90,29 @@ fn main() {
                     words[3].to_le() % *xet_core_structures::metadata_shard::MDB_SHARD_GLOBAL_DEDUP_CHUNK_MODULUS
                 );
             }
+        }
+        return;
+    }
+    if mode == "hmac" {
+        // A shard stored by the CAS indexes its chunk hashes under a key the shard's own footer carries,
+        // and the answer to a dedup query is only comparable after the query hash is keyed with it
+        // (MDBShardInfo::keyed_chunk_hash). The construction - blake3::keyed_hash(key, hash bytes), with
+        // the hash entered as the four words' little-endian bytes - is not something to guess at, so the
+        // C++ replays these answers rather than reimplementing them. Reads "<key hex> <hash hex>" lines.
+        //
+        //   hmac    < "key hash" lines  -> "<key> <hash> <keyed>"
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            let line = line.expect("probe hmac: stdin").trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let key_hex = parts.next().expect("probe hmac: expected '<key hex> <hash hex>'");
+            let hash_hex = parts.next().expect("probe hmac: expected '<key hex> <hash hex>'");
+            let key = DataHash::from_hex(key_hex).unwrap_or_else(|e| panic!("probe hmac key: '{key_hex}': {e}"));
+            let hash = DataHash::from_hex(hash_hex).unwrap_or_else(|e| panic!("probe hmac hash: '{hash_hex}': {e}"));
+            println!("{key_hex} {hash_hex} {:x}", hash.hmac(key));
         }
         return;
     }
@@ -230,6 +257,9 @@ fn main() {
         let metadata_ext = sha256_hex
             .as_ref()
             .map(|hex| FileMetadataExt::new(DataHash::from_hex(hex).expect("probe shard <sha256> must be 64 hex digits")));
+        // A key here turns the extra keyed export on. Any key will do - the point is the *shape* and the
+        // keying, and a fixed one keeps the generated vector byte-stable.
+        let keyed_hex: Option<String> = std::env::args().nth(4).filter(|s| !s.is_empty());
         use xet_data::deduplication::constants::{MAX_XORB_BYTES, MAX_XORB_CHUNKS};
         // config-overridable at runtime in the reference, hence the derefs; the defaults are what a
         // plain session uses and what the C++ constants hard-code
@@ -353,6 +383,58 @@ fn main() {
             println!("xorb_stored {}", hash.hex());
         }
         println!("limits {limit_bytes} {limit_chunks}");
+        if let Some(key_hex) = &keyed_hex {
+            use xet_core_structures::metadata_shard::shard_format::MDBShardInfo;
+            use std::time::Duration;
+            let key = DataHash::from_hex(key_hex).expect("probe shard <key> must be 64 hex digits");
+            let dir = std::env::temp_dir();
+            let suffix = format!("xet-probe-keyed-{}", std::process::id());
+            let in_path = dir.join(format!("{suffix}-in"));
+            let out_path = dir.join(format!("{suffix}-out"));
+            // The *full* local shard, not the truncated upload: the export copies the input header through
+            // verbatim, and an uploaded shard has its footer_size rewritten to 0 - which would hand back a
+            // shard that carries a footer it does not advertise. The live CAS's answer advertises its 200
+            // byte footer, and feeding the local file is what produces that shape without inventing bytes.
+            std::fs::write(&in_path, &full).expect("probe shard: could not write the temp shard");
+            let written = {
+                let mut reader = File::open(&in_path).expect("probe shard: could not read the temp shard");
+                let mut writer = File::create(&out_path).expect("probe shard: could not write the keyed shard");
+                // false, false, false: xorbs only, no file info, no lookup tables. Measured on two live
+                // CAS dedup answers, that is exactly what a response holds - a shard whose file section is
+                // a lone bookend and whose three lookup tables are empty.
+                MDBShardInfo::export_as_keyed_shard_streaming(
+                    &mut reader,
+                    &mut writer,
+                    key,
+                    Duration::new(3600, 0),
+                    false,
+                    false,
+                    false,
+                )
+                .expect("probe shard: the keyed export failed")
+            };
+            let mut keyed = std::fs::read(&out_path).expect("probe shard: could not read back the keyed shard");
+            let _ = std::fs::remove_file(&in_path);
+            let _ = std::fs::remove_file(&out_path);
+            if written != keyed.len() {
+                panic!("probe shard: the keyed export reported {written} bytes, read back {}", keyed.len());
+            }
+            // The footer stamps two validity timestamps, because a keyed shard's hash key has a lifetime.
+            // They come off the clock, and a compiled-in fixture has to come out byte-identical every time
+            // the oracle runs - `--check` would otherwise report drift on every regeneration. The lifetime
+            // is not what is under test, the key is, so those 16 bytes are zeroed and everything else is
+            // exactly what the reference wrote.
+            let footer_size = u64::from_le_bytes(keyed[40..48].try_into().unwrap()) as usize;
+            if footer_size < 120 || keyed.len() < footer_size {
+                panic!("probe shard: the keyed export advertises a {footer_size} byte footer");
+            }
+            let timestamps = keyed.len() - footer_size + 104;
+            for byte in &mut keyed[timestamps..timestamps + 16] {
+                *byte = 0;
+            }
+            println!("keyed_shard_length={}", keyed.len());
+            println!("keyed_shard_hex={}", keyed.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        }
         for index in 0..groups.len() {
             println!(
                 "xorb_chunks {} {} {}",

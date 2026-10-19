@@ -5,6 +5,48 @@ Two independent version numbers: **this project's** (what the extension can do, 
 one DuckDB identifier, so a release is one binary per identifier per platform, and rebuilding for a newer
 pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
 
+## Unreleased — cross-repository dedup (M9): an upload can now point at content it did not store
+
+`hf_xet_upload()` asks the CAS whether it already holds each sampled chunk, and for the chunks it does, writes a
+pointer instead of the bytes. `SET hf_xet_upload_dedup = false` turns the asking off; it is on by default, and the
+byte-identity suites run with it off, because a deduplicated shard is deliberately not the same shard. Four new
+result columns report the file rather than the xorb, so they repeat on every row: `deduped_chunks`, `dedup_queries`,
+`dedup_hits`, `dedup_shard_failures`.
+
+* **Proven live in both shapes** (`xet_upload` p7/p8, suite now 42 statements). An identical file re-uploaded from a
+  *different repository* costs zero xorbs — one result row, `xorb IS NULL`, a shard of pointers, and
+  `read_blob('hf://…')` returning the same md5 as the local file the Hub had never seen in that repo. The edited
+  file next to it dedups partially: `deduped_chunks >= 1`, uploaded uncompressed bytes strictly below the file size,
+  and a shard mixing pointers with new xorbs reads back byte for byte.
+* **The upload is two passes now.** Pass A chunks and hashes the whole file; only then can the question "which
+  chunks does somebody already store?" be answered, because the answers are keyed to chunk boundaries that pass B
+  must not move. Pass B re-reads the unmatched ranges by (offset, length) and re-checks each hash against pass A
+  before uploading it. The no-dedup path produces the same shard bytes as before, one segment per xorb, which is
+  what lets p1–p6 keep asserting shard identity.
+* **Stored shard chunk hashes are keyed; xorb hashes are not.** A dedup query's answer is another client's shard:
+  header advertising a 200-byte footer (an *uploaded* shard advertises none), the HMAC key at offset 72 of that
+  footer, the file section a lone bookend, and all three lookup tables present with zero entries. Matching therefore
+  keys the *query*, never the stored hash, and the table keeps one collection per distinct key — like the
+  reference's `KeyedShardCollection`s, where the first collection that resolves the keyed start hash is the answer.
+* **`footer bytes ≠ footer hex`, and that distinction is the reason the first attempt shipped at zero.** A key read
+  out of a footer is those 32 bytes; the same key parsed from a hex string is those bytes reversed inside every
+  8-byte word. `xet-probe hmac` plus 64 generated `HFXetHmacVectors()` pairs pin which of the two
+  `HFXetChunkHmac` consumes. The first consumer of this feature hit every property above correctly except that one:
+  it queried, got 200, parsed, registered — and matched nothing, reporting `deduped_chunks = 0` while the CAS
+  answered every question. Every offline check it was tested against passed. Two things fixed that, in order: the
+  measurement (a live CAS response, taken apart field by field), and then `HFXetStoredShardVectors()` — a keyed
+  shard exported by the reference's own `export_as_keyed_shard_streaming`, compiled in, so the path from a CAS
+  answer to a matched run is now covered with no network in the loop.
+* **A generated fixture that is not byte-stable is not a fixture**: the keyed export stamps two validity timestamps
+  off the clock, so `xet-probe` zeroes those 16 bytes and `scripts/xet_oracle.py --check` stops reporting drift on
+  an unchanged tree. It also exports from the *full* local shard rather than the truncated upload, because the
+  export copies the input header verbatim and an upload has `footer_size` zeroed — that would have shipped a shard
+  carrying a footer it does not advertise.
+* `hf_xet_selftest()` is **1090 checks / 0 failed** (from 972): 64 HMAC pairs, the keyed-collection rules, and 24
+  rows over the stored-shard fixture — parse, key, register-without-a-file-section, whole-xorb run, run starting
+  mid-xorb, run breaking at a changed hash, keyed and unkeyed collections side by side, and a shard whose footer
+  key does not match its hashes answering nothing.
+
 ## 0.0.2-pre7 — every architecture DuckDB has a runner for
 
 Published from CI run `39153506221` to `lhoestq/duckdb-hf-extension` for `v2.0.0-alpha47600`:

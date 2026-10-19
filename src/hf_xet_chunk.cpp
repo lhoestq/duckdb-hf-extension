@@ -122,4 +122,16 @@ void HFXetChunker::Finish(const HFXetChunkCallback &on_chunk) {
 	hash = 0;
 }
 
+vector<HFXetHashNode> HFXetSelfTestChunks(const string &input) {
+	vector<HFXetHashNode> chunks;
+	HFXetChunker chunker;
+	chunker.Process(const_data_ptr_cast(input.data()), input.size(), [&](const_data_ptr_t data, idx_t len) {
+		chunks.push_back({HFXetChunkHash(data, len), uint64_t(len)});
+	});
+	chunker.Finish([&](const_data_ptr_t data, idx_t len) {
+		chunks.push_back({HFXetChunkHash(data, len), uint64_t(len)});
+	});
+	return chunks;
+}
+
 } // namespace duckdb

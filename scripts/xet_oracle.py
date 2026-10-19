@@ -76,6 +76,40 @@ SHARD_VECTORS = [
      40000, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
 ]
 
+STORED_SHARD_VECTORS = [
+    # A xorb of six chunks and one file segment: enough chunks for a run to have a middle and an end,
+    # small enough to compile in as bytes (680 of them). The key is fixed because it is baked into them.
+    ('keyed stored shard, splitmix64 n=300000 seed=7', KIND_SPLITMIX, "", 300000, 7, 0, "22" * 32),
+]
+
+
+def build_stored_shards():
+    """A shard exported the way the CAS stores one, for the reader and the matcher to be tested against.
+
+    Nothing in this port's own round trip produces these bytes: a session writes an unkeyed shard, uploads
+    it, and reads back only what it wrote. What a *dedup query* answers with is somebody else's shard,
+    re-keyed under a hash key the shard's own footer carries, with the file section reduced to a bookend
+    and the lookup tables empty - all of it measured on live responses. So the fixture comes from the
+    reference's `export_as_keyed_shard_streaming`, and the checks that run on it are the ones that would
+    otherwise only ever run against a network.
+    """
+    probe = os.path.join(ROOT, "tools", "xet_probe", "target", "release", "xet-probe")
+    vectors = []
+    for name, kind, pattern, size, seed, max_xorb_bytes, key in STORED_SHARD_VECTORS:
+        data = build_input(kind, pattern, size, seed)
+        out = subprocess.run([probe, "shard", str(max_xorb_bytes), "", key], input=data,
+                             check=True, capture_output=True).stdout.decode()
+        fields = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+        keyed = fields.get("keyed_shard_hex", "")
+        if len(keyed) != int(fields["keyed_shard_length"]) * 2:
+            raise SystemExit("the keyed export reported %s bytes but %s hex digits"
+                             % (fields["keyed_shard_length"], len(keyed)))
+        if not keyed:
+            raise SystemExit("the keyed export came back empty")
+        vectors.append((name, kind, pattern, size, seed, max_xorb_bytes, key, keyed,
+                        int(fields["keyed_shard_length"])))
+    return vectors
+
 
 def splitmix_data(n, seed):
     """xet_data's create_random_data: splitmix64, little-endian words, truncated to n bytes."""
@@ -242,6 +276,59 @@ def build_renderings():
     return [("bytes 0x00..0x1f", fields["plain_hex"], fields["hex"], fields["base64"])]
 
 
+def gen_hexes(count, seed):
+    """`count` generated 64-hex strings from a fixed seed, as four generated words each.
+
+    These are not digests of anything. Where a reference function is a pure function of a hash *value*
+    - eligibility, keying - the value can be generated rather than produced by hashing bytes, and a fixed
+    seed means the same strings go to the probe on every run, so the same rows land in the vector file.
+    """
+    mask = (1 << 64) - 1
+    state = seed
+    out = []
+    for _ in range(count):
+        words = []
+        for _ in range(4):
+            state = (state * 6364136223846793005 + 1442695040888963407) & mask
+            z = state
+            z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & mask
+            z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & mask
+            z ^= z >> 31
+            words.append(z)
+        out.append("".join("%016x" % w for w in words))
+    return out
+
+
+def build_hmac_vectors():
+    """How a stored shard keys the chunk hashes it indexes: blake3 keyed hash, key from the footer.
+
+    The CAS re-serializes every shard it stores, and the re-serialization replaces each chunk hash with
+    `DataHash::hmac(footer.chunk_hash_hmac_key)` - measured: the first chunk entry of a real query
+    response is exactly that, and a matcher that compares raw chunk hashes finds nothing in a shard it
+    parsed completely. `DataHash::hmac` is `blake3::keyed_hash(key_bytes, hash_bytes)`, and both sides of
+    that call are byte-order traps: the hash enters as the little-endian bytes of its four words, and a
+    key *hex* string means those same word bytes while the 32 raw bytes of a footer mean themselves.
+    The C++ replays the reference's answers instead of choosing.
+    """
+    probe = os.path.join(ROOT, "tools", "xet_probe", "target", "release", "xet-probe")
+    keys = gen_hexes(64, 0x2545F4914F6CDD1D)
+    hashes = gen_hexes(64, 0x9E3779B97F4A7C15)
+    # the all-zero key is the "no key" sentinel a footer uses for an unkeyed shard: the reader decides
+    # that meaning, the hash function still returns a value for it, and both facts are worth pinning
+    keys[0] = "0" * 64
+    keys[1] = "f" * 64
+    rows = list(zip(keys, hashes))
+    payload = "".join("%s %s\n" % (k, h) for k, h in rows)
+    out = subprocess.run([probe, "hmac"], input=payload.encode(), check=True, capture_output=True).stdout.decode()
+    answers = [line.split() for line in out.splitlines() if line.strip()]
+    if len(answers) != len(rows):
+        raise SystemExit("the hmac probe answered %d of %d pairs" % (len(answers), len(rows)))
+    for (key, hash_hex), (got_key, got_hash, _keyed) in zip(rows, answers):
+        if (got_key, got_hash) != (key, hash_hex):
+            raise SystemExit("the hmac probe reordered its input")
+    return [(key, hash_hex, keyed) for key, hash_hex, keyed in answers]
+
+
 def build_dedup_vectors():
     """Which chunks the CAS's cross-repository dedup index is expected to hold.
 
@@ -255,19 +342,7 @@ def build_dedup_vectors():
     and the same rows land in the vector file.
     """
     probe = os.path.join(ROOT, "tools", "xet_probe", "target", "release", "xet-probe")
-    state = 0x9E3779B97F4A7C15
-    mask = (1 << 64) - 1
-    hexes = []
-    for _ in range(100000):
-        words = []
-        for _ in range(4):
-            state = (state * 6364136223846793005 + 1442695040888963407) & mask
-            z = state
-            z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & mask
-            z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & mask
-            z ^= z >> 31
-            words.append(z)
-        hexes.append("".join("%016x" % w for w in words))
+    hexes = gen_hexes(100000, 0x9E3779B97F4A7C15)
     out = subprocess.run([probe, "dedup"], input=("\n".join(hexes) + "\n").encode(),
                          check=True, capture_output=True).stdout.decode()
     answers = [(line.split()[0], line.split()[1] == "1") for line in out.splitlines() if line.strip()]
@@ -323,7 +398,9 @@ def main():
     renderings = build_renderings()
     trees = build_tree_vectors()
     dedup = build_dedup_vectors()
+    keyed = build_hmac_vectors()
     shards = build_shards()
+    stored_shards = build_stored_shards()
 
     out = []
     add = out.append
@@ -387,6 +464,14 @@ def main():
     add("\treturn vectors;")
     add("}")
     add("")
+    add("const vector<HFXetHmacVector> &HFXetHmacVectors() {")
+    add("\tstatic const vector<HFXetHmacVector> vectors = {")
+    for key, hash_hex, keyed_hex in keyed:
+        add("\t\t{\"%s\", \"%s\", \"%s\"}," % (key, hash_hex, keyed_hex))
+    add("\t};")
+    add("\treturn vectors;")
+    add("}")
+    add("")
     add("const vector<HFXetDedupVector> &HFXetDedupVectors() {")
     add("\tstatic const vector<HFXetDedupVector> vectors = {")
     for hex_hash, eligible in dedup:
@@ -442,6 +527,18 @@ def main():
     add_shard("\treturn vectors;")
     add_shard("}")
     add_shard("")
+    add_shard("const vector<HFXetStoredShardVector> &HFXetStoredShardVectors() {")
+    add_shard("\tstatic const vector<HFXetStoredShardVector> vectors = {")
+    for (name, kind, pattern, size, seed, max_xorb, key, keyed, length) in stored_shards:
+        add_shard("\t\t// %s: %d bytes stored, keyed with %s.." % (name, length, key[:16]))
+        add_shard("\t\t{%s, %s, %dULL, %dULL, %s, %dULL, %s, %s, %dULL}," %
+                  (c_string(name), kind, 0 if kind == KIND_LITERAL else size, seed,
+                   c_string(pattern) if kind != KIND_SPLITMIX else "nullptr", max_xorb,
+                   c_string(key), c_string(keyed), length))
+    add_shard("\t};")
+    add_shard("\treturn vectors;")
+    add_shard("}")
+    add_shard("")
     add_shard("} // namespace duckdb")
     add_shard("")
 
@@ -465,7 +562,8 @@ def main():
     print("wrote src/hf_xet_vectors.cpp: %d input vectors, %d xorb vectors, %d tree vectors, "
           "%d internal, %d rendering, %d dedup"
           % (len(inputs), len(xorbs), len(trees), len(internal), len(renderings), len(dedup)))
-    print("wrote src/hf_xet_shard_vectors.cpp: %d shard vectors" % len(shards))
+    print("wrote src/hf_xet_shard_vectors.cpp: %d shard vectors, %d stored shard vectors"
+          % (len(shards), len(stored_shards)))
     return 0
 
 

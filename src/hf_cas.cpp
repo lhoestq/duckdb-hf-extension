@@ -1,11 +1,14 @@
 #include "hf_cas.hpp"
 
+#include "hf_xet_dedup.hpp"
+
 #include "hf_http.hpp"
 #include "hf_xet_chunk.hpp"
 
 #include "duckdb/common/file_opener.hpp"
 #include "duckdb/common/string_util.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -157,6 +160,36 @@ void HFXetCasClient::UploadShard(const string &shard_bytes, string &shard_hash, 
 	}
 	auto hash_raw = HFJson::GetRaw(response->body, "shard_hash", found);
 	shard_hash = found ? HFJson::AsString(hash_raw) : "";
+}
+
+bool HFXetCasClient::QueryChunk(const HFXetHash &chunk_hash, string &shard_bytes, const string &prefix) {
+	string cas_url, access_token;
+	Authorize(cas_url, access_token);
+
+	auto url = HFUtil::Join(cas_url, "v1/chunks/" + prefix + "/" + chunk_hash.Hex());
+	HTTPHeaders headers;
+	headers.Insert("Authorization", "Bearer " + access_token);
+
+	HFClient client(db, opener, connection, url);
+	// The retry policy is the one the uploads run with (429 and 503 are retried, a 404 is an answer and
+	// is not). What is deliberately not here is a retry of a non-200 outside that: a dedup query that
+	// fails costs an upload of content that may already be stored, which is slow and correct, whereas a
+	// dedup query that is *treated* as a miss when the service was actually refusing the token is slow,
+	// correct and invisible - so the status has to be reported, not swallowed.
+	string body;
+	auto status = client.GetStatus(url, body, headers, false);
+	if (status == 404) {
+		shard_bytes.clear();
+		return false;
+	}
+	if (status != 200) {
+		// HFClient::ThrowHTTPError wants an HTTPResponse, and rebuilding one to phrase this is worse than
+		// just saying what happened: the status, the chunk, and what the CAS bothered to answer.
+		throw IOException("the Xet content store answered %d for a dedup query about chunk %s: %s", status,
+		                  chunk_hash.Hex(), body.size() > 200 ? body.substr(0, 200) : body);
+	}
+	shard_bytes = std::move(body);
+	return true;
 }
 
 namespace {
@@ -314,6 +347,73 @@ HFXetCompressionScheme ChunkCompression(optional_ptr<FileOpener> opener, const s
 
 } // namespace
 
+//! Whether to ask the CAS what it already holds before uploading a file's chunks.
+//!
+//! Asking costs a round trip per 256 chunks and, on a hit, a shard to parse. Not asking costs uploading
+//! bytes the store already has, which is the one thing content-defined chunking exists to avoid - so the
+//! default is on, and the setting is there for the case that earns it: a dedup pointer names an xorb this
+//! repository never uploaded, so a file whose shard points at someone else's content can only be read by
+//! something that can reach that content too (docs/XET.md, M9).
+bool DedupQueries(optional_ptr<FileOpener> opener, const string &path) {
+	if (opener) {
+		Value value;
+		FileOpenerInfo info;
+		info.file_path = path;
+		if (FileOpener::TryGetCurrentSetting(opener, Identifier("hf_xet_upload_dedup"), value, info) &&
+		    !value.IsNull()) {
+			return value.GetValue<bool>();
+		}
+	}
+	return true;
+}
+
+//! How much the re-reader holds at a time: ~16 chunks, which is what turns a run of wanted chunks into
+//! one read instead of sixteen syscalls. Bigger would only read more of a skipped run; the chunker's own
+//! maximum chunk size (128 KiB) is what has to fit, four times over.
+constexpr idx_t HF_UPLOAD_REREAD_BUFFER = 1 * 1024 * 1024;
+
+//! Re-reads the chunks a two-pass upload still needs, in file order.
+//!
+//! Pass A worked out where every chunk starts and how big it is; pass B reads back only the ones that are
+//! not already stored. Those arrive in file order but not contiguously - a matched run is skipped - so the
+//! naive version is one seek and one read per 64 KiB chunk, which turns a storage-bound upload into some
+//! 16 000 syscalls per GiB for content that is sitting next to each other. Buffering makes a skip a seek
+//! only when the wanted chunk lies past what is held, and bounds the over-read of a long skipped run at
+//! one buffer.
+class HFChunkReader {
+public:
+	HFChunkReader(FileSystem &fs_p, FileHandle &file_p, idx_t buffer_size_p)
+	: fs(fs_p), file(file_p), buffer(buffer_size_p, '\0') {
+	}
+
+	//! The bytes of one chunk, valid until the next call. A chunk bigger than the buffer is a bug rather
+	//! than a case to handle: the chunker's own limit is what bounds a chunk, and it is a quarter of this.
+	const_data_ptr_t Read(uint64_t offset, idx_t len) {
+		if (len > buffer.size()) {
+			throw IOException("a %llu-byte chunk does not fit the %llu-byte upload buffer", len, buffer.size());
+		}
+		if (offset >= held_start && offset + len <= held_start + held) {
+			return const_data_ptr_cast(buffer.data()) + (offset - held_start);
+		}
+		// Refill from the wanted chunk's own offset - reading what lies before it would be bytes nobody
+		// asked for, and after a long skipped run there can be a great many of them.
+		auto file_size = file.GetFileSize();
+		auto want = std::min<idx_t>(buffer.size(), file_size - offset);
+		fs.Read(file, buffer.data(), int64_t(want), offset);
+		held_start = offset;
+		held = want;
+		return const_data_ptr_cast(buffer.data());
+	}
+
+private:
+	FileSystem &fs;
+	FileHandle &file;
+	string buffer;
+	//! where in the file what is held starts, and how much of it there is. Both zero before the first read.
+	uint64_t held_start = 0;
+	idx_t held = 0;
+};
+
 HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, optional_ptr<FileOpener> opener,
                                          const HFTarget &target, const string &path, const string *sha256_hex) {
 	HFXetUploadResult result;
@@ -340,21 +440,86 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 	}
 	FileHandle &file = *handle;
 
-	HFXetChunker chunker;
-	HFXetXorbBuilder builder(ChunkCompression(opener, path));
-	string buffer(HF_DEFAULT_READ_BUFFER, '\0');
-	auto file_size = file.GetFileSize();
-	idx_t offset = 0;
-
-	// The shard is written at the end, but it describes what happened here, so the upload keeps the
-	// bookkeeping as it goes: the file's chunks in file order (the verification hashes are ranges over
-	// them), and one segment per xorb, since xorbs are filled in file order.
+	// ---- pass A: chunk and hash the file before uploading any of it ----
+	//
+	// Two passes rather than one because the chunks that should not be uploaded can only be known by
+	// asking, and asking needs the file's chunk hashes. The reference has the same shape (query for the
+	// file, then upload what came back unmatched), and it is the only shape in which a dedup pointer can
+	// be acted on rather than discovered after the bytes have gone up. What it costs is a hash and a size
+	// per chunk: 40 bytes, about 2 MB per GiB at the chunker's 64 KiB average - against the 64 MiB of
+	// in-flight xorb buffers already in play, so this is not what bounds file size.
 	vector<HFXetHashNode> file_chunks;
+	{
+		HFXetChunker chunker;
+		string buffer(HF_DEFAULT_READ_BUFFER, '\0');
+		auto file_size = file.GetFileSize();
+		idx_t offset = 0;
+		while (offset < file_size) {
+			auto want = std::min<idx_t>(buffer.size(), file_size - offset);
+			// FileSystem::Read fills exactly `want` bytes or throws, so there is no short read to handle
+			// here - and a chunker must not see a partial block anyway, since gear positions depend on the
+			// bytes that precede them.
+			fs.Read(file, buffer.data(), int64_t(want), offset);
+			offset += want;
+			chunker.Process(const_data_ptr_cast(buffer.data()), want,
+			                [&](const_data_ptr_t data, idx_t len) { file_chunks.push_back({HFXetChunkHash(data, len), len}); });
+		}
+		chunker.Finish([&](const_data_ptr_t data, idx_t len) { file_chunks.push_back({HFXetChunkHash(data, len), len}); });
+	}
+
+	vector<HFXetHash> chunk_hashes;
+	chunk_hashes.reserve(file_chunks.size());
+	for (auto &chunk : file_chunks) {
+		chunk_hashes.push_back(chunk.hash);
+	}
+
+	// ---- what the CAS says it already holds ----
+	//
+	// Every query goes out before a single byte is uploaded. An empty table matches nothing, which is how
+	// the setting turns the whole thing off: the declaration stays, the loop does not run.
+	HFXetDedupTable stored;
+	if (!chunk_hashes.empty() && DedupQueries(opener, path)) {
+		auto queried = HFXetDedupQuery(cas, chunk_hashes, stored);
+		result.dedup_queries = queried.queries;
+		result.dedup_hits = queried.hits;
+		result.dedup_shard_failures = queried.parse_failures;
+	}
+
+	HFXetXorbBuilder builder(ChunkCompression(opener, path));
+	// The shard is written at the end, but it describes what happened here, so the upload keeps the
+	// bookkeeping as it goes: one shard xorb per xorb uploaded, and a segment per stretch of the file that
+	// landed in one.
 	vector<HFXetShardXorb> shard_xorbs;
 	vector<HFXetShardSegment> segments;
 	// one flag per xorb, in the same order as `result.xorbs`: a worker writes its own, and a shared_ptr
 	// keeps it at a stable address while that vector grows
 	vector<shared_ptr<std::atomic<bool>>> insert_flags;
+
+	//! A stretch of consecutive chunks of this file that went into one xorb. "Piece" because a run of new
+	//! data ends in two different situations that are not the same event: the CAS turns out to hold the
+	//! next part of the file (the run ends, the xorb carries on), or the xorb reaches its limits (the xorb
+	//! ends, the run carries on). Segments are per piece, which is the only way both can be true.
+	struct Piece {
+		idx_t file_chunk_start = 0;
+		idx_t xorb_chunk_start = 0;
+		idx_t count = 0;
+		uint64_t bytes = 0;
+	};
+	//! pieces closed inside the xorb currently open, in the order they were closed
+	vector<Piece> pieces;
+	//! the piece being fed right now, empty when the last chunk fed belonged to a matched run
+	Piece piece;
+	//! which chunk of the file each chunk of the open xorb came from. Needed because a xorb's chunks are
+	//! no longer one contiguous stretch of the file once a matched run has been skipped over - and the
+	//! file's first chunk is looked up through it (see starts_a_file below).
+	vector<idx_t> xorb_file_positions;
+
+	auto close_piece = [&]() {
+		if (piece.count > 0) {
+			pieces.push_back(piece);
+			piece.count = 0;
+		}
+	};
 
 	auto flush_xorb = [&](bool force) {
 		// A xorb is closed when it is full, and only at a chunk boundary otherwise: the 64 MiB and
@@ -387,29 +552,41 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 			chunk.hash = xorb.chunks[i].hash;
 			chunk.byte_range_start = byte_range_start;
 			chunk.unpacked_bytes = xorb.chunks[i].uncompressed_size;
-			// the reference marks the chunk that begins a file, which is what lets the CAS offer this
-			// content to a *different* repository's dedup query later. One file per upload, so this is
-			// the first chunk of the first xorb and nothing else
-			chunk.starts_a_file = segments.empty() && shard_xorb.chunks.empty() && result.xorbs.size() == 1;
+			// The reference marks the chunk that begins a file, which is what lets the CAS offer this
+			// content to a *different* repository's dedup query later. Which chunk that is is a question
+			// about the file, not about this xorb: with dedup the file's first chunk can be one the CAS
+			// already had, and then no chunk in any xorb uploaded here starts the file - the shard that
+			// already holds it is what indexes it, and flagging a chunk of our own on top of that would
+			// describe the same content twice.
+			chunk.starts_a_file = xorb_file_positions[i] == 0;
 			shard_xorb.chunks.push_back(chunk);
-
-			auto chunk_bytes = xorb.chunks[i].uncompressed_size;
-			byte_range_start += chunk_bytes;
-			file_chunks.push_back({chunk.hash, chunk_bytes});
+			byte_range_start += xorb.chunks[i].uncompressed_size;
 		}
 
-		HFXetShardSegment segment;
-		segment.xorb_hash = xorb.hash;
-		segment.unpacked_bytes = uint32_t(uncompressed);
-		// Xorb local, not positions in the file: a reader finds the xorb by hash and then slices *its*
-		// chunk list, so indices are into the block above. One segment per xorb, so the segment is the
-		// whole xorb - and a shard that spells this as file offsets is refused by the CAS with
-		// "invalid shard failed to verify file", which is how it was found.
-		segment.chunk_index_start = 0;
-		segment.chunk_index_end = uint32_t(xorb.chunks.size());
-		segment.file_chunk_start = uint32_t(file_chunks.size() - xorb.chunks.size());
-		segment.file_chunk_end = uint32_t(file_chunks.size());
-		segments.push_back(segment);
+		// Segments, one per piece. The piece being fed ends in this xorb whether or not its run continues
+		// into the next one, so it is closed here and reopened by the next chunk that is added.
+		if (piece.count > 0) {
+			pieces.push_back(piece);
+			piece.count = 0;
+		}
+		for (auto &closed : pieces) {
+			HFXetShardSegment segment;
+			segment.xorb_hash = xorb.hash;
+			// Xorb local, not positions in the file: a reader finds the xorb by hash and then slices *its*
+			// chunk list, so the indices are into the block above. A shard that spells these as file
+			// offsets is refused by the CAS with "invalid shard failed to verify file", which is how it was
+			// found. One segment per xorb is the case with nothing deduped: 0 to the whole xorb.
+			segment.chunk_index_start = uint32_t(closed.xorb_chunk_start);
+			segment.chunk_index_end = uint32_t(closed.xorb_chunk_start + closed.count);
+			segment.file_chunk_start = uint32_t(closed.file_chunk_start);
+			segment.file_chunk_end = uint32_t(closed.file_chunk_start + closed.count);
+			// the sum of this piece's chunks' uncompressed sizes, which is what a segment has to say and
+			// what the CAS checks the chunk table against. Bounded by the xorb's own 64 MiB limit.
+			segment.unpacked_bytes = uint32_t(closed.bytes);
+			segments.push_back(segment);
+		}
+		pieces.clear();
+		xorb_file_positions.clear();
 		shard_xorbs.push_back(std::move(shard_xorb));
 
 		// only now is the xorb handed over - Submit takes it, and the bookkeeping above is the last thing
@@ -417,27 +594,73 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 		uploader.Submit(std::move(xorb), inserted);
 	};
 
-	while (offset < file_size) {
-		auto want = std::min<idx_t>(buffer.size(), file_size - offset);
-		// FileSystem::Read fills exactly `want` bytes or throws, so there is no short read to handle
-		// here - and a chunker must not see a partial block anyway, since gear positions depend on the
-		// bytes that precede them.
-		fs.Read(file, buffer.data(), int64_t(want), offset);
-		offset += want;
-		chunker.Process(const_data_ptr_cast(buffer.data()), want, [&](const_data_ptr_t data, idx_t len) {
-			if (builder.WouldOverflow(len)) {
-				flush_xorb(true);
-			}
-			builder.AddChunk(data, len);
-		});
-	}
-	chunker.Finish([&](const_data_ptr_t data, idx_t len) {
+	auto add_chunk = [&](idx_t file_index, const_data_ptr_t data, idx_t len) {
 		if (builder.WouldOverflow(len)) {
 			flush_xorb(true);
 		}
+		if (piece.count == 0) {
+			// where a piece starts in the xorb is wherever the builder is up to; where it starts in the
+			// file is wherever the walk has got to. Both are only knowable at the moment its first chunk
+			// goes in, which is why a piece starts here rather than being declared by the walk.
+			piece.file_chunk_start = file_index;
+			piece.xorb_chunk_start = builder.ChunkCount();
+			piece.bytes = 0;
+		}
 		builder.AddChunk(data, len);
-	});
+		piece.count++;
+		piece.bytes += len;
+		xorb_file_positions.push_back(file_index);
+	};
+
+	// ---- pass B: read and upload what nobody else has already paid for ----
+	//
+	// The chunk boundaries come from pass A, so a chunk is re-read by position rather than re-chunked:
+	// re-chunking a subrange would move the boundaries, and content-defined chunking whose boundaries move
+	// depending on what you hand it is not content-defined.
+	HFChunkReader reader(fs, file, HF_UPLOAD_REREAD_BUFFER);
+	uint64_t file_offset = 0;
+	idx_t chunk_index = 0;
+	while (chunk_index < file_chunks.size()) {
+		HFXetDedupRun match;
+		if (stored.Match(chunk_hashes, chunk_index, match) > 0) {
+			// These bytes are already stored. Nothing from the file is read for them and nothing is
+			// uploaded: the shard names the xorb they live in, and a file described that way depends on
+			// content this repository may never have stored itself - the reason the asking is a setting.
+			close_piece();
+			HFXetShardSegment segment;
+			segment.xorb_hash = match.xorb_hash;
+			// Copied from the xorb that is pointed into, not from anything this upload knows: the CAS
+			// verifies a segment against the stored xorb, and its own flags are part of what it stored.
+			segment.xorb_flags = match.xorb_flags;
+			segment.chunk_index_start = match.chunk_index_start;
+			segment.chunk_index_end = match.chunk_index_end;
+			segment.file_chunk_start = uint32_t(match.file_chunk);
+			segment.file_chunk_end = uint32_t(match.file_chunk + match.count);
+			segment.unpacked_bytes = uint32_t(match.unpacked_bytes);
+			segments.push_back(segment);
+			result.deduped_chunks += match.count;
+			for (idx_t i = 0; i < match.count; i++) {
+				file_offset += file_chunks[chunk_index + i].size;
+			}
+			chunk_index += match.count;
+			continue;
+		}
+		auto size = file_chunks[chunk_index].size;
+		add_chunk(chunk_index, reader.Read(file_offset, size), size);
+		file_offset += size;
+		chunk_index++;
+	}
 	flush_xorb(true);
+
+	// Segments were emitted whenever the fact about them was known - a matched run as soon as it was
+	// found, a piece of new data when its xorb closed - which is not file order once the two interleave.
+	// A shard's segments are read as a sequence over the file's chunk positions, so they go in that order
+	// before the shard is built. Stable, so that a file with nothing deduped - where they were appended in
+	// order already - is described byte for byte the way this function described it before dedup existed.
+	std::stable_sort(segments.begin(), segments.end(),
+	                 [](const HFXetShardSegment &a, const HFXetShardSegment &b) {
+		                 return a.file_chunk_start < b.file_chunk_start;
+	                 });
 
 	// Nothing names this file to the CAS until every one of its xorbs has landed: the shard below is
 	// resolved against them, and a shard for content still on the wire would be refused.
@@ -447,13 +670,11 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 	}
 
 	// The file's own hash is a keyed hash of its merkle root, un-salted: an upload session has no
-	// reason to pick a salt, and a salt would make the same content hash differently per upload.
+	// reason to pick a salt, and a salt would make the same content hash differently per upload. It is
+	// computed over every chunk pass A found, including the ones dedup meant were never uploaded - a
+	// file's identity is its content, not the subset of it that this upload happened to send.
 	result.file_hash = HFXetFileHash(file_chunks);
 
-	vector<HFXetHash> chunk_hashes;
-	for (auto &chunk : file_chunks) {
-		chunk_hashes.push_back(chunk.hash);
-	}
 	HFXetShardFile shard_file;
 	shard_file.file_hash = result.file_hash;
 	shard_file.segments = segments;

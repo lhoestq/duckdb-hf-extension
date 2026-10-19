@@ -75,6 +75,19 @@ public:
 	//! `result` is the CAS's own words: "exists" or "sync performed".
 	void UploadShard(const string &shard_bytes, string &shard_hash, string &result);
 
+	//! Ask the dedup index what it holds for one chunk hash: `GET {cas}/v1/chunks/default/{hash}`, with the
+	//! same token the uploads use. Returns true and fills `shard_bytes` on a hit - the answer is a whole
+	//! metadata shard, which `HFXetShardView::Parse` reads (measured: the bytes a session uploaded, plus
+	//! the 56-byte footer it was stripped of). Returns false on a 404.
+	//!
+	//! A 404 is worth naming, because it is the answer for all but a sliver of chunks: the index holds a
+	//! file's first chunk and one chunk hash in 1024, so querying any other chunk is wasted network. The
+	//! measurement is in docs/XET.md, M9: of a 1 025-chunk file, the 4 eligible hashes all hit and 13
+	//! controls all missed. Anything that is neither 200 nor 404 throws, because a refused token read as
+	//! "not stored" would pay to upload content the CAS already has, silently.
+	bool QueryChunk(const HFXetHash &chunk_hash, string &shard_bytes,
+	                const string &prefix = HF_XET_DEFAULT_PREFIX);
+
 	//! Where to ask for a repo's write-scoped CAS token. The route is derived rather than discovered:
 	//! `{endpoint}/api/{repo_type}/{repo_id}/xet-write-token`, plus the revision as a path segment for
 	//! the git-backed repo types (a bucket has no revision to name).
@@ -126,6 +139,19 @@ struct HFXetUploadResult {
 	string shard_hash;
 	string shard_result;
 	idx_t shard_bytes = 0;
+
+	//! Cross-repository dedup, as of this file. These describe the *file*, not one xorb, so a caller
+	//! reading one row per xorb sees the same numbers on every row (`deduped_chunks` is a property of the
+	//! whole file: a chunk covered by a pointer segment was never uploaded, so it appears in no xorb).
+	//!
+	//! Chunks the CAS already had, out of the file's total.
+	idx_t deduped_chunks = 0;
+	//! how many times the CAS was asked, how many times it answered with a shard, and how many of those
+	//! answers this build could not parse. A file that deduplicated nothing and a file whose dedup answers
+	//! were unreadable have the same `deduped_chunks` and very different histories.
+	idx_t dedup_queries = 0;
+	idx_t dedup_hits = 0;
+	idx_t dedup_shard_failures = 0;
 
 	//! What a bucket's `addFile` (and `hf_bucket_copy`) calls a xetHash.
 	string XetHash() const {

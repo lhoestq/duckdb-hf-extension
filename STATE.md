@@ -5,12 +5,11 @@ story is `README.md`, the per-release story is `CHANGELOG.md`, the protocol stor
 long form of every decision — the failed attempts and the measurements behind it — is in `git log` bodies.
 This file only holds what is true right now and what to do next.
 
-## Position — 2026-10-19, ~12:55 UTC
+## Position — 2026-10-19, ~15:10 UTC
 
-**0.0.2-pre7 is published, live, for all eight DuckDB client platforms.** HEAD = `e605dde` (M9's rules, shard
-reader and instruments, unreleased); tag `v0.0.2-pre7` is at `39706a5`, 10 commits behind HEAD — the last nine are
-docs-only, but *move the tag forward before the next dispatch*, because the footer's version is `git describe` at
-HEAD and a lagging tag ships a commit sha.
+**0.0.2-pre7 is published, live, for all eight DuckDB client platforms.** HEAD carries M9 (cross-repository dedup,
+unreleased); tag `v0.0.2-pre7` is at `39706a5` — move the tag to HEAD before the next dispatch, because the footer's
+version is `git describe` at HEAD and a lagging tag ships a commit sha.
 
 * Live at `https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main/` (signed) and
   `…/resolve/main/unsigned/`, from CI run `39153506221`, for `v2.0.0-alpha47600`: `linux_amd64`,
@@ -18,10 +17,22 @@ HEAD and a lagging tag ships a commit sha.
   `windows_amd64_mingw`. Sixteen served binaries byte-compared against CI's; `INSTALL`/`LOAD` verified over
   https here. **Everything not `linux_arm64` is verified by byte comparison only** — this machine cannot
   execute it, and a footer plus a sha256 is not a load test.
-* Suites **200 passed / 12 expected failures / 0 failed** (xet 12, xet_upload 30, read 55, write 57,
-  models 24, buckets 22), re-run against `e605dde`; `hf_xet_selftest()` **972 checks / 0 failed** — 471
-  dedup-eligibility rows, 131 shard rows, and one non-vacuous `sampled-eligible chunks` row
-  (`splitmix64 n=4000000 seed=11`, 1 of 1) which is what keeps the persisted chunk flag file-start-only.
+* Suites **212 passed / 13 expected failures / 0 failed** (xet 12, xet_upload 42, read 55, write 57, models 24,
+  buckets 22); `hf_xet_selftest()` **1090 checks / 0 failed** — 471 dedup-eligibility rows, 64 HMAC rows, the shard
+  rows, 24 rows over the keyed stored-shard fixture, and one non-vacuous `sampled-eligible chunks` row
+  (`splitmix64 n=4000000 seed=11`, 1 of 1) which is what keeps the persisted chunk flag file-start-only. The expected
+  count lives in `test/sql/hf_selftest.test`; `scripts/ci_selftest.sh` reads it from there, so a check that silently
+  disappears is a failed run rather than a quieter green one.
+* **M9 is shipped, and proven live in both shapes.** p7: content stored against a datasets repo, never published,
+  then the same bytes published from a bucket repo — one row, no xorbs, `deduped_chunks > 0`, shard of pointers, and
+  `read_blob` over `hf://` returns identical bytes. p8: the same file with two rows appended — partial dedup, the
+  uploaded `uncompressed_bytes` strictly below the file size, mixed shard reads back byte-identical.
+* **The reason it took two attempts: stored shard chunk hashes are keyed, xorb hashes are not.** A CAS dedup answer
+  is another client's shard — footer 200 bytes, `chunk_hash_hmac_key` at offset 72 of it, file section a lone
+  bookend, all three lookup tables empty — and every chunk hash inside it is `keyed_hash(footer_key, hash)`. The
+  first consumer asked, parsed, registered and matched nothing: offline-green, live-zero. `docs/XET.md` → *M9* has
+  the measurements, the footer-bytes-vs-hex trap, and the compiled-in keyed fixture (`HFXetStoredShardVectors()`,
+  exported by `export_as_keyed_shard_streaming` through `xet-probe shard 0 "" <key>`) that covers it offline.
 * **M9's producer half is settled by measurement, not inference.** The CAS indexes a file's first chunk *and*
   one hash in 1024, computing the second itself: 4 hits out of 4 eligible chunks (3 of them with the persisted
   flag clear), 13 controls answered 404. `scripts/cas_dedup_probe.py` reproduces it and prints its own verdict;
@@ -31,27 +42,18 @@ HEAD and a lagging tag ships a commit sha.
 
 ## Next, in order
 
-1. **M9 (C) then (D)** — query, match, pointer segments. `docs/XET.md` → *M9* has the measured rules; the shape of
-   the work:
-   * `HFClient` needs a GET that reports status. `Get(url, headers, throw_on_error = false)` cannot be reused for
-     this: it returns `""` for a 404 *and* for a refused token, and those are the two answers that must not be
-     confused — a miss means upload, a 401 means stop.
-   * `GET {cas}/v1/chunks/default/{hex}` with the CAS bearer: 200 is a shard (`HFXetShardView::Parse` reads it),
-     404 is a miss. Ask about chunk 0 and about `HFXetGlobalDedupEligible` chunks, at least 256 chunks apart like
-     the reference; other chunks are not indexed, so asking about them is wasted network (measured: 13/13 were 404).
-   * Match as the reference does: look the first hash up in the registered xorb chunk tables, extend forward while
-     hashes agree, and build the segment with the *referenced xorb's* `xorb_flags` and the summed
-     `unpacked_segment_bytes` (`FileDataSequenceEntry::from_xorb_entries`). A pointer segment is an ordinary
-     segment naming an xorb the uploaded shard does not carry.
-   * Pass A hashes chunks before uploading them, so pass B re-reads each unmatched range by (offset, length) and
-     re-checks the hash — boundaries come from pass A, and re-chunking a subrange would move them.
-   * Not copied from the reference: its defragment / `allow_dedup_on_next_range` heuristics. Taking every match is
-     correct and costs only segments.
-2. **Shard-driven read prefetch** — walk a shard's chunk table instead of one range request per window; this
+1. **Release 0.0.2-pre8** with M9 in it: annotate HEAD as `v0.0.2-pre8`, dispatch build.yml with
+   `reduced_ci_mode: 'disabled'`, publish from the run, and re-do the byte-compare plus https `INSTALL`/`LOAD`
+   verification pre7 got. Nothing in M9 changes a byte for an upload that runs with `hf_xet_upload_dedup = false`,
+   which is a claim worth re-testing on a pre-release rather than asserting.
+2. **Measure what dedup saves on the copy case**: a dataset copied with one extra column, xorb bytes and wall clock
+   with `hf_xet_upload_dedup` on and off. The 1-in-1024 sample is thin by construction; the number to know is how
+   thin, and whether segment count rather than xorb count is what a big partitioned rewrite pays for.
+3. **Shard-driven read prefetch** — walk a shard's chunk table instead of one range request per window; this
    is the fix for the `read_blob`-of-a-big-file gap that is still behind httpfs.
-3. Optional: decide whether CI should `strip` the mingw artifact (73 MB unstripped vs 31 MB for the MSVC
+4. Optional: decide whether CI should `strip` the mingw artifact (73 MB unstripped vs 31 MB for the MSVC
    build), and add macOS install notes if anyone ever reports from one.
-4. Failure-path coverage only where a safe test seam exists — see the *Limitations* note in the README about
+5. Failure-path coverage only where a safe test seam exists — see the *Limitations* note in the README about
    why the CAS-failure and LFS-fallback branches are uncovered by choice.
 
 ## Environment
@@ -96,6 +98,10 @@ scripts/ci_selftest.sh build/release/extension/hf/hf.duckdb_extension   # what C
   are on uncompressed bytes; segment chunk indices are xorb-local while verification hashes are file-wide;
   `chunk_byte_range_start` is unpacked space; the sha256 ext is a `DataHash`, not 32 bytes; the CAS takes its
   own bearer and nothing else, refreshed 30 s early; FileOpeners are thread-affine, so workers get one without.
+  For dedup one more, and it cost a cycle: **footer bytes are not footer hex**. A key read out of a footer means
+  those 32 bytes; a key parsed from a hex string means them reversed inside every 8-byte word; `HFXetChunkHmac`
+  consumes `.bytes`. Stored chunk hashes are keyed and xorb hashes are plain, and only the *query* side is keyed
+  (`HFXetKeyedChunkHash` owns the zero-key "stored as given" sentinel).
 * **Local build, the two traps that produce a confident wrong answer.** (1) An artifact built against the vendored
   shallow DuckDB (HEAD `d4355d01c5`, no tags) is stamped with that sha unless `DUCKDB_VERSION` is set at configure
   time, and the pre-release Python build then refuses to LOAD it; the Makefile now defaults the version, and a CI
@@ -106,6 +112,13 @@ scripts/ci_selftest.sh build/release/extension/hf/hf.duckdb_extension   # what C
   `hf_xet_write` is not connect-time config (SET it after LOAD). `hf_xet_upload`'s `scope` must be a full
   `hf://` URL carrying the path, and `publish` is bucket-only (git-backed repos throw). Read a built
   extension's footer with `scripts/ext_footer.py`, never `strings | grep`.
+* **A fresh shell has neither `cargo` nor `hf` nor `cmake` on PATH.** `export PATH="$HOME/.cargo/bin:$PWD/.venv/bin:$PATH"`
+  covers all three — the venv carries `cmake`, `ninja` and `hf` — after which
+  `cmake --build build/release --target hf_loadable_extension -j 8` is the fast rebuild, and it keeps the
+  `DUCKDB_VERSION` the cache was configured with.
+* **A graded SQL suite parses line by line**, so a section header must be a `--` comment: `//===…===//` is SQL to
+  the runner and swallows the statement under it — which is how a `SET hf_xet_upload_dedup = true` once vanished
+  from a suite while every assertion still reported OK.
 
 ## Rules
 
