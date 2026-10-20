@@ -14,8 +14,9 @@ COPY (SELECT * FROM read_parquet('hf://datasets/me/demo/*.parquet'))
 
 Reads use the Hub's `/resolve/` endpoints (range requests + a shared read-ahead cache); writes use the
 Hub's commit API (`preupload` → git-LFS or Xet → ndjson commit) — the same protocol `huggingface_hub`
-uses. Targets **DuckDB 2.0** (`v2.0.0-alpha…`, *Cyanoptera*), including the Python pre-release
-(`pip install duckdb --pre --upgrade`).
+uses. Targets **DuckDB 2.0** (`v2.0.0-alpha…`, *Cyanoptera*), including the Python pre-release — but pin
+the exact build the published tree serves, right now `pip install duckdb==2.0.0.dev2610151406` (see
+[Installation](#installation); `--pre --upgrade` is already ahead of it).
 
 Current release: **0.0.2-pre8**, built for `v2.0.0-alpha47600` on all eight DuckDB client platforms — cross-repository
 dedup (`COPY TO` an upload can point at content another repository already stored: 0 bytes and 1.4 s to re-upload
@@ -44,6 +45,20 @@ PRAGMA platform;    -- linux_arm64         <- one of linux_amd64, linux_arm64, o
                                             --   windows_amd64, windows_amd64_mingw,
                                             --   linux_amd64_musl, linux_arm64_musl
 ```
+
+The published tree holds **exactly one** version identifier, and a client asks only for its own — so a
+client a single alpha ahead 404s, and `INSTALL` surfaces that as an `IO Error` naming the url it tried.
+DuckDB bumps the alpha identifier with nearly every upstream build, while a new extension build is per
+release, so the moving part is your client: **pin the pre-release that matches the tree** rather than
+upgrading. Verified working today:
+
+```bash
+pip install duckdb==2.0.0.dev2610151406   # reports v2.0.0-alpha47600; `--pre --upgrade` resolves to
+                                          # a newer wheel (v2.0.0-alpha48730), which has no binary yet
+```
+
+(DuckDB 1.x can't install this at all — `CREATE EXTENSION REPOSITORY` is 2.0 syntax, and nothing is
+built for a 1.x identifier; the homebrew `duckdb` CLI is 1.x.)
 
 All eight directories are published at `lhoestq/duckdb-hf-extension`: signed at the root, unsigned under
 `unsigned/`. Take the signed one — `INSTALL` then checks bytes against a key instead of trusting the CDN.
