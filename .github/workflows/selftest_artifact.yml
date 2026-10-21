@@ -14,9 +14,9 @@ name: Reference checks for a past run's artifact
 #     a released client and answered 1090/1090 - so the claim in the release notes needed a run like this
 #     one to point at.
 #
-# The artifact is tested as released, byte for byte: download-artifact returns the file a client downloads,
-# and the runner is linux_amd64, so linux_amd64 is the only platform that can be *loaded* here. Any other
-# platform argument would fail on "wrong ELF class" rather than on anything about the extension; the
+# The artifact is tested as released, byte for byte: the file a client downloads, from the run that built
+# it. The runner is linux_amd64, so linux_amd64 is the only platform that can be *loaded* here; any other
+# platform argument would fail on "wrong ELF class" rather than on anything about the extension, and the
 # evidence for the rest of them is the footer check in scripts/verify_published.py, which runs against the
 # served bytes instead of a running client.
 on:
@@ -42,14 +42,27 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          # run-id is NOT implied: without it the action defaults to the run it is executing in, which has
-          # no artifacts of its own, and the failure message ("Artifact not found for name: hf-v2.0.0-...")
-          # reads like an expired artifact rather than like an input that was never forwarded.
-          run-id: ${{ inputs.run_id }}
-          name: hf-${{ inputs.duckdb_version }}-extension-linux_amd64
-          path: artifact
+      - name: fetch the artifact out of that run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          want="hf-${{ inputs.duckdb_version }}-extension-linux_amd64"
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${{ inputs.run_id }}/artifacts"
+          id=$(gh api "$api" --jq ".artifacts[] | select(.name == \"$want\") | .id")
+          if [[ -z "$id" ]]; then
+            echo "::error::run ${{ inputs.run_id }} has no $want artifact - these are the names it does have:"
+            gh api "$api" --jq '.artifacts[].name' >&2
+            exit 1
+          fi
+          # Not actions/download-artifact, which cannot reach this even with run-id set and a readable
+          # token: artifacts are scoped to the workflow *file* that uploaded them, and "Build extension"
+          # is not this file, so a v4 download of someone else's artifact answers "Artifact not found"
+          # rather than "forbidden". The REST endpoint is not workflow-scoped, so it is the way in.
+          curl -sfL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/$id/zip" -o artifact.zip
+          mkdir -p artifact && unzip -q artifact.zip -d artifact
+          echo "artifact $id ($want) contains:" && ls -l artifact
       - name: pick the duckdb client to test with
         run: |
           set -euo pipefail
