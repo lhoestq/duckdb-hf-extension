@@ -135,6 +135,14 @@ scripts/ci_selftest.sh build/release/extension/hf/hf.duckdb_extension   # what C
   those 32 bytes; a key parsed from a hex string means them reversed inside every 8-byte word; `HFXetChunkHmac`
   consumes `.bytes`. Stored chunk hashes are keyed and xorb hashes are plain, and only the *query* side is keyed
   (`HFXetKeyedChunkHash` owns the zero-key "stored as given" sentinel).
+* **A Parquet footer cannot be edited in place on Xet — investigated 2026-10, nothing built** (`docs/PARQUET_METADATA_EDIT.md`).
+  The Merkle half of the problem is already solved server-side (`/v2/file-chunk-hashes/{hash}` + `X-Range-Dirty` hands back
+  `MerkleHashSubtree`s for the untouched gaps), but a shard's verification entries are per **segment** and are only vouched
+  for whole: `gap_verification` is one range hash per segment lying entirely outside the dirty windows, and
+  `range_hash_from_chunks` consumes *unkeyed* chunk hashes the dedup index never gives back. So `upload_ranges` snaps dirty
+  ranges to segment boundaries and re-downloads and re-chunks them — a segment ≤ 64 MiB, and for a file inside one xorb the
+  segment is the file. Composed files also carry no sha256, so they can only be published to buckets. Ask upstream for
+  chunk-granular verification, not for a client feature.
 * **Local build, the two traps that produce a confident wrong answer.** (1) An artifact built against the vendored
   shallow DuckDB (HEAD `d4355d01c5`, no tags) is stamped with that sha unless `DUCKDB_VERSION` is set at configure
   time, and the pre-release Python build then refuses to LOAD it; the Makefile now defaults the version, and a CI
