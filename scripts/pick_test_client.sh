@@ -65,7 +65,12 @@ fi
 echo "duckdb under test: $($client --version)"
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   echo "DUCKDB=$client" >> "$GITHUB_ENV"
-  [[ -n "${LD_LIBRARY_PATH:-}" ]] && echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+  # an `&&` here would be the last command of the script: on the released-client branch LD_LIBRARY_PATH is
+  # unset, the test is false, and `set -e` turns a working pick into exit 1 -- in Actions only, because
+  # locally GITHUB_ENV is unset and the else-branch echo below is what ends the script.
+  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+  fi
 else
   # locally, print it the way Actions will hand it to the next step, so the caller can copy it
   echo "DUCKDB=$client"
