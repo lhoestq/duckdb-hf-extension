@@ -44,6 +44,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          # run-id is NOT implied: without it the action defaults to the run it is executing in, which has
+          # no artifacts of its own, and the failure message ("Artifact not found for name: hf-v2.0.0-...")
+          # reads like an expired artifact rather than like an input that was never forwarded.
+          run-id: ${{ inputs.run_id }}
           name: hf-${{ inputs.duckdb_version }}-extension-linux_amd64
           path: artifact
       - name: pick the duckdb client to test with
