@@ -5,24 +5,39 @@ story is `README.md`, the per-release story is `CHANGELOG.md`, the protocol stor
 long form of every decision — the failed attempts and the measurements behind it — is in `git log` bodies.
 This file only holds what is true right now and what to do next.
 
-## Position — 2026-10-21, ~14:25 UTC
+## Position — 2026-10-21, ~15:30 UTC
 
-**The target is DuckDB `v2.0.0`, released.** `0.0.2-pre9` is tagged (annotated, on the commit that moves
-`HF_EXTENSION_VERSION`, which is what a release tag has to be) and built for it: locally the full
-suite is **212 passed / 13 expected failures / 0 failed** and `hf_xet_selftest()` **1090 / 0** on
+**`0.0.2` — no suffix — is the release, and the target is DuckDB `v2.0.0`, released.** Tagged on the commit that
+moves `HF_EXTENSION_VERSION` (which is what a release tag has to be), built locally: the full suite is
+**212 passed / 13 expected failures / 0 failed** and `hf_xet_selftest()` **1090 / 0** on
 `v2.0.0 (Cyanoptera) d54cbbe3df`, with no change to the extension's source — the 736 commits between
-`v2.0.0-alpha47600` and the release broke nothing here. Pending: CI on the tag ref, then publish + verify.
-A client on released 2.0.0 has nothing to install until that publish happens (`LOAD` compares identifiers, it does
-not fall back), so the live release is still pre8 on the alpha identifier.
+`v2.0.0-alpha47600` and the release broke nothing here. `v0.0.2-pre9` is also tagged: it is the cutover commit
+(2.0.0 target, mirror retired) and CI built seven of its eight platforms before the run was cancelled in favour of
+this one. It is not published and nothing references it as a release.
+
+**Publishing moved to a bucket**: `duckdb-extensions/builds`, so the client prefix is
+`https://hf.co/buckets/duckdb-extensions/builds/resolve` — no `/main`, because a bucket has no revision. Probed
+before publishing anything real: anonymous `GET` of a bucket path → 200 after a redirect to a signed CDN url with
+`user_id=public`; a `.well-known/` key path is served like any other path; an absent file is a real 404. Both
+`publish_extension_repo.py` and `verify_published.py` now take `--bucket` / `HF_BUCKET` (`--repo` / `HF_REPO` still
+works, and the dataset keeps every file pre1–pre8 put there — nothing deletes on either backend).
 
 What moved for 2.0.0: `Makefile`/`scripts/run_all.sh` default to `DUCKDB_VERSION=v2.0.0`, `../vendor/duckdb` is a
 checkout of the `v2.0.0` tag, `.github/workflows/build.yml` passes `duckdb_version: v2.0.0` **and no longer passes
 `override_duckdb_repository`** — the one-commit mirror at `https://github.com/lhoestq/duckdb` existed only to carry
 a tag upstream never published, and upstream publishes 2.0.0. It stays for the artifacts it built. The other thing
-that changed is cost: extension-ci-tools fetches a prebuilt DuckDB static-libs archive when
-`https://duckdb-staging.duckdb.org/<short sha>/latest_alpha_version.txt` answers, and it answers for `d54cbbe3df`
-(`v2.0.0-alpha49307`) and 404s for the old alpha's commit — so look for `Using prebuilt DuckDB archive:` in a 2.0.0
-job log, where every pre-2.0 job compiled DuckDB for ~7 minutes first.
+that changed is cost, and it is measured now, not predicted: on the pre9 run a job printed
+`Using prebuilt DuckDB archive: https://duckdb-staging.duckdb.org/d54cbbe3df/v2.0.0-alpha49307/…/duckdb-static-libs-linux-arm64.tar.gz`
+~50 seconds in, where every pre-2.0 job compiled DuckDB for ~7 minutes first. extension-ci-tools asks
+`duckdb-staging.duckdb.org/<short sha>/latest_alpha_version.txt` and builds from source only when that 404s — it
+404s for the old alpha's commit and answers for `d54cbbe3df`.
+
+**The one thing that failed on the pre9 run was not this repo.** `distribution / linux_arm64` died inside
+`docker build` of the toolchain image: `yum groupinstall "Development Tools"` could not fetch EPEL8 metadata
+(`Curl error (60): Peer certificate cannot be authenticated` for `mirrors.wcupa.edu/epel/8/…/repomd.xml`, then
+*All mirrors were tried*). Steps ran, a runner existed, the failure is upstream third-party infra — so the response
+is `gh run rerun <run> --failed` (one matrix job, minutes now that DuckDB is downloaded), not a code change. Note
+that this is a different signature from the `steps: 0` billing failure below: that one never reached a runner.
 
 ### 0.0.2-pre8, the live release (for `v2.0.0-alpha47600`)
 
@@ -84,15 +99,16 @@ lagging-tag trap; it only has to differ from what was built.
 
 ## Next, in order
 
-1. **`0.0.2-pre9`, the DuckDB 2.0.0 cutover: tagged, CI and publish pending.** The sequence, run once end to end
+1. **`0.0.2`, the DuckDB 2.0.0 release: tagged, CI and publish pending.** The sequence, run once end to end
    for pre8 and unchanged for a new DuckDB identifier — bump
    `HF_EXTENSION_VERSION` and the `smoke_write.sql` assertion together, commit, annotate the tag, push both, then
    `gh workflow run "Build extension" --ref refs/tags/<tag>` (dispatch on the tag, never on HEAD). Once green —
    `RUN=<run> DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" scripts/make_extension_repo_from_ci.sh dist/repo-signed`,
    the same tree unsigned into `dist/repo`, then
-   `HF_REPO=lhoestq/duckdb-hf-extension scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo`,
+   `HF_BUCKET=duckdb-extensions/builds scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo`,
    then `scripts/verify_published.py` with the same two arguments, then `scripts/test_install.py` on both urls.
-   A hung job gets cancelled through the API and the tag re-dispatched.
+   A hung job gets cancelled through the API and the tag re-dispatched; a job that fails inside DuckDB's own
+   docker/toolchain steps gets `gh run rerun <run> --failed` instead.
 2. **A live A/B for the dedup flag.** What is covered today: with `hf_xet_upload_dedup = false` the *offline*
    byte-identity vectors still pass (that is how `docs/XET.md` describes the suite, and the oracle generator has no
    dedup path, so it is a real no-dedup baseline), and live the flag is covered only by counters

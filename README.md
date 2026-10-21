@@ -21,9 +21,10 @@ same one relabelled. [Installation](#installation) says which client to pin agai
 
 Current release: **0.0.2-pre8**, built for `v2.0.0-alpha47600` on all eight DuckDB client platforms — cross-repository
 dedup (`COPY TO` an upload can point at content another repository already stored: 0 bytes and 1.4 s to re-upload
-237 MB you already have). **0.0.2-pre9** is tagged and built for `v2.0.0`; it publishes when its CI run finishes,
-and until it does a client on released 2.0.0 has nothing to install — which is a refusal from `LOAD`, not a
-fallback. HEAD may carry fixes beyond either.
+237 MB you already have). **0.0.2** is tagged and built for `v2.0.0`, and it is the first release published to a
+**bucket** rather than a dataset repository: `https://hf.co/buckets/duckdb-extensions/builds/resolve`. Until that
+publish finishes, a client on released 2.0.0 has nothing to install — a refusal from `LOAD`, not a fallback — and
+the dataset tree below keeps serving every pre-release for the alpha identifier. HEAD may carry fixes beyond either.
 Suites: 212 passed / 13 expected failures / 0 failed, plus 1090 offline reference checks. Release notes in
 [CHANGELOG.md](CHANGELOG.md); the Xet protocol port and its measurements in [docs/XET.md](docs/XET.md).
 
@@ -56,8 +57,8 @@ client a single build ahead of the last published build 404s, and `INSTALL` surf
 naming the url it tried. Pin the client whose identifier the tree actually serves:
 
 ```bash
-pip install duckdb                        # 2.0.0, reports v2.0.0 — binaries for this identifier ship with
-                                          #   0.0.2-pre9, published when that tag's CI run is green
+pip install duckdb                        # 2.0.0, reports v2.0.0 — binaries for this identifier go to the
+                                          #   bucket with 0.0.2, published when that tag's CI run is green
 pip install duckdb==2.0.0.dev2610151406   # reports v2.0.0-alpha47600 — what the tree serves today, and what
                                           #   0.0.2-pre8 is built for
 ```
@@ -69,9 +70,12 @@ While the target was an alpha, the identifier moved with nearly every upstream D
 build happened once per release, so the moving part was always the client and pinning was the only way to have
 a working install. A released identifier does not move — that is the one thing 2.0.0 made genuinely easier.
 
-All eight platforms are published under each identifier the tree carries (`v2.0.0-alpha47600/` today,
-`v2.0.0/` from 0.0.2-pre9 on) at `lhoestq/duckdb-hf-extension`: signed at the root, unsigned under
-`unsigned/`. Take the signed one — `INSTALL` then checks bytes against a key instead of trusting the CDN.
+All eight platforms are published under each identifier, signed at the root and unsigned under `unsigned/`:
+`v2.0.0` from 0.0.2 at <https://hf.co/buckets/duckdb-extensions/builds/resolve> (a bucket: object storage, no
+revision in the url), and every `v2.0.0-alpha…` identifier before it at
+`https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main` (a dataset repo, which is what
+pre1–pre8 went into and what those clients still fetch). Take the signed one — `INSTALL` then checks bytes
+against a key instead of trusting the CDN.
 `windows_amd64` vs `windows_amd64_mingw` is not about which Windows you run: DuckDB composes that name
 itself, and `_mingw` appears only when DuckDB was *compiled* with mingw (`#ifdef __MINGW32__`).
 

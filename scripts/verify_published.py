@@ -3,10 +3,13 @@
 
     HF_REPO=lhoestq/duckdb-hf-extension scripts/verify_published.py dist/repo-signed
     HF_REPO=... scripts/verify_published.py dist/repo-signed --unsigned-tree dist/repo
+    HF_BUCKET=duckdb-extensions/builds scripts/verify_published.py dist/repo-signed --unsigned-tree dist/repo
 
 The argument list is deliberately the same as `scripts/publish_extension_repo.py`'s — same trees, same
-`--unsigned-tree` prefix — so the verification command is the publish command with `verify_` in front of
-it, and a release that was published cannot be verified against a different tree by accident.
+`--unsigned-tree` prefix, same target flag — so the verification command is the publish command with
+`verify_` in front of it, and a release that was published cannot be verified against a different tree by
+accident. The target is checked the same way for a dataset repo and a bucket, because both serve the same
+layout; only the url differs (`/resolve/main/` versus `/resolve/`).
 
 Why this exists: a publish uploads files, and a Hub dataset serves files. Neither of those facts says
 anything about whether the tree a client will walk is the tree CI produced, or whether a binary landed in
@@ -32,7 +35,7 @@ import tempfile
 
 import ext_footer
 
-BASE = "https://huggingface.co/datasets/"
+BASE = "https://huggingface.co/"
 
 
 def sha256_of(path):
@@ -77,11 +80,15 @@ def main() -> int:
     parser.add_argument("tree", help="the signed tree, as published at the repository root")
     parser.add_argument("--unsigned-tree", help="the same tree's unsigned copy, published under unsigned/")
     parser.add_argument("--repo", default=os.environ.get("HF_REPO"), help="target dataset repo id")
+    parser.add_argument("--bucket", default=os.environ.get("HF_BUCKET"),
+                        help="target bucket id, e.g. duckdb-extensions/builds — serves /resolve/, no revision")
     args = parser.parse_args()
-    if not args.repo:
-        raise SystemExit("no target repository: set HF_REPO or pass --repo")
+    if args.repo and args.bucket:
+        raise SystemExit("--repo and --bucket both name a target; pick one")
+    if not args.repo and not args.bucket:
+        raise SystemExit("no target: set HF_REPO or HF_BUCKET (or pass --repo / --bucket)")
 
-    root = BASE + args.repo + "/resolve/main/"
+    root = (BASE + args.repo + "/resolve/main/") if args.repo else (BASE + "buckets/" + args.bucket + "/resolve/")
     failures = 0
     checked = 0
     for tree, remote_prefix in ((args.tree, ""), (args.unsigned_tree, "unsigned/")):

@@ -5,7 +5,7 @@ Two independent version numbers: **this project's** (what the extension can do, 
 one DuckDB identifier, so a release is one binary per identifier per platform, and rebuilding for a newer
 pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
 
-## 0.0.2-pre9 — DuckDB 2.0.0 is out, and this is the first release built against a released DuckDB
+## 0.0.2 — DuckDB 2.0.0 is out: the first release built against a released DuckDB, and the first published to a bucket
 
 The target moved from `v2.0.0-alpha47600` to **`v2.0.0`** (upstream `d54cbbe3df17e8e5ce68312f483b4155836112aa`, 736
 commits past the alpha this project spent eight releases on). Nothing in the extension's own source changed for it:
@@ -15,8 +15,25 @@ against the *released* python package instead of a dev wheel — **212 passed / 
 
 * **Why a release was forced rather than optional**: a loadable binary is tied to exactly one DuckDB identifier,
   and `LOAD` compares the footer's against the running client's. Every client on released 2.0.0 is refused by the
-  pre8 artifacts, so the published tree gains a `v2.0.0/` directory beside the alpha one; alpha clients keep
-  working, because publishing only adds directories.
+  pre8 artifacts, so a `v2.0.0/` tree had to be built and published; alpha clients keep what they have, because
+  publishing only ever adds.
+* **The number is `0.0.2`, not `0.0.2-pre9`.** `v0.0.2-pre9` exists — it is the cutover commit, tagged, and CI
+  built seven of its eight platforms before the run was cancelled — but a DuckDB that shipped, a suite with no
+  unexpected failures, and nine releases of history behind it is as close to "no longer pre" as this project can
+  honestly claim. What is *not* reason for the number: nothing in the README's Limitations section moved. The
+  dedup flag, `read_blob` of a big file and the uncovered failure branches are still described there, and still
+  true.
+* **Publishing moved from a dataset repository to a bucket**: `duckdb-extensions/builds`, served at
+  `https://hf.co/buckets/duckdb-extensions/builds/resolve`. What differs is the plumbing, not the client. A
+  dataset is a git repo, so it serves under `/resolve/main/` (a revision), every upload is a commit, and files are
+  stored as pointers; a bucket is object storage, serves under `/resolve/` with no revision at all, and
+  `hf buckets sync` writes bytes with no history behind them — the right shape for a tree a client walks by url.
+  Measured with a probe file before anything real was published: an anonymous `GET` answers 200 after redirecting
+  to a signed CDN url carrying `user_id=public`, a path beginning `.well-known/` is served like any other (which is
+  what a key-pinned `INSTALL` has to fetch), and an absent file answers 404 instead of the website's html. Both
+  `publish_extension_repo.py` and `verify_published.py` take `--bucket` / `HF_BUCKET` now, and the tree arguments
+  are unchanged — the target is the only difference between the two backends, which is what keeps the "same command
+  twice, one with `verify_` in front of it" property intact.
 * **Both CI workarounds for an untagged alpha retire here.** Eight releases of `override_duckdb_repository` →
   `https://github.com/lhoestq/duckdb`, a one-commit mirror whose only purpose was to carry a tag upstream never
   published, plus a refusal to set `duckdb_tag` (the phase `git tag`s inside the clone and nothing reads the
@@ -28,10 +45,11 @@ against the *released* python package instead of a dev wheel — **212 passed / 
   minutes meter at 10×: extension-ci-tools asks `duckdb-staging.duckdb.org/<short sha>/latest_alpha_version.txt`
   for a prebuilt static-libs archive and only compiles DuckDB when that answers 404. It 404s for this project's
   old alpha commit and answers `v2.0.0-alpha49307` for `d54cbbe3df` (and the archive behind it is really there —
-  `…/d54cbbe3df/v2.0.0-alpha49307/duckdb/duckdb/github_release/duckdb-static-libs-osx-arm64.tar.gz` answers 200). The line to look for in a build log is
-  `Using prebuilt DuckDB archive: …`, where before it said *building DuckDB from source instead* — ~7 minutes of
-  every job, in every architecture, gone.
-* **`HF_EXTENSION_VERSION` and the `scripts/smoke_write.sql` assertion move to `0.0.2-pre9`.** Hand-moved, as
+  `…/d54cbbe3df/v2.0.0-alpha49307/duckdb/duckdb/github_release/duckdb-static-libs-osx-arm64.tar.gz` answers 200).
+  Measured on the pre9 run: `Using prebuilt DuckDB archive: …/duckdb-static-libs-linux-arm64.tar.gz` appears ~50
+  seconds into the job, where every job of every release for eight versions spent ~7 minutes compiling DuckDB
+  before a line of this extension was built.
+* **`HF_EXTENSION_VERSION` and the `scripts/smoke_write.sql` assertion move to `0.0.2`.** Hand-moved, as
   always, and still the same trap: pre8's release proved what happens when only the tag moves — an artifact that
   reports the previous release's number. This one is a *different binary for a different DuckDB*, which makes the
   number worth moving on its own merits.

@@ -76,8 +76,12 @@ Two rules follow from how that file has broken twice:
 A repository is a static file tree, `<prefix>/<duckdb_version>/<platform>/hf.duckdb_extension[.gz]` — any
 web server, `file://` directory, or Hub repo. `scripts/make_extension_repo.sh` assembles one from a build;
 `scripts/make_extension_repo_from_ci.sh` assembles one from a CI run's artifacts (how the published tree is
-made, since one machine cannot build eight architectures); `scripts/publish_extension_repo.py` uploads a
-tree to a Hub dataset and prints the client recipes.
+made, since one machine cannot build eight architectures); `scripts/publish_extension_repo.py` publishes a
+tree to a Hub **bucket** (`--bucket` / `HF_BUCKET`, what 0.0.2 and later use) or to a Hub **dataset**
+(`--repo` / `HF_REPO`, what pre1–pre8 went into) and prints the client recipes. The layout is identical — a
+bucket just has no revision in its url (`/resolve/`, not `/resolve/main/`) and no commit behind each upload —
+and neither target ever deletes: `hf buckets sync` runs without `--delete`, because a tree for one duckdb
+version must not remove the binaries clients on another identifier are still fetching.
 
 Three rules the scripts enforce, each because breaking it once failed silently:
 
@@ -112,8 +116,8 @@ Three rules the scripts enforce, each because breaking it once failed silently:
 RUN=<ci-run-id> DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" \
   scripts/make_extension_repo_from_ci.sh dist/repo-signed
 RUN=<ci-run-id> scripts/make_extension_repo_from_ci.sh dist/repo         # same tree, unsigned
-HF_REPO=lhoestq/duckdb-hf-extension scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo
-HF_REPO=lhoestq/duckdb-hf-extension scripts/verify_published.py   dist/repo-signed --unsigned-tree dist/repo
+HF_BUCKET=duckdb-extensions/builds scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo
+HF_BUCKET=duckdb-extensions/builds scripts/verify_published.py   dist/repo-signed --unsigned-tree dist/repo
 ```
 
 The last line is the one that cannot be skipped: it re-fetches every file the publish uploaded, from the url a
