@@ -143,6 +143,22 @@ scripts/ci_selftest.sh build/release/extension/hf/hf.duckdb_extension   # what C
   ranges to segment boundaries and re-downloads and re-chunks them — a segment ≤ 64 MiB, and for a file inside one xorb the
   segment is the file. Composed files also carry no sha256, so they can only be published to buckets. Ask upstream for
   chunk-granular verification, not for a client feature.
+* **Content-defined Parquet pages — measured 2026-10; they need a DuckDB writer patch, and a schema fix here is
+  worth more first** (`docs/CDC_PARQUET_PAGES.md`). Arrow cuts Parquet data pages at rolling-hash boundaries over
+  `(def, rep, value)` (C++ #45360, arrow-rs `chunker/cdc.rs`, pyarrow `use_content_defined_chunking`), so a page
+  downstream of an edit covers the same values and comes out byte-identical. Measured offline against the reference
+  chunker (`tools/xet_probe chunks`, no CAS) at 2M rows: a mid-file insert leaves 50.7% of a DuckDB file's bytes
+  reusable and 95.0% with content-defined pages — 1297 of 1310 payload pages identical, against 8 of 17 today,
+  because `data_page_size_limit` defaults to 100 MiB and a row group is one page. `DATA_PAGE_SIZE_LIMIT 1MiB` fixes
+  the *value*-edit case (95.1 → 99.2%) and nothing else: a shifted row moves every later fixed cut, and below
+  ~256 KiB the shortened value starts a cascade the other way. The cut is one predicate in
+  `PrimitiveColumnWriter::Prepare`, over logical values, before encoding and with no dictionary feedback — so ~50
+  lines and a copy option, upstream, not here; our own 64 KiB Gear chunker cannot recover bytes the writer already
+  re-flowed. What *is* here costs nothing: a rewrite that flips a column `required` → `optional` puts definition
+  levels into every page of that column and reuses 2.7% of the file instead of 97.2%, content-defined pages
+  included, and DuckDB takes nullability from the query's expressions — so `COPY` out of a declared `NOT NULL`
+  table, or normalise every column to optional in the projection (`CASE WHEN c IS NOT NULL THEN c END`, 0.1% of
+  size). Scripts: `scripts/cdc_page_measure.py` (the grid), `scripts/parquet_pages.py` (page walker, `--compare`).
 * **Local build, the two traps that produce a confident wrong answer.** (1) An artifact built against the vendored
   shallow DuckDB (HEAD `d4355d01c5`, no tags) is stamped with that sha unless `DUCKDB_VERSION` is set at configure
   time, and the pre-release Python build then refuses to LOAD it; the Makefile now defaults the version, and a CI
