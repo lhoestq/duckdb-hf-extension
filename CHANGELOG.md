@@ -5,6 +5,37 @@ Two independent version numbers: **this project's** (what the extension can do, 
 one DuckDB identifier, so a release is one binary per identifier per platform, and rebuilding for a newer
 pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
 
+## 0.0.2-pre9 — DuckDB 2.0.0 is out, and this is the first release built against a released DuckDB
+
+The target moved from `v2.0.0-alpha47600` to **`v2.0.0`** (upstream `d54cbbe3df17e8e5ce68312f483b4155836112aa`, 736
+commits past the alpha this project spent eight releases on). Nothing in the extension's own source changed for it:
+`scripts/check.sh` reported `syntax OK` against the new headers on the first try, and the suites ran unchanged
+against the *released* python package instead of a dev wheel — **212 passed / 13 expected failures / 0 failed, and
+`hf_xet_selftest()` 1090 checks / 0 failed**, on `v2.0.0 (Cyanoptera) d54cbbe3df`.
+
+* **Why a release was forced rather than optional**: a loadable binary is tied to exactly one DuckDB identifier,
+  and `LOAD` compares the footer's against the running client's. Every client on released 2.0.0 is refused by the
+  pre8 artifacts, so the published tree gains a `v2.0.0/` directory beside the alpha one; alpha clients keep
+  working, because publishing only adds directories.
+* **Both CI workarounds for an untagged alpha retire here.** Eight releases of `override_duckdb_repository` →
+  `https://github.com/lhoestq/duckdb`, a one-commit mirror whose only purpose was to carry a tag upstream never
+  published, plus a refusal to set `duckdb_tag` (the phase `git tag`s inside the clone and nothing reads the
+  result, because extension-ci-tools exports `DUCKDB_VERSION` and DuckDB's Makefile prefers it over
+  `OVERRIDE_GIT_DESCRIBE`). 2.0.0 is tagged upstream, so the default clone checks it out and
+  `duckdb_version: v2.0.0` is the entire configuration. The Makefile keeps its local pin — that line exists for
+  the case of a checkout at a sha, which still stamps one.
+* **A released DuckDB is also cheaper to build against**, which matters on a private repository where macOS
+  minutes meter at 10×: extension-ci-tools asks `duckdb-staging.duckdb.org/<short sha>/latest_alpha_version.txt`
+  for a prebuilt static-libs archive and only compiles DuckDB when that answers 404. It 404s for this project's
+  old alpha commit and answers `v2.0.0-alpha49307` for `d54cbbe3df` (and the archive behind it is really there —
+  `…/d54cbbe3df/v2.0.0-alpha49307/duckdb/duckdb/github_release/duckdb-static-libs-osx-arm64.tar.gz` answers 200). The line to look for in a build log is
+  `Using prebuilt DuckDB archive: …`, where before it said *building DuckDB from source instead* — ~7 minutes of
+  every job, in every architecture, gone.
+* **`HF_EXTENSION_VERSION` and the `scripts/smoke_write.sql` assertion move to `0.0.2-pre9`.** Hand-moved, as
+  always, and still the same trap: pre8's release proved what happens when only the tag moves — an artifact that
+  reports the previous release's number. This one is a *different binary for a different DuckDB*, which makes the
+  number worth moving on its own merits.
+
 ## 0.0.2-pre8 — cross-repository dedup (M9): an upload can now point at content it did not store
 
 Published from CI run `39325221245` to `lhoestq/duckdb-hf-extension` for `v2.0.0-alpha47600`:

@@ -23,16 +23,18 @@ CI_TOOLS_DIR := ./extension-ci-tools
 endif
 
 # The DuckDB version this extension is built *for*. It has to be stated out loud: the loader compares a
-# version string baked into the artifact with its own, and the alpha tags are not published upstream, so a
-# checkout of the right commit cannot describe itself as that release (the CI-side of the same argument, plus
-# its workaround, is in .github/workflows/build.yml). Left unset when CI provides its own pin - CI is the one
-# that knows which duckdb it built with, and an env var here would outrank its OVERRIDE_GIT_DESCRIBE.
+# version string baked into the artifact with its own. 2.0.0 is tagged upstream, so a vendored checkout at that
+# tag describes itself correctly and this pin is belt-and-braces — but it stays, because the failure it prevents
+# is silent in the wrong direction (see below), and the alpha this project spent eight releases on had no
+# upstream tag at all: the vendored checkout could not describe itself, and only this line made a local build
+# loadable. Left unset when CI provides its own pin - CI is the one that knows which duckdb it built with, and
+# an env var here would outrank its OVERRIDE_GIT_DESCRIBE.
 #
-# Without it a local build produces an artifact stamped with the duckdb commit sha, which the pre-release
-# duckdb refuses to load - and the failure is silent in the wrong direction: `make` succeeds.
+# Without it a local build produces an artifact stamped with the duckdb commit sha, which the released duckdb
+# refuses to load - and the failure is silent in the wrong direction: `make` succeeds.
 ifeq ($(origin DUCKDB_VERSION),undefined)
 ifeq ($(origin OVERRIDE_GIT_DESCRIBE),undefined)
-DUCKDB_VERSION = v2.0.0-alpha47600
+DUCKDB_VERSION = v2.0.0
 export DUCKDB_VERSION
 endif
 endif

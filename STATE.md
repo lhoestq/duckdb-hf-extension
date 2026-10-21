@@ -5,7 +5,26 @@ story is `README.md`, the per-release story is `CHANGELOG.md`, the protocol stor
 long form of every decision — the failed attempts and the measurements behind it — is in `git log` bodies.
 This file only holds what is true right now and what to do next.
 
-## Position — 2026-10-19, ~22:05 UTC
+## Position — 2026-10-21, ~14:25 UTC
+
+**The target is DuckDB `v2.0.0`, released.** `0.0.2-pre9` is tagged (annotated, on the commit that moves
+`HF_EXTENSION_VERSION`, which is what a release tag has to be) and built for it: locally the full
+suite is **212 passed / 13 expected failures / 0 failed** and `hf_xet_selftest()` **1090 / 0** on
+`v2.0.0 (Cyanoptera) d54cbbe3df`, with no change to the extension's source — the 736 commits between
+`v2.0.0-alpha47600` and the release broke nothing here. Pending: CI on the tag ref, then publish + verify.
+A client on released 2.0.0 has nothing to install until that publish happens (`LOAD` compares identifiers, it does
+not fall back), so the live release is still pre8 on the alpha identifier.
+
+What moved for 2.0.0: `Makefile`/`scripts/run_all.sh` default to `DUCKDB_VERSION=v2.0.0`, `../vendor/duckdb` is a
+checkout of the `v2.0.0` tag, `.github/workflows/build.yml` passes `duckdb_version: v2.0.0` **and no longer passes
+`override_duckdb_repository`** — the one-commit mirror at `https://github.com/lhoestq/duckdb` existed only to carry
+a tag upstream never published, and upstream publishes 2.0.0. It stays for the artifacts it built. The other thing
+that changed is cost: extension-ci-tools fetches a prebuilt DuckDB static-libs archive when
+`https://duckdb-staging.duckdb.org/<short sha>/latest_alpha_version.txt` answers, and it answers for `d54cbbe3df`
+(`v2.0.0-alpha49307`) and 404s for the old alpha's commit — so look for `Using prebuilt DuckDB archive:` in a 2.0.0
+job log, where every pre-2.0 job compiled DuckDB for ~7 minutes first.
+
+### 0.0.2-pre8, the live release (for `v2.0.0-alpha47600`)
 
 **0.0.2-pre8 is published, live, for all eight DuckDB client platforms.** It is M9 (cross-repository dedup) plus
 the MSVC generated-file fix and the `reduced_ci_mode` fix, built by CI run `39325221245` — dispatched **on the tag
@@ -27,16 +46,14 @@ lagging-tag trap; it only has to differ from what was built.
   `reference checks on the built artifact (linux_amd64)` job ran on this run and said the same 1090.
   **Everything not `linux_arm64` is verified by byte comparison and footer only** — this machine cannot execute it,
   and a footer plus a sha256 is not a load test.
-* **The release was blocked on Actions for ~3 hours, and the cause was billing, not this repo.** Jobs concluded
-  `failure` in 3–6 s with `steps: 0`, no runner, `BlobNotFound` logs — including the two-step diagnostic
-  (`39305064645`). Fixing the account's billing info cleared it: the diagnostic went green (`39318023750`) and the
-  release run worked first try. Keep `389744541` for exactly this question; it costs seconds and a matrix run costs
-  ~25 minutes of metered time, which on this account is real money.
-* One job of `39318175256` (the first pre8 dispatch) hung: `linux_arm64` sat `in_progress` for 50 minutes where the
-  same build takes 6½, and the second wave of matrix jobs was never created because it waits on the linux jobs.
-  Cancelling and re-dispatching the tag fixed it — run `39325221245` was green in 24 minutes. A hung job is
-  cancelled with `gh api -X POST repos/<owner>/<repo>/actions/runs/<run>/cancel`; `gh run cancel <run> --yes` is a
-  usage error, there is no `--yes`.
+* **That run cost five attempts, and three of them were never this repo's fault.** Three failed with jobs
+  concluding `failure` in 3–6 s, `steps: 0`, no runner and `BlobNotFound` logs — the account's billing, cleared by
+  paying it, not by changing anything here. Keep workflow `389744541` (`.github/workflows/diagnostic.yml`) for that
+  question: it costs seconds where a matrix run costs ~25 minutes of metered time. One more attempt hung: `linux_arm64`
+  sat `in_progress` for 50 minutes where the same build takes 6½, and the second matrix wave was never created because
+  it waits on the linux jobs — a hung job is cancelled with
+  `gh api -X POST repos/<owner>/<repo>/actions/runs/<run>/cancel` (`gh run cancel <run> --yes` is a usage error; there
+  is no `--yes`) and the tag re-dispatched.
 * Suites **212 passed / 13 expected failures / 0 failed** (xet 12, xet_upload 42, read 55, write 57, models 24,
   buckets 22); `hf_xet_selftest()` **1090 checks / 0 failed** — 471 dedup-eligibility rows, 64 HMAC rows, the shard
   rows, 8 rows over the keyed stored-shard fixture in the shard reader plus 12 in the dedup matcher, and one
@@ -67,7 +84,8 @@ lagging-tag trap; it only has to differ from what was built.
 
 ## Next, in order
 
-1. **`0.0.2-pre9`, whenever the next milestone lands.** The sequence, now executed once end to end: bump
+1. **`0.0.2-pre9`, the DuckDB 2.0.0 cutover: tagged, CI and publish pending.** The sequence, run once end to end
+   for pre8 and unchanged for a new DuckDB identifier — bump
    `HF_EXTENSION_VERSION` and the `smoke_write.sql` assertion together, commit, annotate the tag, push both, then
    `gh workflow run "Build extension" --ref refs/tags/<tag>` (dispatch on the tag, never on HEAD). Once green —
    `RUN=<run> DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" scripts/make_extension_repo_from_ci.sh dist/repo-signed`,

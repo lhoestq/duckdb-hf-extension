@@ -14,13 +14,16 @@ COPY (SELECT * FROM read_parquet('hf://datasets/me/demo/*.parquet'))
 
 Reads use the Hub's `/resolve/` endpoints (range requests + a shared read-ahead cache); writes use the
 Hub's commit API (`preupload` → git-LFS or Xet → ndjson commit) — the same protocol `huggingface_hub`
-uses. Targets **DuckDB 2.0** (`v2.0.0-alpha…`, *Cyanoptera*), including the Python pre-release — but pin
-the exact build the published tree serves, right now `pip install duckdb==2.0.0.dev2610151406` (see
-[Installation](#installation); `--pre --upgrade` is already ahead of it).
+uses. Targets **DuckDB 2.0.0** (`v2.0.0`, *Cyanoptera*) — the released version, plain `pip install duckdb`.
+A binary is tied to exactly one version identifier, so the alpha this project was built against up to and
+including 0.0.2-pre8 (`v2.0.0-alpha47600`, what a pre-2.0 client reports) is a different artifact, not the
+same one relabelled. [Installation](#installation) says which client to pin against which identifier.
 
 Current release: **0.0.2-pre8**, built for `v2.0.0-alpha47600` on all eight DuckDB client platforms — cross-repository
 dedup (`COPY TO` an upload can point at content another repository already stored: 0 bytes and 1.4 s to re-upload
-237 MB you already have). HEAD may carry fixes beyond it.
+237 MB you already have). **0.0.2-pre9** is tagged and built for `v2.0.0`; it publishes when its CI run finishes,
+and until it does a client on released 2.0.0 has nothing to install — which is a refusal from `LOAD`, not a
+fallback. HEAD may carry fixes beyond either.
 Suites: 212 passed / 13 expected failures / 0 failed, plus 1090 offline reference checks. Release notes in
 [CHANGELOG.md](CHANGELOG.md); the Xet protocol port and its measurements in [docs/XET.md](docs/XET.md).
 
@@ -40,27 +43,34 @@ tied to exactly one DuckDB version identifier and one platform — which are exa
 names a repository serves. Look both up:
 
 ```sql
-SELECT version();   -- v2.0.0-alpha47600   <- the published tree holds this identifier
+SELECT version();   -- v2.0.0        <- the identifier, and the directory name a repository serves;
+                                     --   a pre-2.0 client answers v2.0.0-alpha47600 instead, and wants
+                                     --   a different binary: one directory per identifier is the mapping
 PRAGMA platform;    -- linux_arm64         <- one of linux_amd64, linux_arm64, osx_amd64, osx_arm64,
                                             --   windows_amd64, windows_amd64_mingw,
                                             --   linux_amd64_musl, linux_arm64_musl
 ```
 
-The published tree holds **exactly one** version identifier, and a client asks only for its own — so a
-client a single alpha ahead 404s, and `INSTALL` surfaces that as an `IO Error` naming the url it tried.
-DuckDB bumps the alpha identifier with nearly every upstream build, while a new extension build is per
-release, so the moving part is your client: **pin the pre-release that matches the tree** rather than
-upgrading. Verified working today:
+A repository serves **one directory per version identifier**, and a client asks only for its own — so a
+client a single build ahead of the last published build 404s, and `INSTALL` surfaces that as an `IO Error`
+naming the url it tried. Pin the client whose identifier the tree actually serves:
 
 ```bash
-pip install duckdb==2.0.0.dev2610151406   # reports v2.0.0-alpha47600; `--pre --upgrade` resolves to
-                                          # a newer wheel (v2.0.0-alpha48730), which has no binary yet
+pip install duckdb                        # 2.0.0, reports v2.0.0 — binaries for this identifier ship with
+                                          #   0.0.2-pre9, published when that tag's CI run is green
+pip install duckdb==2.0.0.dev2610151406   # reports v2.0.0-alpha47600 — what the tree serves today, and what
+                                          #   0.0.2-pre8 is built for
 ```
 
 (DuckDB 1.x can't install this at all — `CREATE EXTENSION REPOSITORY` is 2.0 syntax, and nothing is
 built for a 1.x identifier; the homebrew `duckdb` CLI is 1.x.)
 
-All eight directories are published at `lhoestq/duckdb-hf-extension`: signed at the root, unsigned under
+While the target was an alpha, the identifier moved with nearly every upstream DuckDB build and an extension
+build happened once per release, so the moving part was always the client and pinning was the only way to have
+a working install. A released identifier does not move — that is the one thing 2.0.0 made genuinely easier.
+
+All eight platforms are published under each identifier the tree carries (`v2.0.0-alpha47600/` today,
+`v2.0.0/` from 0.0.2-pre9 on) at `lhoestq/duckdb-hf-extension`: signed at the root, unsigned under
 `unsigned/`. Take the signed one — `INSTALL` then checks bytes against a key instead of trusting the CDN.
 `windows_amd64` vs `windows_amd64_mingw` is not about which Windows you run: DuckDB composes that name
 itself, and `_mingw` appears only when DuckDB was *compiled* with mingw (`#ifdef __MINGW32__`).

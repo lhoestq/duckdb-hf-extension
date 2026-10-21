@@ -32,7 +32,7 @@ scheme="${2:-none}"
 dump="${3:-}"
 
 if [[ ! -d "$objects/hf_library.dir" ]]; then
-  echo "no build tree at build/release - run: . .venv/bin/activate && make release OVERRIDE_GIT_DESCRIBE=v2.0.0-alpha47600" >&2
+  echo "no build tree at build/release - run: . .venv/bin/activate && make release DUCKDB_VERSION=v2.0.0" >&2
   exit 1
 fi
 if [[ ! -e "$input" ]]; then

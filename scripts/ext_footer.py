@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read the metadata footer DuckDB appends to a built extension, and print it.
 
-    scripts/ext_footer.py --version   path/to/hf.duckdb_extension   # -> v2.0.0-alpha47600
+    scripts/ext_footer.py --version   path/to/hf.duckdb_extension   # -> v2.0.0
     scripts/ext_footer.py --platform  path/to/hf.duckdb_extension   # -> windows_amd64_mingw
     scripts/ext_footer.py --extension-version ...                    # -> 0.0.2-pre5
     scripts/ext_footer.py --all ...    # platform, duckdb version, extension version, tab separated
@@ -9,7 +9,7 @@
 Why this exists instead of `strings | grep '^v[0-9]'`: the version identifier *does* appear in the
 footer, but it also appears anywhere a binary happens to contain a string that starts like one. The
 first time this script's predecessor ran over a windows artifact, `strings` found `v0.1H` - some
-fragment of mingw's metadata, which sorts before `v2.0.0-alpha47600` and matched first - and the
+fragment of mingw's metadata, which sorts before `v2.0.0` and matched first - and the
 extension was filed under a directory no client will ever ask for. A footer is a structure, so it is
 read as one.
 

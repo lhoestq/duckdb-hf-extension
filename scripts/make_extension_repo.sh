@@ -2,7 +2,7 @@
 # Assemble a serveable DuckDB extension repository from a build directory.
 #
 #   scripts/make_extension_repo.sh [out_dir]              # default: dist/repo
-#   DUCKDB_VERSION=v2.0.0-alpha47600 scripts/make_extension_repo.sh
+#   DUCKDB_VERSION=v2.0.0 scripts/make_extension_repo.sh
 #   DUCKDB_EXTENSION_SIGNING_PK="$(cat key.pem)" scripts/make_extension_repo.sh   # signed + metadata
 #
 # The resulting directory is a plain static file tree, so any web server (or an HF dataset/bucket,

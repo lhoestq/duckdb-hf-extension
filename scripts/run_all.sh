@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 . .venv/bin/activate
 
 # the loadable extension has to be built for the running duckdb, so both come from the same identifier
-DUCKDB_VERSION="${DUCKDB_VERSION:-v2.0.0-alpha47600}"
+DUCKDB_VERSION="${DUCKDB_VERSION:-v2.0.0}"
 mkdir -p logs
 status=0
 
