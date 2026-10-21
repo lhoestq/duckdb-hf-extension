@@ -34,6 +34,50 @@ against the *released* python package instead of a dev wheel — **212 passed / 
   `publish_extension_repo.py` and `verify_published.py` take `--bucket` / `HF_BUCKET` now, and the tree arguments
   are unchanged — the target is the only difference between the two backends, which is what keeps the "same command
   twice, one with `verify_` in front of it" property intact.
+* **What was published, and how it was checked.** CI run `39624699278`, dispatched on the tag ref `v0.0.2` (not
+  on `main`, which had already moved), built all eight platforms in 26m48s; every artifact footer reads
+  `duckdb_version=v2.0.0 ext_version=v0.0.2 signed=yes`. The tree went up as 17 objects — 8 binaries, 8 `.gz`,
+  the `.well-known` key file — with `hf buckets sync` and no `--delete`, so publishing `v2.0.0/` cannot remove
+  the directories clients on another identifier are still downloading. Then `scripts/verify_published.py`
+  fetched **33 served files and found 0 problems**, and `scripts/test_install.py` installed and loaded over
+  https from the long host, from the short `hf.co` host, and from the unsigned tree, each answering
+  `hf_ls('hf://datasets/lhoestq/demo1')` afterwards.
+* **`hf_status().duckdb_version` answers `v2.0.0-alpha49307` on these binaries, and they are `v2.0.0` binaries.**
+  The 0.0.2 build went green on all eight platforms and red on the job that loads the artifact — which is how
+  this surfaced. extension-ci-tools hands an extension build the static-libs archive DuckDB *staged* for the
+  commit, and the commit tagged `v2.0.0` was staged under `v2.0.0-alpha49307`; that label is what
+  `DuckDB::LibraryVersion()` — the call behind `hf_status().duckdb_version` (`src/hf_functions.cpp:437`) —
+  returns. `nm` says why the extension cannot hear the host: `_ZN6duckdb6DuckDB14LibraryVersionEv` is a *local*
+  (`t`) symbol inside `hf.duckdb_extension`, compiled from the archive's `version.cpp`, and `strings` finds both
+  `v2.0.0-alpha49307` and `v2.0.0` in a CI-built artifact where an artifact built from the tagged checkout
+  carries only `v2.0.0`. Asking the running process is not available either: the released static CLI exports
+  **zero** `duckdb_*` dynamic symbols, and `DatabaseManager` in 2.0.0 has no version member an extension can
+  read. So there is no host-truthful channel to prefer — a third string, `pragma_version().library_version`, is
+  the *client's* own and stays correct.
+* **Why publish rather than fix it**: the load does not depend on that string. The footer `INSTALL`/`LOAD`
+  compare is written from `DUCKDB_VERSION` and says `v2.0.0`; loading the CI-built `linux_arm64` artifact in the
+  released 2.0.0 CLI answers **1090 reference checks / 0 failed** and 14 `hf_*` functions, and the same is now
+  true in CI — run `39662681195` fetches that release's own artifact and tests it with the released client.
+  The alternatives were worse than a footnote. Setting `CI_FETCH_PREBUILT_DUCKDB: false` requires a fork of
+  `duckdb/extension-ci-tools` — it is hard-coded in `_extension_distribution.yml`, is not an input, and a caller
+  of a reusable workflow cannot set the called workflow's `env` — which trades a wrong label for a second
+  dependency sha to maintain and to un-pin the day upstream grows the knob, at ~7 minutes per job. Shadowing
+  `DuckDB::LibraryVersion()` in a translation unit of our own is an ODR violation wearing a fix. Official
+  DuckDB extensions do carry the clean label (`httpfs` for `v2.0.0`: `v2.0.0` twice, no alpha), which says the
+  ecosystem norm comes from building DuckDB from source, not from a trick worth copying.
+* **The CI jobs that check an artifact now pick their client from the artifact.** `scripts/pick_test_client.sh`
+  reads the footer and fetches `duckdb-cli-<platform>.tar.gz` from that DuckDB release — the binary users run,
+  and the strongest load test available on a runner — falling back to `test-support.tar.gz` only when the
+  identifier has no GitHub release asset, which is how every pre-2.0 identifier behaves. It is shared by
+  `build.yml`'s selftest job and by `selftest_artifact.yml`, a workflow dispatch taking a finished run's id that
+  re-runs these checks against *that* run's artifact in about 19 seconds; that exists because a release's
+  artifacts outlive the run that produced them, and re-checking a published binary should not cost eight platform
+  builds. Getting it running cost four dispatches of ≤ 20 s each and produced three facts worth keeping: a
+  workflow input is not forwarded unless you write it (`download-artifact`'s `run-id` defaults to the run it is
+  executing in), artifacts are scoped to the workflow *file* that uploaded them — a v4 download of another
+  workflow's artifact answers "not found", so this goes through the REST API, which is not scoped — and a
+  trailing `&&` as the last command of a `set -e` script is its exit status, which only bites in Actions,
+  because locally `GITHUB_ENV` is unset.
 * **Both CI workarounds for an untagged alpha retire here.** Eight releases of `override_duckdb_repository` →
   `https://github.com/lhoestq/duckdb`, a one-commit mirror whose only purpose was to carry a tag upstream never
   published, plus a refusal to set `duckdb_tag` (the phase `git tag`s inside the clone and nothing reads the
@@ -41,14 +85,16 @@ against the *released* python package instead of a dev wheel — **212 passed / 
   `OVERRIDE_GIT_DESCRIBE`). 2.0.0 is tagged upstream, so the default clone checks it out and
   `duckdb_version: v2.0.0` is the entire configuration. The Makefile keeps its local pin — that line exists for
   the case of a checkout at a sha, which still stamps one.
-* **A released DuckDB is also cheaper to build against**, which matters on a private repository where macOS
-  minutes meter at 10×: extension-ci-tools asks `duckdb-staging.duckdb.org/<short sha>/latest_alpha_version.txt`
+* **A released DuckDB is also cheaper to build against** — with a cost attached, discovered in the same run that
+  proved the saving. extension-ci-tools asks `duckdb-staging.duckdb.org/<short sha>/latest_alpha_version.txt`
   for a prebuilt static-libs archive and only compiles DuckDB when that answers 404. It 404s for this project's
   old alpha commit and answers `v2.0.0-alpha49307` for `d54cbbe3df` (and the archive behind it is really there —
-  `…/d54cbbe3df/v2.0.0-alpha49307/duckdb/duckdb/github_release/duckdb-static-libs-osx-arm64.tar.gz` answers 200).
-  Measured on the pre9 run: `Using prebuilt DuckDB archive: …/duckdb-static-libs-linux-arm64.tar.gz` appears ~50
-  seconds into the job, where every job of every release for eight versions spent ~7 minutes compiling DuckDB
-  before a line of this extension was built.
+  `…/d54cbbe3df/v2.0.0-alpha49307/duckdb/duckdb/github_release/duckdb-static-libs-osx-arm64.tar.gz` answers 200),
+  so `Using prebuilt DuckDB archive: …/duckdb-static-libs-linux-arm64.tar.gz` now appears ~50 seconds into a job
+  where every job of every release for eight versions spent ~7 minutes compiling DuckDB first. What it did not
+  do is make the *run* faster: this release took 26m48s against pre8's 23m39s, because the matrix is dominated
+  by the slowest platform and by signing, not by that compile. What it did cost is the version label described
+  two bullets above — which is the honest trade to remember before treating "prebuilt" as free.
 * **`HF_EXTENSION_VERSION` and the `scripts/smoke_write.sql` assertion move to `0.0.2`.** Hand-moved, as
   always, and still the same trap: pre8's release proved what happens when only the tag moves — an artifact that
   reports the previous release's number. This one is a *different binary for a different DuckDB*, which makes the

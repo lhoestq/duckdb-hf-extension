@@ -35,8 +35,15 @@ reused; `hf-smoke-staging` and `hf-ext-write-probe` are created per run and remo
 The offline checks exist three times because the CI matrix can run neither of the first two: a sqllogictest
 opening with `require hf` is only satisfiable by extensions on DuckDB's compiled-in autoload list, so the
 matrix's test step *skips* `test/sql/hf_selftest.test` — and a skipped file counts as a pass. So
-`scripts/ci_selftest.sh` runs them against **the built artifact**, loaded into the `duckdb` shell that
-artifact ships in its own `test-support.tar.gz`, comparing numbers instead of trusting a verdict.
+`scripts/ci_selftest.sh` runs them against **the built artifact**, comparing numbers instead of trusting a
+verdict. The client it loads the artifact into comes from `scripts/pick_test_client.sh`, which reads the
+artifact's footer and fetches that DuckDB release's own `duckdb-cli-<platform>.tar.gz` — the binary users run.
+It used to use the `duckdb` inside the artifact's `test-support.tar.gz`, and for a *released* DuckDB that
+binary refuses the artifact: it is built from the static-libs archive DuckDB staged for the commit, which
+carries the pre-release label the staging pipeline chose (`v2.0.0-alpha49307` for the commit tagged `v2.0.0`),
+while the footer the loader compares says `v2.0.0`. The fallback to `test-support.tar.gz` is kept for
+pre-release identifiers, which have no GitHub release asset to fetch — and for those, the shipped binary does
+match a DuckDB compiled from source.
 
 ## Building
 
@@ -104,7 +111,12 @@ Three rules the scripts enforce, each because breaking it once failed silently:
   `https://duckdb-staging.duckdb.org/<short sha>/latest_alpha_version.txt` for a prebuilt static-libs archive and
   builds from source when it 404s (`Using prebuilt DuckDB archive:` versus `building DuckDB from source instead`).
   Every alpha job of this repository paid ~7 minutes of compiling, per architecture, per run. On a private
-  repository billing macOS minutes at 10×, that is the line in a build log worth reading.
+  repository billing macOS minutes at 10×, that is the line in a build log worth reading. It is also the line that
+  decides what `hf_status().duckdb_version` says: the archive is a *prebuilt DuckDB under a different label*, and
+  `DuckDB::LibraryVersion()` is statically linked from it, so a downloaded `v2.0.0` archive labels the extension
+  `v2.0.0-alpha49307` (`nm`: local symbol `t _ZN6duckdb6DuckDB14LibraryVersionEv`). Nothing about loading depends
+  on it — the footer is written from `DUCKDB_VERSION`, not from that string — but the choice between the two lines
+  in a build log is visible from SQL, so it is a distribution decision and not a build-speed one.
 * **Signing is what makes `INSTALL` safe.** `make_extension_repo.sh` signs when
   `DUCKDB_EXTENSION_SIGNING_PK` is set (RSA-2048 over a two-level sha256, in the binary's last 256 bytes) and
   publishes the key at `<prefix>/.well-known/duckdb-extension-repo.json`. `scripts/test_install.py` verifies a
@@ -123,7 +135,11 @@ HF_BUCKET=duckdb-extensions/builds scripts/verify_published.py   dist/repo-signe
 The last line is the one that cannot be skipped: it re-fetches every file the publish uploaded, from the url a
 client will use, and fails unless the sha256 matches the tree it was built from *and* each served binary's footer
 names the directory it is served from. Its arguments are the publish script's arguments on purpose — a release
-cannot be verified against a different tree than it was published from by accident.
+cannot be verified against a different tree than it was published from by accident. Then
+`scripts/test_install.py '<prefix>'` (and `…/unsigned`) proves the install path over https from a clean home
+directory, and dispatching `.github/workflows/selftest_artifact.yml` with a run id re-runs every offline check
+against *that* run's artifact with a released client — 19 seconds, which is what makes it possible to re-check a
+published release without rebuilding eight platforms to test one file.
 
 Clients then say `INSTALL hf FROM '<prefix>'; LOAD hf;`. Use `FROM '<prefix>'` rather than
 `SET custom_extension_repository`, which redirects *every* install — including the `httpfs` this extension
@@ -171,8 +187,10 @@ scripts/              try.py run_all.sh check.sh ci_selftest.sh bench.py delete_
                       cas_dedup_probe.py (is this chunk indexed?) dedup_measure.py (what dedup saves)
                       make_extension_repo{,_from_ci}.sh publish_extension_repo.py
                       test_install.py (installs a tree or a url) verify_published.py (served bytes == CI's)
+                      pick_test_client.sh (the released duckdb that can load a given artifact)
 tools/xet_probe       Rust probe over xet-core — the oracle (cargo, --release)
 .github/workflows/build.yml   DuckDB's reusable distribution workflow, for the platform matrix
+.github/workflows/selftest_artifact.yml  offline checks against a *past* run's artifact, released client
 .github/workflows/diagnostic.yml  two steps: can Actions schedule a runner at all
 ```
 

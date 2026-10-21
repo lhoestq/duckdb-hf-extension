@@ -19,12 +19,12 @@ A binary is tied to exactly one version identifier, so the alpha this project wa
 including 0.0.2-pre8 (`v2.0.0-alpha47600`, what a pre-2.0 client reports) is a different artifact, not the
 same one relabelled. [Installation](#installation) says which client to pin against which identifier.
 
-Current release: **0.0.2-pre8**, built for `v2.0.0-alpha47600` on all eight DuckDB client platforms — cross-repository
-dedup (`COPY TO` an upload can point at content another repository already stored: 0 bytes and 1.4 s to re-upload
-237 MB you already have). **0.0.2** is tagged and built for `v2.0.0`, and it is the first release published to a
-**bucket** rather than a dataset repository: `https://hf.co/buckets/duckdb-extensions/builds/resolve`. Until that
-publish finishes, a client on released 2.0.0 has nothing to install — a refusal from `LOAD`, not a fallback — and
-the dataset tree below keeps serving every pre-release for the alpha identifier. HEAD may carry fixes beyond either.
+Current release: **0.0.2**, built for **DuckDB 2.0.0** (`v2.0.0`) on all eight DuckDB client platforms, and the
+first release published to a **bucket** rather than a dataset repository:
+`https://hf.co/buckets/duckdb-extensions/builds/resolve`. It carries cross-repository dedup (`COPY TO` an
+upload can point at content another repository already stored: 0 bytes and 1.4 s to re-upload 237 MB you
+already have). The last build for the pre-2.0 identifier is **0.0.2-pre8** (`v2.0.0-alpha47600`), which keeps
+serving every `v2.0.0-alpha…` client from the dataset tree. HEAD may carry fixes beyond either.
 Suites: 212 passed / 13 expected failures / 0 failed, plus 1090 offline reference checks. Release notes in
 [CHANGELOG.md](CHANGELOG.md); the Xet protocol port and its measurements in [docs/XET.md](docs/XET.md).
 
@@ -57,10 +57,9 @@ client a single build ahead of the last published build 404s, and `INSTALL` surf
 naming the url it tried. Pin the client whose identifier the tree actually serves:
 
 ```bash
-pip install duckdb                        # 2.0.0, reports v2.0.0 — binaries for this identifier go to the
-                                          #   bucket with 0.0.2, published when that tag's CI run is green
-pip install duckdb==2.0.0.dev2610151406   # reports v2.0.0-alpha47600 — what the tree serves today, and what
-                                          #   0.0.2-pre8 is built for
+pip install duckdb                        # 2.0.0, reports v2.0.0 — what the current release (0.0.2) is built for
+pip install duckdb==2.0.0.dev2610151406   # reports v2.0.0-alpha47600 — what 0.0.2-pre8 is built for, still
+                                          #   served, from the older location below
 ```
 
 (DuckDB 1.x can't install this at all — `CREATE EXTENSION REPOSITORY` is 2.0 syntax, and nothing is
@@ -70,12 +69,15 @@ While the target was an alpha, the identifier moved with nearly every upstream D
 build happened once per release, so the moving part was always the client and pinning was the only way to have
 a working install. A released identifier does not move — that is the one thing 2.0.0 made genuinely easier.
 
-All eight platforms are published under each identifier, signed at the root and unsigned under `unsigned/`:
-`v2.0.0` from 0.0.2 at <https://hf.co/buckets/duckdb-extensions/builds/resolve> (a bucket: object storage, no
-revision in the url), and every `v2.0.0-alpha…` identifier before it at
-`https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main` (a dataset repo, which is what
-pre1–pre8 went into and what those clients still fetch). Take the signed one — `INSTALL` then checks bytes
-against a key instead of trusting the CDN.
+All eight platforms are published under each identifier, signed at the root and unsigned under `unsigned/`.
+`v2.0.0` — from 0.0.2 — lives in a bucket, `https://hf.co/buckets/duckdb-extensions/builds/resolve`: object
+storage, no revision in the url. Every `v2.0.0-alpha…` identifier before it lives in a dataset repo,
+`https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main`, which is where pre1–pre8 went and
+what those clients still fetch. The bucket tree was checked by fetching every served path and re-reading each
+binary's footer against the directory serving it (33 files, `scripts/verify_published.py`), and installed over
+https from the long and the short host and from the unsigned tree (`scripts/test_install.py`); the dataset tree
+went through the same two checks when pre8 was published. Take the signed
+one — `INSTALL` then checks bytes against a key instead of trusting the CDN.
 `windows_amd64` vs `windows_amd64_mingw` is not about which Windows you run: DuckDB composes that name
 itself, and `_mingw` appears only when DuckDB was *compiled* with mingw (`#ifdef __MINGW32__`).
 
@@ -84,8 +86,12 @@ itself, and `_mingw` appears only when DuckDB was *compiled* with mingw (`#ifdef
 ```sql
 SET allow_extension_repositories = 'allowed';   -- the gate for adding *and* installing from a repository
 CREATE OR REPLACE EXTENSION REPOSITORY hf_repo
-  WITH PREFIX 'https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main';
+  WITH PREFIX 'https://hf.co/buckets/duckdb-extensions/builds/resolve';
 ```
+
+A client on a pre-release identifier (`v2.0.0-alpha47600`, and everything older) registers the same
+`hf_repo` against `https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main` instead; the two
+trees hold the same extension built for different clients, and one registration string cannot serve both.
 
 The registration is written to `~/.duckdb/extension_repositories/hf_repo.json`, so later sessions find it.
 No public key to paste: DuckDB reads it from the repository's
@@ -120,7 +126,7 @@ registered and the gate open. In Python the gate is connect-time config:
 import duckdb
 con = duckdb.connect(config={"allow_extension_repositories": "allowed"})
 con.execute("CREATE OR REPLACE EXTENSION REPOSITORY hf_repo WITH PREFIX "
-            "'https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main'")
+            "'https://hf.co/buckets/duckdb-extensions/builds/resolve'")
 con.execute("INSTALL hf FROM hf_repo"); con.execute("LOAD hf FROM hf_repo")
 ```
 
@@ -130,7 +136,7 @@ For clients that can pin nothing, and for locally built binaries (unsigned by de
 
 ```sql
 SET allow_unsigned_extensions = true;   -- in Python this must be connect-time config, not a SET
-INSTALL hf FROM 'https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main/unsigned';
+INSTALL hf FROM 'https://hf.co/buckets/duckdb-extensions/builds/resolve/unsigned';
 LOAD hf;
 ```
 
@@ -237,6 +243,18 @@ old version used stay in the CAS — which is what content addressable storage i
 
 ## Limitations
 
+* **On a released 2.0.0 client, `hf_status().duckdb_version` answers `v2.0.0-alpha49307`.** The binary is built
+  for and loads only in DuckDB `v2.0.0` — the footer `INSTALL` and `LOAD` check says `v2.0.0`, and that is the
+  only version string the loader compares. What differs is a *second* string, compiled in from the static-libs
+  archive DuckDB's CI hands to extension builds: the commit tagged `v2.0.0` was staged for packaging as
+  `v2.0.0-alpha49307`, and `DuckDB::LibraryVersion()` — which `hf_status()` reports — carries that label. Same
+  commit (`d54cbbe3df`), same code, different name written down. Official DuckDB extensions do not carry it, so
+  this is ours to explain rather than a house convention. Read the other strings with this in mind: `version()`
+  and `pragma_version().library_version` answer about *your client* and are correct, and the version of *this
+  build* is the footer the loader just checked — the directory it is served from, or `scripts/ext_footer.py`
+  against the file. `hf_status().duckdb_version` is the one string that reports the archive label, because
+  `DuckDB::LibraryVersion()` here resolves to a copy compiled into the extension rather than to the process
+  that loaded it.
 * **Writes buffer to a local temp file first** (the commit API needs sha256 + size up front; a bucket write
   needs the file on disk to chunk it), and upload + commit — or the Xet publish — happen on `Close()`. One
   commit per file, serialized per repository in a process; concurrent writers rely on the Hub's conflict
