@@ -92,13 +92,37 @@ jobs:
       allow_failure_archs: "linux_amd64_musl;linux_arm64_musl;windows_amd64"
       skip_tests: false
 
-  # The matrix does run a test step, but it cannot run test/sql/hf_selftest.test: that file starts with
+    # The matrix does run a test step, but it cannot run test/sql/hf_selftest.test: that file starts with
   # `require hf`, and DuckDB only autoloads extensions on its own compiled-in AUTOLOADABLE_EXTENSIONS
   # list, which a third-party name can never join - so the runner reports "require hf: 1" and skips the
   # file, and a skipped file reports success. This job runs the same reference checks for real, through
-  # the plain shell, against the artifact another job built (a build artifact carries a matching duckdb
-  # binary + libduckdb in test-support.tar.gz precisely so tests can be run against it elsewhere). The
-  # bytes verified here are therefore the bytes a client downloads.
+  # the plain shell, against the artifact another job built. The bytes verified here are the bytes a
+  # client downloads.
+  #
+  # It used to test them with the duckdb binary the build artifact ships in test-support.tar.gz, on the
+  # theory that a build carries a matching DuckDB. For a *released* DuckDB that theory is false, and the
+  # first 2.0.0 release run is what found it: extension-ci-tools downloads the static-libs archive DuckDB
+  # staged for the commit instead of compiling, that archive carries the label it was staged under
+  # (`v2.0.0-alpha49307` for the commit tagged `v2.0.0`), and the binary built from it refuses the very
+  # artifact this job exists to test:
+  #
+  #   Invalid Input Error: ... built specifically for DuckDB version 'v2.0.0' and can only be loaded with
+  #   that version of DuckDB. (this version of DuckDB is 'v2.0.0-alpha49307')
+  #
+  # A labelling difference inside DuckDB's own pipeline, rendered as a red job on a green artifact. The
+  # artifact is right and the staged label is the odd one: the footer is written from DUCKDB_VERSION, the
+  # loader compares that footer against the *client's* identifier, and `DuckDB::LibraryVersion()` compiled
+  # into the extension comes from the archive - which is also why hf_status() reports the staged label on
+  # released clients (see README, Limitations).
+  #
+  # So the client comes from the DuckDB release instead: `duckdb-cli-<platform>.tar.gz`, the binary users
+  # actually run, which makes this the strongest load test available on a runner. That choice lives in
+  # scripts/pick_test_client.sh, shared with selftest_artifact.yml (which re-runs these checks against some
+  # past run's artifact), because two copies of "find a duckdb that can load this" is how one of them ends
+  # up testing something else. The identifier it needs comes from the artifact's own footer, so the job
+  # cannot drift from the thing it tests. When a footer names an identifier with no GitHub release - a
+  # pre-release, which is how DuckDB shipped before 2.0 - the asset 404s and the script falls back to
+  # test-support.tar.gz, which does match a DuckDB compiled from source for that identifier.
   selftest:
     name: reference checks on the built artifact (linux_amd64)
     needs: distribution
@@ -110,22 +134,14 @@ jobs:
           pattern: hf-*-extension-linux_amd64
           path: artifact
           merge-multiple: true
-      - name: unpack the duckdb binary the build shipped with
+      - name: pick the duckdb client to test with
         run: |
           set -euo pipefail
-          support=$(find artifact -name test-support.tar.gz | head -1)
-          if [[ -z "$support" ]]; then
-            echo "::error::the artifact carries no test-support.tar.gz - it is only produced when the matrix builds with tests enabled"
-            find artifact -type f | head -40
-            exit 1
-          fi
-          mkdir -p build && tar -xzf "$support" -C build
           ext=$(find artifact -name hf.duckdb_extension | head -1)
           if [[ -z "$ext" ]]; then echo "::error::no hf.duckdb_extension in the artifact"; find artifact -type f | head -40; exit 1; fi
-          echo "EXT=$ext" >> "$GITHUB_ENV"
-          echo "DuckDB binary to test with:" && ./build/release/duckdb --version || true
+          echo "EXT=$(readlink -f "$ext")" >> "$GITHUB_ENV"
+          scripts/pick_test_client.sh "$ext" artifact
       - name: load it and run every offline check
         run: |
           set -euo pipefail
-          export LD_LIBRARY_PATH="$PWD/build/release/src${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          DUCKDB=./build/release/duckdb bash scripts/ci_selftest.sh "$EXT"
+          bash scripts/ci_selftest.sh "$EXT"

@@ -19,3 +19,6 @@ compile_flags.txt
 
 # the xet reference probe is a cargo build of xet-core, never part of the extension
 tools/*/target/
+
+# duckdb CLI downloaded by scripts/pick_test_client.sh to test an artifact with a released client
+.ci-cache/

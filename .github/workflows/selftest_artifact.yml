@@ -1,0 +1,59 @@
+name: Reference checks for a past run's artifact
+
+# The selftest job in build.yml checks the artifact a run just built, in the same run. This is the same
+# check pointed at a run that already finished, which is a different and occasionally urgent thing:
+#
+#   * A release's artifacts outlive the run that made them. When a published binary has to be re-checked -
+#     because a report came in, or because a check in build.yml changed and someone wants to know whether
+#     the released bytes pass it too - re-dispatching build.yml would rebuild all eight platforms to
+#     re-test one file. This downloads one artifact and runs the checks, in about a minute.
+#   * The 0.0.2 release needed exactly this. Its build was green on all eight platforms while its selftest
+#     job was red, because the duckdb that ships inside a build artifact is labelled with the alpha DuckDB
+#     staged rather than with the release tag (scripts/pick_test_client.sh explains that whole story, and
+#     fixes it for future runs). The published artifacts were only defensible once they had been loaded by
+#     a released client and answered 1090/1090 - so the claim in the release notes needed a run like this
+#     one to point at.
+#
+# The artifact is tested as released, byte for byte: download-artifact returns the file a client downloads,
+# and the runner is linux_amd64, so linux_amd64 is the only platform that can be *loaded* here. Any other
+# platform argument would fail on "wrong ELF class" rather than on anything about the extension; the
+# evidence for the rest of them is the footer check in scripts/verify_published.py, which runs against the
+# served bytes instead of a running client.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Build extension run whose artifact to load"
+        required: true
+        type: string
+      duckdb_version:
+        description: "the DuckDB identifier that run built for, e.g. v2.0.0 - names the artifact"
+        required: true
+        type: string
+        default: "v2.0.0"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  selftest:
+    name: reference checks on hf-${{ inputs.duckdb_version }}-extension-linux_amd64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: hf-${{ inputs.duckdb_version }}-extension-linux_amd64
+          path: artifact
+      - name: pick the duckdb client to test with
+        run: |
+          set -euo pipefail
+          ext=$(find artifact -name hf.duckdb_extension | head -1)
+          if [[ -z "$ext" ]]; then echo "::error::no hf.duckdb_extension in the artifact"; find artifact -type f | head -40; exit 1; fi
+          echo "EXT=$(readlink -f "$ext")" >> "$GITHUB_ENV"
+          scripts/pick_test_client.sh "$ext" artifact
+      - name: load it and run every offline check
+        run: |
+          set -euo pipefail
+          bash scripts/ci_selftest.sh "$EXT"
