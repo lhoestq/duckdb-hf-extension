@@ -60,7 +60,8 @@ pyarrow exposes it as `use_content_defined_chunking=True|{min_chunk_size, max_ch
 Hugging Face wrote the blog for it, `huggingface.co/blog/parquet-cdc`, selling it precisely as dedup for the Xet
 cas — so a DuckDB-side equivalent should borrow Arrow's names rather than invent a dialect). A Gear-hash rolling hash is
 advanced over each column's `(definition level, repetition level, value)` triplets — over *values*, not over
-serialized page bytes — and a page is cut where the hash hits the boundary predicate, subject to
+serialized page bytes, though per byte within each value — and a page is cut where the hash hits the boundary
+predicate, subject to
 `min_chunk_size` (256 KiB default) and `max_chunk_size` (1 MiB default). The rolling state **persists across pages
 and row groups**, one chunker per leaf column.
 
@@ -283,6 +284,45 @@ which is also why the default is 256 KiB and not something smaller.
 nothing, byte-for-byte repeatability, page counts and mean page size following `min`/`max`, the nested fallback,
 nulls, empty and oversized values, prepared-statement serialization, and the binder errors. `test/sql/copy/*`
 passes with the patch in.
+
+## The same question, answered twice: how the fork differs from Arrow's chunker
+
+Read against the current `apache/arrow` main (`cpp/src/parquet/chunker_internal.{h,cc}`, the MD5-generated
+`chunker_internal_generated.h`, `column_writer.cc`, `properties.h`) rather than against notes about it. Same family
+— a Gear rolling hash, a size gate, cuts only between values — and eight real differences.
+
+1. **Where the predicate is sampled.** Arrow rolls per *byte*, including inside a string value, and tests
+   `(hash & mask) == 0` per byte, latching `has_matched_` so the cut lands after the value ends. Its per-value
+   probability is therefore already proportional to value bytes — the property the fork derives and applies
+   explicitly, one hash test per value instead of one per byte.
+2. **Which bits are tested.** Arrow masks the **top** N bits of a 64-bit state: in `(h << 1) + table[b]` the high
+   bits hold a mixture of the last 64 bytes, the low bits hold the last byte. The fork's state is 32 bits and it
+   tests the whole word, so it avalanches first (`lowbias32`) — that is the bug the naive mask version hit.
+3. **Distribution shape.** Arrow needs **8 hits in a row, one per gear table** (`nth_run_`,
+   `kNumGearhashTables == 8`), the normalized-chunking trick from "Git is for Data" §6.2.1, which makes chunk
+   sizes approximately normal. The fork has no normalization: sizes are geometric, mean ≈ 2×min with an
+   exponential tail out to max.
+4. **What `min` and `max` mean.** Arrow's mask width comes from `target = ((min+max)/2 - min)/8`, so its mean sits
+   near `(min+max)/2` and `min` is only a floor; in the fork `min` is floor *and* target and `max` is only a cap.
+   At the shared defaults these coincide — Arrow's own arithmetic lands on ≈512 KiB at min 256 KiB / max 1 MiB
+   (its 48 KiB target is rounded down to a 32 KiB power of two), which is the fork's 2×min and matches the 526 KiB
+   measured here — and they part elsewhere: at min 64 KiB / max 1 MiB Arrow gives ≈320 KiB, the fork ≈128 KiB.
+   Arrow additionally has `norm_level` to sharpen the distribution; the fork has no equivalent.
+5. **State lifetime.** Arrow holds one chunker per leaf column for the whole file, explicitly "not reset between
+   pages and row groups", and leaves the last chunk open so the next `WriteArrow()` continues the same page. The
+   fork's state is per row group, because DuckDB flushes row groups concurrently — and because a Parquet page
+   cannot span row groups in any case.
+6. **Nested data.** Arrow hashes the definition and repetition levels into the rolling hash (2 bytes per `int16`,
+   counted into the chunk size) and cuts only at `rep_level == 0`, i.e. at record boundaries. The fork hashes a
+   one-byte null marker, counts value bytes only, and leaves list and struct columns on size-based cuts.
+7. **Dictionaries.** Arrow chunks an Arrow dictionary array by its **indices** (`DictionaryArray::indices()`) and
+   dictionary-encodes within each chunk, so its boundaries follow the coding; DuckDB decides page membership before
+   the dictionary decision and hashes the raw value bytes.
+8. **Plumbing.** Arrow's is `enable_content_defined_chunking()` plus `CdcOptions{min, max, norm_level}` on the
+   writer builder, and only through `WriteArrow()` — `WriteBatch()` and `WriteBatchSpaced()` throw. The fork's is
+   a COPY option. And the hash tables are the fork's own (one 32-bit table from SplitMix32 against Arrow's eight
+   64-bit tables from MD5), so boundaries do not line up: a DuckDB-CDC file and a pyarrow-CDC file of the same data
+   share nothing beyond what the uploader's own chunking finds.
 
 ## What I did not measure
 
