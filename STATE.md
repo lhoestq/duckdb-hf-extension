@@ -82,11 +82,17 @@ lagging-tag trap; it only has to differ from what was built.
    file twice, flag on then off, comparing what each reads back. A deduplicated shard is deliberately a different
    shard, so the assertion is about the bytes at the end of a read, not the bytes written — which is exactly the
    promise a user of the flag relies on.
-3. **Shard-driven read prefetch** — walk a shard's chunk table instead of one range request per window; this
+3. **Content-defined pages: the nullability fix first, then a decision about upstream.** The writer patch is built
+   and locally committed (`/home/quentin/hf/duckdb`, branch `content-defined-pages`, with its own sqllogictest);
+   what is left there is a decision, not work — push it and open the PR from the `lhoestq/duckdb` fork, or keep
+   carrying it. The cheap fix on our own path is worth more than that decision, and still unbuilt: stop rewrites
+   from flipping a column `required` → `optional` (`src/hf_write.cpp`; the 2.7% vs 97.2% number in
+   `docs/CDC_PARQUET_PAGES.md`), which pays on every write, content-defined pages or not.
+4. **Shard-driven read prefetch** — walk a shard's chunk table instead of one range request per window; this
    is the fix for the `read_blob`-of-a-big-file gap that is still behind httpfs.
-4. Optional: decide whether CI should `strip` the mingw artifact (73 MB unstripped vs 31 MB for the MSVC
+5. Optional: decide whether CI should `strip` the mingw artifact (73 MB unstripped vs 31 MB for the MSVC
    build), and add macOS install notes if anyone ever reports from one.
-5. Failure-path coverage only where a safe test seam exists — see the *Limitations* note in the README about
+6. Failure-path coverage only where a safe test seam exists — see the *Limitations* note in the README about
    why the CAS-failure and LFS-fallback branches are uncovered by choice.
 
 ## Environment
@@ -97,6 +103,7 @@ lagging-tag trap; it only has to differ from what was built.
 | repo | `/home/quentin/hf/hf-duckdb-extension` (private remote `lhoestq/duckdb-hf-extension`) |
 | venv | `. .venv/bin/activate` — has `cmake`, `ninja`, `huggingface_hub`, `duckdb` 2.0.0.dev (no `numpy`) |
 | duckdb | `v2.0.0-alpha47600`, source `d4355d01c59362d57036ad377735dd5340276a5b`, *Cyanoptera*, vendored at `/home/quentin/hf/vendor/duckdb` |
+| duckdb fork | `/home/quentin/hf/duckdb`, remote `https://github.com/lhoestq/duckdb`, branch `content-defined-pages` (`2595e1a88c8`, local only, off `c15a232a57`); build needs `PATH=/home/quentin/hf/hf-duckdb-extension/.venv/bin:$PATH` for cmake/ninja; shell at `build/release/duckdb` |
 | xet-core | `/home/quentin/hf/xet-core` at `e922f74`; `cargo` is at `~/.cargo/bin` and **not on PATH**; the probe binary is `tools/xet_probe/target/release/xet-probe` |
 | token | `~/.cache/huggingface/token` (user `lhoestq`); `gh` authenticated as `lhoestq` |
 | signing key | `~/.config/duckdb-hf/signing.pem`, fingerprint `sha256:f007c8016bc2f3a2…dbfce` |
@@ -159,6 +166,11 @@ scripts/ci_selftest.sh build/release/extension/hf/hf.duckdb_extension   # what C
   included, and DuckDB takes nullability from the query's expressions — so `COPY` out of a declared `NOT NULL`
   table, or normalise every column to optional in the projection (`CASE WHEN c IS NOT NULL THEN c END`, 0.1% of
   size). Scripts: `scripts/cdc_page_measure.py` (the grid), `scripts/parquet_pages.py` (page walker, `--compare`).
+  **Update:** the writer patch is since built, in `/home/quentin/hf/duckdb` branch `content-defined-pages` (local,
+  not pushed) — `CONTENT_DEFINED_CHUNKING`, boolean or `{min_chunk_size, max_chunk_size}`, flat columns only, and
+  it does what the grid predicted (one changed string in 1M rows: 99.6% of the column's page bytes and 98.9% of the
+  reference chunker's chunks reusable, against 20.6% / 72.3% without; an append is unchanged either way, ~91%).
+  The nullability fix above is still the bigger one on our path and still unbuilt.
 * **Local build, the two traps that produce a confident wrong answer.** (1) An artifact built against the vendored
   shallow DuckDB (HEAD `d4355d01c5`, no tags) is stamped with that sha unless `DUCKDB_VERSION` is set at configure
   time, and the pre-release Python build then refuses to LOAD it; the Makefile now defaults the version, and a CI

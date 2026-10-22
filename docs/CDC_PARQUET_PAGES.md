@@ -11,6 +11,12 @@ extension's own write path a *schema* question costs more than the page cut does
 column's nullability, 2.7% of the new file's bytes are reusable and content-defined pages buy ~nothing. That part
 is fixable here, and cheaply.
 
+**Followed up, same month:** (2) has been acted on. The writer patch exists — `/home/quentin/hf/duckdb`, branch
+`content-defined-pages`, `COPY ... (FORMAT PARQUET, CONTENT_DEFINED_CHUNKING true)` — and it delivers the predicted
+dedup on a DuckDB-written file (99.6% of a changed column's page bytes, 98.9% of the reference chunker's chunks,
+against 20.6% and 72.3% without it). "It is built now" below is about the two places where the design above turned
+out to be wrong, and what the built thing does that this document did not predict.
+
 Measured 2026-10. Tooling added with this document: `scripts/cdc_page_measure.py` (the grid) and
 `scripts/parquet_pages.py` (a page-header walker with a `--compare` mode that hashes page bodies).
 
@@ -203,6 +209,81 @@ bytes. The hash that must stay byte-exact for cross-client dedup is the chunk ha
 `src/hf_xet_chunk.cpp` — leave it alone. That is what makes this patch acceptable to upstream in a way that a
 second chunking dialect here would not be.
 
+## It is built now, in a DuckDB fork
+
+`/home/quentin/hf/duckdb`, branch `content-defined-pages` (local, not pushed). The option is
+
+```sql
+COPY t TO 'f.parquet' (FORMAT PARQUET, CONTENT_DEFINED_CHUNKING true);
+COPY t TO 'f.parquet' (FORMAT PARQUET, CONTENT_DEFINED_CHUNKING {min_chunk_size: '256KB', max_chunk_size: '1MB'});
+```
+
+a `WRITE_ONLY` copy option of type `ANY`, so it takes a boolean or a struct of optional sizes, both accepted as a
+byte count or as a size string. It is a copy option and not a setting precisely because a `COPY` gets prepared,
+stored and logged: a session setting would silently change what an already-written script produces, while the
+option travels with the statement (there is a test that prepares a `COPY`, executes it, and requires the file to be
+byte-identical to the same `COPY` run directly). Sizes are uncompressed value bytes, as in Arrow; the defaults are
+Arrow's 256 KiB / 1 MiB; `norm_level` is not implemented, and an unknown struct field is an error rather than a
+silently ignored one — which is why there is no alias for `use_content_defined_chunking` either, since that name
+comes with parameters this does not have. `false` writes bytes identical to omitting the option.
+
+Two design notes from this document did not survive contact with the code.
+
+**The chunker state cannot live on the writer.** "the state living in `PrimitiveColumnWriterState` and surviving row
+groups" above has the right instinct and the wrong conclusion — it lives in the state *and does not* survive row
+groups, because it has to. `ParquetWriter::Flush` calls `Prepare` with no lock held, and several row groups are
+flushed concurrently against one shared `ColumnWriter`, so a chunker on the writer is a data race (it showed up
+first as page counts that changed run to run, not as a crash). Seeding per row group costs almost nothing: a
+boundary is decided by the values between the row group start and itself, so a row group nobody touched still
+comes out byte-identical, which is the whole property.
+
+**A bit-mask predicate is the wrong predicate.** The plan was the classic one — roll a hash over the value bytes,
+cut when the low `log2(target)` bits are zero, which is what a *byte* chunker does to hit a target size. But a page
+can only be cut between two values, so the predicate is sampled once per value, not once per byte: tested once per
+128-byte value, a mask sized for 256 KiB wants 2^18 samples — 34 MB — to fire once, and every page then falls
+through to `max_chunk_size`. Pages came out at 1 MiB whether the minimum was 64 KiB or 256 KiB. The fix is to make
+the boundary a per-value probability proportional to that value's own size — cut with probability
+`value_bytes / min_chunk_size`, which is the per-value form of a byte chunker's `1 / target` per byte, and which
+makes the expected page the target whatever the column looks like. The rolling hash is avalanched (`lowbias32`)
+before it is compared, because in a `(hash << 1) + table[byte]` update the low bits are mostly the last few bytes.
+`min_chunk_size` is therefore a floor *and* the target, and pages average a little over twice it — measured over
+38.4 MB of uncompressed string data in one row group: minimum 128 KiB → 152 pages (mean 253 KiB), 256 KiB → 73
+pages (526 KiB), 512 KiB → 40 pages (958 KiB), option off → 1 page. Not the "distribution between min and max" a
+byte-stream chunker produces, and worth knowing before setting it: DuckDB's average page is `2 × min`, Arrow's is
+nearer `min`.
+
+One more, smaller: the chunker counts its own bytes rather than reusing the writer's `estimated_page_size`, because
+that one counts a *dictionary key's bit width* for a dictionary-encoded value. Left shared, a page-size limit and a
+content-defined minimum would drift apart by orders of magnitude depending on an encoding decision made per row
+group.
+
+What the built thing is worth, measured with the reference chunker (`tools/xet_probe chunks`) over finished files —
+1M rows, one row group, zstd, one 128-byte string changed in the middle:
+
+| | pages of the changed column that survive | those pages' bytes | file chunks the store already has | chunk bytes |
+|---|---|---|---|---|
+| pages cut by size (DuckDB today) | 1 of 2 | 20.6% | 263 of 364 (72.3%) | 71.1% |
+| pages cut by content | 248 of 249 | 99.6% | 354 of 358 (98.9%) | 98.0% |
+
+The append case (1M rows → 1.1M rows, same measurement, chunk level) is 91.4% reusable with size-based pages and
+91.0% with content-defined ones: **CDC pages do nothing for an append**, which the byte chunker at upload time
+already covers almost completely, and which is why the mid-file edit is the case to argue from. Everything else the
+earlier measurement said still holds: this is a flat-column feature (a list or struct leaf keeps size-based cuts,
+since cutting there means cutting at repetition level 0), and the file is ordinary Parquet — pyarrow and stock
+DuckDB 2.0 read these files, and `hash()` of the file and of a re-write of it both agree.
+
+Page count is not free in file size, but it is cheap and the sign is not fixed: on the single 128-byte-string
+column above, cutting into ~512 KiB pages made the file 3.6% *smaller* (21.6 MB against 22.5), because each page is
+compressed on its own and small pages happen to suit this data; on a mixed-type table with dictionaries and
+megabyte strings the same setting cost 3.7%, and `min_chunk_size: 4096` cost 15.2%. So the floor in the option is
+not just a dedup argument, it is the thing keeping page headers and narrow compression windows from adding up —
+which is also why the default is 256 KiB and not something smaller.
+
+`test/sql/copy/parquet/writer/parquet_write_content_defined_pages.test` covers the round trip, `false`-equals-
+nothing, byte-for-byte repeatability, page counts and mean page size following `min`/`max`, the nested fallback,
+nulls, empty and oversized values, prepared-statement serialization, and the binder errors. `test/sql/copy/*`
+passes with the patch in.
+
 ## What I did not measure
 
 Why fixed-width columns under pyarrow CDC keep only ~92% of their pages after an insert where the binary column
@@ -230,6 +311,30 @@ python scripts/parquet_pages.py --compare $CDC_WORK/duckdb_required_v1.parquet $
 numbers) and `duckdb` for Python — DuckDB has no content-defined pages, so the CDC rows can only be produced by
 the reference writer. The grid writes ~2 GB of Parquet to `$CDC_WORK` and does not talk to the network.
 
+With the patch built, the DuckDB side reproduces without pyarrow:
+
+```sh
+cd /home/quentin/hf/duckdb && git checkout content-defined-pages
+export PATH=/home/quentin/hf/hf-duckdb-extension/.venv/bin:$PATH # cmake + ninja
+cmake -B build/release -DCMAKE_BUILD_TYPE=Release -DBUILD_SHELL=ON && cmake --build build/release --target duckdb unittest -j 10
+build/release/test/unittest test/sql/copy/parquet/writer/parquet_write_content_defined_pages.test
+
+# the dedup table above: write a pair, then ask the reference chunker what it already has
+D=/home/quentin/hf/duckdb/build/release/duckdb
+$D -c "CREATE TABLE base AS SELECT i id, repeat(md5(i::VARCHAR),4) payload FROM range(1000000) t(i);
+       CREATE TABLE edit AS SELECT id, CASE WHEN id=500000 THEN 'X'||payload ELSE payload END payload FROM base;
+       COPY base TO 'v1.parquet' (FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE 1000000);
+       COPY edit TO 'v2.parquet' (FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE 1000000);
+       COPY base TO 'c1.parquet' (FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE 1000000, CONTENT_DEFINED_CHUNKING true);
+       COPY edit TO 'c2.parquet' (FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE 1000000, CONTENT_DEFINED_CHUNKING true);"
+/home/quentin/hf/hf-duckdb-extension-bis/tools/xet_probe/target/release/xet-probe \
+    chunks < v1.parquet > v1.chunks   # and v2, c1, c2
+python scripts/parquet_pages.py --compare v1.parquet v2.parquet              # and c1 / c2
+```
+
+`--compare` counts page bodies that hash the same; for the chunk numbers, intersect the two `chunks` files on the
+hash column and divide by the new file's chunk count and bytes. Both are offline.
+
 ## References
 
 - `/home/quentin/hf/vendor/duckdb` at `v2.0.0`: `extension/parquet/writer/primitive_column_writer.cpp`
@@ -248,3 +353,9 @@ the reference writer. The grid writes ~2 GB of Parquet to `$CDC_WORK` and does n
 - `docs/XET.md` for the hash chain that must stay byte-exact, and for what a dedup hit costs to *discover*;
   `docs/PARQUET_METADATA_EDIT.md` for why the metadata can't be edited around these problems either.
 - `scripts/cdc_page_measure.py`, `scripts/parquet_pages.py`, added with this document.
+- The patch itself, `/home/quentin/hf/duckdb` branch `content-defined-pages` (off `c15a232a57`, not pushed):
+  `extension/parquet/include/writer/parquet_cdc_chunker.hpp` (the chunker, its table and why the predicate is a
+  probability), `writer/primitive_column_writer.cpp` (`Prepare`, and which types get cut by content),
+  `include/writer/primitive_column_writer.hpp` (where the state lives), `parquet_extension.cpp` (the option, its
+  parsing and its serialization tags 122–124), `include/parquet_writer.hpp` (the writer options).
+  `test/sql/copy/parquet/writer/parquet_write_content_defined_pages.test` is the contract.
