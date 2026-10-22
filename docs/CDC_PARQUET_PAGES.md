@@ -12,13 +12,17 @@ column's nullability, 2.7% of the new file's bytes are reusable and content-defi
 is fixable here, and cheaply.
 
 **Followed up, same month:** (2) has been acted on. The writer patch exists — `/home/quentin/hf/duckdb`, branch
-`content-defined-pages`, `COPY ... (FORMAT PARQUET, CONTENT_DEFINED_CHUNKING true)` — and it delivers the predicted
-dedup on a DuckDB-written file (99.6% of a changed column's page bytes, 98.9% of the reference chunker's chunks,
-against 20.6% and 72.3% without it). "It is built now" below is about the two places where the design above turned
-out to be wrong, and what the built thing does that this document did not predict.
+`content-defined-pages`, `COPY ... (FORMAT PARQUET, CONTENT_DEFINED_CHUNKING true)` — and its chunker is now a port
+of Arrow's rather than a DuckDB-shaped guess, checked page for page against pyarrow (`scripts/cdc_conformance.py`,
+*It cuts where arrow cuts*). What it is worth on a DuckDB-written file: on a mid-file row shift, 89.8% of the new
+file's bytes are reusable against 50.7% today — 94.2% with the sizes tuned, against pyarrow's 95.0% for the same
+edits — and on a single cell changed deep in the file, 99.6% of that column's page bytes survive against 93.9%.
+"It is built now" below is what the port keeps, what it cannot keep, and what the design above did not predict.
 
-Measured 2026-10. Tooling added with this document: `scripts/cdc_page_measure.py` (the grid) and
-`scripts/parquet_pages.py` (a page-header walker with a `--compare` mode that hashes page bodies).
+Measured 2026-10. Tooling added with this document: `scripts/cdc_page_measure.py` (the grid),
+`scripts/parquet_pages.py` (a page-header walker with a `--compare` mode that hashes page bodies),
+`scripts/parquet_page_values.py` (per-page *value* counts, the only page property two writers can be compared on)
+and `scripts/cdc_conformance.py` (the arrow-cpp boundary check, with its answers recorded in `scripts/fixtures/`).
 
 ## What cuts a page today
 
@@ -90,24 +94,39 @@ query to hand back the shards that hold the matching content (`docs/XET.md`, M9)
 Edits are the ones a dataset actually sees: `append` (tail), `update` (one cell deep in the file), `insert` (one
 row at the middle, ids re-sorted), `delete` (that row again), `widen` (a column added). Writers are DuckDB at four
 page-size settings, pyarrow at its default fixed 1 MiB pages, and pyarrow with CDC at default and small bounds,
-with and without the dictionary. Percentages below are shared bytes as a fraction of the *new* file, i.e. what a
-dedup-aware uploader would not have to send.
+with and without the dictionary, and since this document was first written the same two CDC tunings on the patched
+DuckDB writer. Percentages below are shared bytes as a fraction of the *new* file, i.e. what a dedup-aware uploader
+would not have to send.
 
-2M rows (~150 MB per file), schema declared `NOT NULL` on both sides:
+2M rows (~150 MB per file), schema declared `NOT NULL` on both sides. `limit` is `data_page_size_limit` (size-based
+cuts); the last two columns are the patched writer's `CONTENT_DEFINED_CHUNKING` at Arrow's default sizes and at the
+small ones, from the same materialised sources as the plain `duckdb` column:
 
-| edit | duckdb default | `data_page_size_limit` 1 MiB | 256 KiB | pyarrow fixed | pyarrow CDC | pyarrow CDC 64 KiB | … and no dict |
-|---|---|---|---|---|---|---|---|
-| append | 98.7% | 98.5% | 98.7% | 98.6% | 98.5% | 98.6% | 98.4% |
-| update | 95.1% | 99.2% | 99.7% | 99.2% | 99.7% | 99.8% | 99.8% |
-| insert | **50.7%** | 54.2% | 50.7% | 50.9% | 94.6% | **95.0%** | **95.9%** |
-| delete | **50.8%** | 50.7% | 50.8% | 50.8% | 94.5% | **94.9%** | **95.9%** |
-| widen | 66.7% | 66.7% | 66.6% | 70.6% | 70.7% | 70.7% | 69.2% |
+| edit | duckdb | limit 1 MiB | limit 256 KiB | pyarrow fixed | pyarrow CDC | CDC 64 KiB | … no dict | **duckdb CDC** | **CDC 64 KiB** |
+|---|---|---|---|---|---|---|---|---|---|
+| append | 98.7% | 98.5% | 98.7% | 98.6% | 98.5% | 98.6% | 98.4% | 98.7% | 98.7% |
+| update | 95.1% | 99.2% | 99.7% | 99.2% | 99.7% | 99.8% | 99.8% | **99.7%** | **99.8%** |
+| insert | **50.7%** | 54.2% | 50.7% | 50.9% | 94.6% | **95.0%** | **95.9%** | **89.8%** | **94.2%** |
+| delete | **50.8%** | 50.7% | 50.8% | 50.8% | 94.5% | **94.9%** | **95.9%** | **89.8%** | **94.2%** |
+| widen | 66.7% | 66.7% | 66.6% | 70.6% | 70.7% | 70.7% | 69.2% | 66.7% | 66.7% |
 
-At 200k rows the shape is the same and the effects are harsher (the row-shift cases bottom out at 48–50% and CDC
-reaches 89–93%), which is the right direction: the *fraction* a shift damages is independent of file size, so the
-absolute saving grows with the file. Cost of content-defined pages here is +0.8% file size (150.2 → 151.4 MB) and
-10× the page count, which is a read-path cost too: more headers, more page-lookup work, slightly worse compression
-per page.
+DuckDB's CDC column is Arrow's within a point at the same tuning (`64 KiB`: 94.2 against 95.0 on a row shift, where
+DuckDB without CDC is 50.7), and 5 points behind at the *default* sizes. That gap is row groups, not the chunker —
+same file, same edit, same sizes, only `ROW_GROUP_SIZE` moving, insert at 2M rows:
+
+| `ROW_GROUP_SIZE` | 122880 (DuckDB's default) | 1048576 (pyarrow's) | one row group |
+|---|---|---|---|
+| shared bytes of v2 | 89.8% | 95.7% | 96.4% |
+
+Most of it is that a page cannot span row groups, so a small row group forces a page cut every 122880 rows whatever
+the hash says; the state reset discussed below accounts for the rest, about 0.7 points once the row groups are the
+same size. Read the other way: `ROW_GROUP_SIZE` is a dedup knob, and the writer default is a pessimistic one.
+
+At 200k rows the shape is the same and the effects are harsher (the row-shift cases bottom out at 48–50%, and CDC
+reaches 83–93% — pyarrow 85.1/89.5/92.9 at the three tunings, DuckDB 83.1/92.4), which is the right direction: the
+*fraction* a shift damages is independent of file size, so the absolute saving grows with the file. Cost of
+content-defined pages here is +0.8% file size (150.2 → 151.4 MB) and 10× the page count, which is a read-path cost
+too: more headers, more page-lookup work, slightly worse compression per page.
 
 `scripts/parquet_pages.py --compare` shows the mechanism directly — the same file pair, counting pages whose
 *bodies* hash equal (payload column, 2M rows):
@@ -179,6 +198,10 @@ Parquet. (I did not re-run that experiment; I measured the Parquet case.)
 
 ## Where this could be implemented
 
+*Written before the patch existed, kept because the reasoning is what produced the shape of it. Two of its calls
+ did not survive: the state cannot live on the writer (see* What the chunker is*), and matching Arrow's hash turned
+ out to be worth having (below).*
+
 **Not on the upload side.** `src/hf_xet_chunk.cpp` already cuts the serialized file with a Gear hash at a 64 KiB
 target, and its boundaries are content-defined in exactly the sense Arrow's are. But chunk boundaries only decide
 what a *changed byte* costs; they cannot make a byte that DuckDB re-wrote stay the same. Page stability is a
@@ -204,11 +227,18 @@ dictionary feedback (above); and the byte source is at hand in `Prepare` (`GetRo
 flat columns only; and a `COPY`-level option (`content_defined_chunking`, plus the three Arrow parameters, with
 the same names so the datasets ecosystem converges) has to be threaded through `parquet_extension.cpp`.
 
-**Matching Arrow's hash is not required, and should not be attempted.** Arrow's tables are its own generated
-Gear tables keyed to *value* hashing, and page boundaries only have to be stable *within a writer*, in the file
-bytes. The hash that must stay byte-exact for cross-client dedup is the chunk hash and chunker in
-`src/hf_xet_chunk.cpp` — leave it alone. That is what makes this patch acceptable to upstream in a way that a
-second chunking dialect here would not be.
+**Matching Arrow's hash was not required — and is done anyway.** The argument below was written for a fork with its
+own chunker, and it held on its own terms: page boundaries only have to be stable *within a writer*, and the hash
+that must stay byte-exact for cross-client dedup is the chunk hash in `src/hf_xet_chunk.cpp`, which this does not
+touch. What it missed is that a user tuning a Parquet writer tunes *parameters*, and a parameter that means
+different things in two writers — `min_chunk_size` meaning "floor and target" in one and "floor, with the target
+halfway to `max`" in the other — is not tunable across them. Converging on Arrow's arithmetic makes the three
+numbers mean one thing in DuckDB, arrow-cpp and arrow-rs, which is what *It cuts where arrow cuts* then checks.
+The hash tables being Arrow's generated ones is along for the ride; what matters is the size arithmetic.
+
+*Superseded, for the record:* the case against it was that Arrow's tables are its own generated Gear tables keyed
+to value hashing, and reimplementing them buys nothing but a shared boundary. What it buys is a shared meaning for
+the knobs, plus a fixed point to test against.
 
 ## It is built now, in a DuckDB fork
 
@@ -216,113 +246,142 @@ second chunking dialect here would not be.
 
 ```sql
 COPY t TO 'f.parquet' (FORMAT PARQUET, CONTENT_DEFINED_CHUNKING true);
-COPY t TO 'f.parquet' (FORMAT PARQUET, CONTENT_DEFINED_CHUNKING {min_chunk_size: '256KB', max_chunk_size: '1MB'});
+COPY t TO 'f.parquet' (FORMAT PARQUET,
+     CONTENT_DEFINED_CHUNKING {min_chunk_size: 262144, max_chunk_size: 1048576, norm_level: 0});
 ```
 
-a `WRITE_ONLY` copy option of type `ANY`, so it takes a boolean or a struct of optional sizes, both accepted as a
-byte count or as a size string. It is a copy option and not a setting precisely because a `COPY` gets prepared,
-stored and logged: a session setting would silently change what an already-written script produces, while the
-option travels with the statement (there is a test that prepares a `COPY`, executes it, and requires the file to be
-byte-identical to the same `COPY` run directly). Sizes are uncompressed value bytes, as in Arrow; the defaults are
-Arrow's 256 KiB / 1 MiB; `norm_level` is not implemented, and an unknown struct field is an error rather than a
-silently ignored one — which is why there is no alias for `use_content_defined_chunking` either, since that name
-comes with parameters this does not have. `false` writes bytes identical to omitting the option.
+a `WRITE_ONLY` copy option of type `ANY`, so it takes a boolean or a struct of optional fields, and inside the
+struct literal the separators are `:` (a `:=` is a table-function named argument, not a struct field). It is a copy
+option and not a setting precisely because a `COPY` gets prepared, stored and logged: a session setting would
+silently change what an already-written script produces, while the option travels with the statement (there is a
+test that prepares a `COPY`, executes it, and requires the file to be byte-identical to the same `COPY` run
+directly). The three fields are Arrow's, with Arrow's defaults — 256 KiB / 1 MiB / 0 — and an unknown field is an
+error rather than a silently ignored one; `false` writes bytes identical to omitting the option.
 
-Two design notes from this document did not survive contact with the code.
+Write the sizes as plain numbers if anything has to match another writer. `min_chunk_size: '1MB'` is a megabyte to
+DuckDB and 1,000,000 < 1048576 to Arrow, because DuckDB's size parser — the one shared with `SET memory_limit` —
+reads `KB`/`MB`/`GB` as powers of 1000 and `KiB`/`MiB`/`GiB` as powers of 1024. A 4.6% difference in the ceiling
+moves every boundary after the first page, which is exactly the thing this option is for; a bare number is a byte
+count on both sides, so it is the form the conformance harness uses and now the form the parser documents.
 
-**The chunker state cannot live on the writer.** "the state living in `PrimitiveColumnWriterState` and surviving row
-groups" above has the right instinct and the wrong conclusion — it lives in the state *and does not* survive row
-groups, because it has to. `ParquetWriter::Flush` calls `Prepare` with no lock held, and several row groups are
-flushed concurrently against one shared `ColumnWriter`, so a chunker on the writer is a data race (it showed up
-first as page counts that changed run to run, not as a crash). Seeding per row group costs almost nothing: a
-boundary is decided by the values between the row group start and itself, so a row group nobody touched still
-comes out byte-identical, which is the whole property.
+### What the chunker is
 
-**A bit-mask predicate is the wrong predicate.** The plan was the classic one — roll a hash over the value bytes,
-cut when the low `log2(target)` bits are zero, which is what a *byte* chunker does to hit a target size. But a page
-can only be cut between two values, so the predicate is sampled once per value, not once per byte: tested once per
-128-byte value, a mask sized for 256 KiB wants 2^18 samples — 34 MB — to fire once, and every page then falls
-through to `max_chunk_size`. Pages came out at 1 MiB whether the minimum was 64 KiB or 256 KiB. The fix is to make
-the boundary a per-value probability proportional to that value's own size — cut with probability
-`value_bytes / min_chunk_size`, which is the per-value form of a byte chunker's `1 / target` per byte, and which
-makes the expected page the target whatever the column looks like. The rolling hash is avalanched (`lowbias32`)
-before it is compared, because in a `(hash << 1) + table[byte]` update the low bits are mostly the last few bytes.
-`min_chunk_size` is therefore a floor *and* the target, and pages average a little over twice it — measured over
-38.4 MB of uncompressed string data in one row group: minimum 128 KiB → 152 pages (mean 253 KiB), 256 KiB → 73
-pages (526 KiB), 512 KiB → 40 pages (958 KiB), option off → 1 page. Not the "distribution between min and max" a
-byte-stream chunker produces, and worth knowing before setting it: DuckDB's average page is `2 × min`, Arrow's is
-nearer `min`.
+`extension/parquet/include/writer/parquet_cdc_chunker.hpp` is a port of `parquet::internal::ContentDefinedChunker`
+kept close on purpose: the same 64-bit gear hash over the same eight tables — `parquet_cdc_gear_tables.hpp` is
+generated from Arrow's `chunker_internal_generated.h` by `extension/parquet/scripts/generate_cdc_gear_tables.py`
+and is byte-identical to it — the same mask arithmetic (`target = ((min + max) / 2 - min) / 8`, the top
+`floor(log2(target)) - norm_level` bits of 64, `norm_level` subtracted), the same gate that leaves the hash alone
+until `min_chunk_size` bytes have been counted, and the same eight-consecutive-hits rule (`nth_run` over eight
+gear tables) that turns a hit into a boundary. A `static_assert` pins the number Arrow's own unit test pins: its
+default sizes imply a 15-bit mask. The four earlier notes in this document about "the fork's own scheme" — a
+32-bit avalanched hash, one table, a per-value probability, `min` as target, no `norm_level` — described the first
+version of this file and are now wrong: they were the port's guess at the algorithm, and the algorithm turned out
+to be reachable, so it is used instead.
 
-One more, smaller: the chunker counts its own bytes rather than reusing the writer's `estimated_page_size`, because
-that one counts a *dictionary key's bit width* for a dictionary-encoded value. Left shared, a page-size limit and a
-content-defined minimum would drift apart by orders of magnitude depending on an encoding decision made per row
-group.
+It is fed the same bytes: a value's own bytes in machine order — strings with no length prefix — and, for a
+nullable column, the two bytes of its definition level before them, so a null is content there and here. Which
+types can take part is a decision about bytes, not a TODO: DECIMAL, UUID, INTERVAL, TIME, ENUM, HUGEINT and BIT
+keep size-based cuts because DuckDB's bytes for them are not the bytes an Arrow writer would hash (`DECIMAL(9,2)`
+is four bytes here and a decimal128 there, an ENUM hashes its DuckDB-assigned dictionary code, and so on), and
+list and struct leaves keep them because Arrow cuts those at repetition level 0 rather than per value.
+
+Two departures are left, and both are structural rather than arithmetic.
+
+**State lifetime.** Arrow holds one chunker per leaf column for the whole file and says so in a comment ("not
+reset between pages and row groups"). DuckDB's lives in `PrimitiveColumnWriterState` and starts over at each row
+group, because `ParquetWriter::Flush` calls `Prepare` with no lock held and several row groups are flushed
+concurrently against one shared `ColumnWriter` — a chunker on the writer is a data race, and it showed up first as
+page counts that changed from run to run rather than as a crash. So boundaries agree with arrow-cpp inside the
+first row group and are, after that, a DuckDB run of the same algorithm with the same statistics. The cost is
+measured above: 89.8% against 95.7% of a shifted file's bytes reusable at the same chunk sizes, by way of
+`ROW_GROUP_SIZE`.
+
+**What closes a page besides a boundary.** Arrow's chunker answers "where does this chunk end" and its writer then
+closes pages for reasons of its own — `max_rows_per_page` (20,000 by default) and `data_page_size` (1 MiB of
+*encoded* bytes, which for a string includes its 4-byte length prefix). DuckDB has one equivalent knob,
+`data_page_size_limit`, on 100 MiB by default and measured on its own estimate of the page's bytes. That is not
+the chunker disagreeing; it is two writers with different page policies sitting on top of the same boundaries, and
+the conformance harness reports it as such.
 
 What the built thing is worth, measured with the reference chunker (`tools/xet_probe chunks`) over finished files —
-1M rows, one row group, zstd, one 128-byte string changed in the middle:
+2M rows, writer defaults on both sides (so 17 row groups), one 128-byte string changed in the middle, `payload`
+column:
 
 | | pages of the changed column that survive | those pages' bytes | file chunks the store already has | chunk bytes |
 |---|---|---|---|---|
-| pages cut by size (DuckDB today) | 1 of 2 | 20.6% | 263 of 364 (72.3%) | 71.1% |
-| pages cut by content | 248 of 249 | 99.6% | 354 of 358 (98.9%) | 98.0% |
+| pages cut by size (DuckDB today) | 16 of 17 | 93.9% | 2192 of 2302 (95.2%) | 95.1% |
+| pages cut by content | 253 of 254 | 99.6% | 2328 of 2335 (99.7%) | 99.7% |
 
-The append case (1M rows → 1.1M rows, same measurement, chunk level) is 91.4% reusable with size-based pages and
-91.0% with content-defined ones: **CDC pages do nothing for an append**, which the byte chunker at upload time
-already covers almost completely, and which is why the mid-file edit is the case to argue from. Everything else the
-earlier measurement said still holds: this is a flat-column feature (a list or struct leaf keeps size-based cuts,
-since cutting there means cutting at repetition level 0), and the file is ordinary Parquet — pyarrow and stock
-DuckDB 2.0 read these files, and `hash()` of the file and of a re-write of it both agree.
+An append is 98.7% reusable either way (the grid above), size-based pages or not: **CDC pages do nothing for an
+append**, which the byte chunker at upload time already covers almost completely, and which is why the mid-file
+edit is the case to argue from. Everything else the earlier measurement said still holds: this is a flat-column
+feature (a list or struct leaf keeps size-based cuts, since cutting there means cutting at repetition level 0), and
+the file is ordinary Parquet — pyarrow and stock DuckDB 2.0 read these files, and `hash()` of the file and of a
+re-write of it both agree.
 
 Page count is not free in file size, but it is cheap and the sign is not fixed: on the single 128-byte-string
 column above, cutting into ~512 KiB pages made the file 3.6% *smaller* (21.6 MB against 22.5), because each page is
 compressed on its own and small pages happen to suit this data; on a mixed-type table with dictionaries and
 megabyte strings the same setting cost 3.7%, and `min_chunk_size: 4096` cost 15.2%. So the floor in the option is
 not just a dedup argument, it is the thing keeping page headers and narrow compression windows from adding up —
-which is also why the default is 256 KiB and not something smaller.
+which is also why the default is 256 KiB and not something smaller. The pair above pays +0.7% (149.0 → 150.0 MB) 
+for 17 pages becoming 254.
 
 `test/sql/copy/parquet/writer/parquet_write_content_defined_pages.test` covers the round trip, `false`-equals-
-nothing, byte-for-byte repeatability, page counts and mean page size following `min`/`max`, the nested fallback,
-nulls, empty and oversized values, prepared-statement serialization, and the binder errors. `test/sql/copy/*`
-passes with the patch in.
+nothing, byte-for-byte repeatability, page counts and mean page size following `min`/`max`, five pinned page-count
+vectors, the nested fallback, nulls, empty and oversized values, prepared-statement serialization, and the binder
+errors. `test/sql/copy/*` passes with the patch in — 660 cases, 197674 assertions; the 49 skips are `require
+httpfs`/`tpch`/`tpcds`/`encodings`/`windows` and one `mode skip flaky`.
 
-## The same question, answered twice: how the fork differs from Arrow's chunker
+## It cuts where arrow cuts — and where it does not, it cuts less
 
-Read against the current `apache/arrow` main (`cpp/src/parquet/chunker_internal.{h,cc}`, the MD5-generated
-`chunker_internal_generated.h`, `column_writer.cc`, `properties.h`) rather than against notes about it. Same family
-— a Gear rolling hash, a size gate, cuts only between values — and eight real differences.
+Boundary agreement is the whole point of porting the algorithm rather than inventing one, so it is checked rather
+than argued: `scripts/cdc_conformance.py` writes one 400k-row, 9-column table twice — once with pyarrow
+(`use_content_defined_chunking`, dictionary off, no compression, one row group) and once with the patched writer
+over those same values (`ROW_GROUP_SIZE` large enough for one row group too) — and compares, per leaf column, how
+many values land on each data page. `scripts/parquet_page_values.py` reads those counts out of the page headers,
+because nothing in a footer's column-chunk metadata answers the question: `parquet_metadata`'s
+`encoding_stats.count` is pages per column chunk, not values per page, and byte offsets depend on headers, stats
+and codecs, which the two writers do not share.
 
-1. **Where the predicate is sampled.** Arrow rolls per *byte*, including inside a string value, and tests
-   `(hash & mask) == 0` per byte, latching `has_matched_` so the cut lands after the value ends. Its per-value
-   probability is therefore already proportional to value bytes — the property the fork derives and applies
-   explicitly, one hash test per value instead of one per byte.
-2. **Which bits are tested.** Arrow masks the **top** N bits of a 64-bit state: in `(h << 1) + table[b]` the high
-   bits hold a mixture of the last 64 bytes, the low bits hold the last byte. The fork's state is 32 bits and it
-   tests the whole word, so it avalanches first (`lowbias32`) — that is the bug the naive mask version hit.
-3. **Distribution shape.** Arrow needs **8 hits in a row, one per gear table** (`nth_run_`,
-   `kNumGearhashTables == 8`), the normalized-chunking trick from "Git is for Data" §6.2.1, which makes chunk
-   sizes approximately normal. The fork has no normalization: sizes are geometric, mean ≈ 2×min with an
-   exponential tail out to max.
-4. **What `min` and `max` mean.** Arrow's mask width comes from `target = ((min+max)/2 - min)/8`, so its mean sits
-   near `(min+max)/2` and `min` is only a floor; in the fork `min` is floor *and* target and `max` is only a cap.
-   At the shared defaults these coincide — Arrow's own arithmetic lands on ≈512 KiB at min 256 KiB / max 1 MiB
-   (its 48 KiB target is rounded down to a 32 KiB power of two), which is the fork's 2×min and matches the 526 KiB
-   measured here — and they part elsewhere: at min 64 KiB / max 1 MiB Arrow gives ≈320 KiB, the fork ≈128 KiB.
-   Arrow additionally has `norm_level` to sharpen the distribution; the fork has no equivalent.
-5. **State lifetime.** Arrow holds one chunker per leaf column for the whole file, explicitly "not reset between
-   pages and row groups", and leaves the last chunk open so the next `WriteArrow()` continues the same page. The
-   fork's state is per row group, because DuckDB flushes row groups concurrently — and because a Parquet page
-   cannot span row groups in any case.
-6. **Nested data.** Arrow hashes the definition and repetition levels into the rolling hash (2 bytes per `int16`,
-   counted into the chunk size) and cuts only at `rep_level == 0`, i.e. at record boundaries. The fork hashes a
-   one-byte null marker, counts value bytes only, and leaves list and struct columns on size-based cuts.
-7. **Dictionaries.** Arrow chunks an Arrow dictionary array by its **indices** (`DictionaryArray::indices()`) and
-   dictionary-encodes within each chunk, so its boundaries follow the coding; DuckDB decides page membership before
-   the dictionary decision and hashes the raw value bytes.
-8. **Plumbing.** Arrow's is `enable_content_defined_chunking()` plus `CdcOptions{min, max, norm_level}` on the
-   writer builder, and only through `WriteArrow()` — `WriteBatch()` and `WriteBatchSpaced()` throw. The fork's is
-   a COPY option. And the hash tables are the fork's own (one 32-bit table from SplitMix32 against Arrow's eight
-   64-bit tables from MD5), so boundaries do not line up: a DuckDB-CDC file and a pyarrow-CDC file of the same data
-   share nothing beyond what the uploader's own chunking finds.
+Min 256 KiB, 400k rows, once per (max, nullability) — `matches arrow` means the two lists of per-page value counts
+are equal:
+
+| column | max 512 KiB, nulls | max 1 MiB, nulls | max 512 KiB, no nulls | max 1 MiB, no nulls |
+|---|---|---|---|---|
+| `i` BIGINT, `d` DOUBLE, `f` DOUBLE, `b` BOOLEAN, `u` TIMESTAMP | matches | matches | matches | matches |
+| `s` VARCHAR(128) | matches | matches | matches | matches |
+| `short` VARCHAR(5), 6 distinct | matches | refined | refined | refined |
+| `uuid`, `dec` (deliberately unsupported) | one page | one page | one page | one page |
+
+The arrow side of every one of those cells is frozen in `scripts/fixtures/arrow_<max>_<nulls>_400k.json`, so the
+check runs without pyarrow (`--check-fixture`) and against a recorded answer rather than against whatever version
+is installed. Exit code 0 means every column met its expectation; `--strict` also fails the refined cases.
+
+`short` is the one column that is not page-for-page identical, and it is arrow's page rules, not the boundaries:
+DuckDB cuts `[178163, 178162, 43675]` and arrow cuts `[133120, 45043, 133133, 45029, 43675]` — arrow's cuts are a
+strict superset, its `data_page_size` closing each of DuckDB's CDC pages at 1 MiB of encoded bytes, which for a
+5-byte string means 4 extra prefix bytes per value that the chunker never counts. A Python model of the chunker
+(feeding the same generated tables the same bytes) reproduces DuckDB's list exactly, so the chunker agrees and
+arrow's surroundings cut again. That is a writer-policy difference to know about, not to chase: replicating
+parquet-cpp's encoded-byte accounting inside the chunker would make the *chunker* wrong.
+
+Three things had to be pinned for the comparison to mean anything, and all three will move every boundary in a
+file if they are left implicit:
+
+* **units**, as above: byte counts on both sides;
+* **nullability**, which is a fixture condition and not incidental data. DuckDB infers a column's nullability from
+  statistics, so a source column with `null_count == 0` reads back NOT NULL and is written REQUIRED, while pyarrow
+  writes the same values OPTIONAL. That is 0 versus 2 bytes per value going into the hash, so the harness asks for
+  both explicitly (`--nulls mixed` puts a null in every column every 977 rows, `--nulls none` casts the Arrow
+  schema to non-nullable) and reports the two separately;
+* **arrow's own page rules**, `max_rows_per_page` (20,000, so it is set to a billion here) and `data_page_size`.
+
+Row groups are pinned to one on both sides so the state-scope difference stays out of the boundary comparison —
+and that it is a difference and not a rounding error is measured above, not assumed.
+
+What to say about all of this to DuckDB and to Arrow — a PR description and the two questions that are not ours to
+answer — is drafted in `docs/CDC_UPSTREAM.md`.
 
 ## What I did not measure
 
@@ -337,6 +396,15 @@ history of edits rather than one edit. Whether the CAS's global query actually f
 is the `docs/XET.md` question, orthogonal to this one. And whether ~100 KB pages hurt read throughput enough to
 matter: I would want `norm_level` and a 256 KiB floor there, as Arrow ships by default.
 
+Two things the conformance section leaves open by construction. arrow-rs is assumed to agree with arrow-cpp — the
+two implementations have matched before and the harness compares against C++ only, because that is what pyarrow
+binds to and what the Hugging Face writer uses; a Rust side to the same fixture would be the next check. And what
+is compared is *which rows land on which page*, never the page bytes: two writers with the same boundaries still
+write different page headers, different statistics, a different codec and a different `created_by`, so a
+DuckDB-CDC page and a pyarrow-CDC page of the same rows are not the same bytes. Cross-client dedup therefore still
+runs on the uploader's chunker; what boundary agreement buys is that the *page* a client rewrites stays small, and
+that `min`/`max`/`norm_level` mean the same thing wherever they are set.
+
 ## Reproducing
 
 ```sh
@@ -348,8 +416,27 @@ python scripts/parquet_pages.py --compare $CDC_WORK/duckdb_required_v1.parquet $
 ```
 
 `python` here means a venv with `pyarrow` (21 or newer for `use_content_defined_chunking`; 26.0.0 for these
-numbers) and `duckdb` for Python — DuckDB has no content-defined pages, so the CDC rows can only be produced by
-the reference writer. The grid writes ~2 GB of Parquet to `$CDC_WORK` and does not talk to the network.
+numbers) and `duckdb` for Python. The `duckdb-cdc` rows of the grid are written with the *patched* shell rather
+than through the python module — the installed module is a stock DuckDB, which does not know the option — so point
+the script at a build before running it: `DUCKDB=/home/quentin/hf/duckdb/build/release/duckdb` (that is also the
+default). Without that build the two rows stop the run with a message naming the variable — the grid keeps every
+file it wrote, so re-running against a real build costs only the rows that are missing. The grid writes ~2 GB of
+Parquet to `$CDC_WORK` (`CDC_WORK=/tmp/cdc_grid` to move it) and does not talk to the network.
+
+The boundary check against arrow-cpp, and the four recorded answers it compares against:
+
+```sh
+python scripts/cdc_conformance.py --check-fixture scripts/fixtures/arrow_524288_mixed_400k.json        # exit 0
+python scripts/cdc_conformance.py --check-fixture scripts/fixtures/arrow_524288_none_400k.json --strict # exit 1
+python scripts/cdc_conformance.py --max 524288 --nulls mixed --save-fixture scripts/fixtures/new.json  # re-record
+```
+
+A fixture carries its own conditions (`--min/--max/--norm/--rows/--nulls` default to what it says), so checking one
+is one argument and no pyarrow — the recorded arrow answer is in the file. The *values* are regenerated from the
+row number when the recorded `values_file` is gone, which is why the fixtures survive `/tmp` being cleared; they
+were recorded with pyarrow 26.0.0. A re-record is only honest against a pinned arrow — parquet-cpp's
+`ContentDefinedChunker` is unchanged since #45360, but `data_page_size` refinement and the defaults around it are
+not guaranteed frozen.
 
 With the patch built, the DuckDB side reproduces without pyarrow:
 
@@ -359,7 +446,7 @@ export PATH=/home/quentin/hf/hf-duckdb-extension/.venv/bin:$PATH # cmake + ninja
 cmake -B build/release -DCMAKE_BUILD_TYPE=Release -DBUILD_SHELL=ON && cmake --build build/release --target duckdb unittest -j 10
 build/release/test/unittest test/sql/copy/parquet/writer/parquet_write_content_defined_pages.test
 
-# the dedup table above: write a pair, then ask the reference chunker what it already has
+# a smaller version of the same measurement: write a pair, then ask the reference chunker what it already has
 D=/home/quentin/hf/duckdb/build/release/duckdb
 $D -c "CREATE TABLE base AS SELECT i id, repeat(md5(i::VARCHAR),4) payload FROM range(1000000) t(i);
        CREATE TABLE edit AS SELECT id, CASE WHEN id=500000 THEN 'X'||payload ELSE payload END payload FROM base;
