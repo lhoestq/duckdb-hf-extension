@@ -55,6 +55,11 @@ import pyarrow.parquet as pq
 
 PROBE = os.environ.get("XET_PROBE", "tools/xet_probe/target/release/xet-probe")
 
+# The two `duckdb-cdc` rows below are written by the DuckDB CLI rather than by this interpreter's python
+# module: content-defined pages are a change to the writer, and the module is a stock build without it. See
+# write_with_shell.
+DUCKDB = os.environ.get("DUCKDB", "/home/quentin/hf/duckdb/build/release/duckdb")
+
 # `duckdb` at its defaults is what every write this extension makes today. Its `data_page_size_limit`
 # defaults to PrimitiveColumnWriter::MAX_UNCOMPRESSED_PAGE_SIZE = 100 MiB, which in practice means one
 # page per row group, so the `-page` rows below are what happens as that limit comes down - the cheap
@@ -74,6 +79,10 @@ WRITERS = [
     # group, so one new distinct value rewrites it and shifts every data page that follows
     ("pyarrow-cdc-64k-nodict", "pyarrow", dict(use_content_defined_chunking={
         "min_chunk_size": 32768, "max_chunk_size": 262144}, use_dictionary=False)),
+    # the same two settings in the patched duckdb writer, which is the point of the whole exercise: arrow's
+    # algorithm, in the writer that produces the datasets this extension uploads
+    ("duckdb-cdc", "duckdb-cdc", {"content_defined_chunking": "{min_chunk_size: 262144, max_chunk_size: 1048576}"}),
+    ("duckdb-cdc-64k", "duckdb-cdc", {"content_defined_chunking": "{min_chunk_size: 32768, max_chunk_size: 262144}"}),
 ]
 
 # an append (the case byte-level CDC already handles well), one cell dead centre, one late row that sorts
@@ -208,6 +217,25 @@ def write_parquet(options, table, path):
     pq.write_table(table, path, **(options or {}))
 
 
+def write_with_shell(source, path, options):
+    """Re-write an already materialised file with the patched DuckDB CLI.
+
+    The python module in this interpreter is a stock build, and `content_defined_chunking` only exists in the
+    patched writer, so the writer under test has to be that binary. The source is a plain pass-through write,
+    so the rows and the declared nullability are exactly the ones `materialise` settled on and the only thing
+    that differs from the `duckdb` rows is how the pages are cut. Compression is left at the writer's own
+    default on both sides of every pair here, which is what the row means: shared bytes are compared within a
+    writer, so a codec difference between rows cannot move a percentage.
+    """
+    copy = "".join(f", {key.upper()} {value}" for key, value in (options or {}).items())
+    statement = f"COPY (FROM read_parquet('{source}')) TO '{path}' (FORMAT PARQUET{copy});"
+    out = subprocess.run([DUCKDB, "-c", statement], capture_output=True, text=True)
+    if out.returncode != 0:
+        die(f"{DUCKDB} failed to write {path}: {out.stderr.strip()}\n"
+            f"the duckdb-cdc rows need a build with the CONTENT_DEFINED_CHUNKING copy option - see the "
+            f"*It is built now* section of docs/CDC_PARQUET_PAGES.md, or point DUCKDB at one")
+
+
 def write_duckdb(options, source, path, select=False):
     query = f"COPY ({source if select else f'SELECT * FROM {source}'}) TO '{path}' (FORMAT PARQUET"
     for key, value in options.items():
@@ -281,6 +309,10 @@ for scheme in schemes:
         if not os.path.exists(v1):
             if kind == "duckdb":
                 materialise("SELECT * FROM base ORDER BY id", "base", scheme, v1, options)
+            elif kind == "duckdb-cdc":
+                base_source = materialise("SELECT * FROM base ORDER BY id", "base", scheme,
+                                          f"{work}/src_{scheme}_base.parquet")
+                write_with_shell(base_source, v1, options)
             else:
                 write_parquet(options, base_arrow, v1)
         for edit in EDITS:
@@ -288,6 +320,9 @@ for scheme in schemes:
             if not os.path.exists(v2):
                 if kind == "duckdb":
                     materialise(VARIANTS[edit], edit, scheme, v2, options)
+                elif kind == "duckdb-cdc":
+                    source = materialise(VARIANTS[edit], edit, scheme, f"{work}/src_{scheme}_{edit}.parquet")
+                    write_with_shell(source, v2, options)
                 else:
                     source = materialise(VARIANTS[edit], edit, scheme, f"{work}/src_{scheme}_{edit}.parquet")
                     write_parquet(options, arrow_version(source, scheme), v2)
