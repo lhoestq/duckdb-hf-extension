@@ -14,7 +14,7 @@ is fixable here, and cheaply.
 **Followed up, same month:** (2) has been acted on. The writer patch exists — `/home/quentin/hf/duckdb`, branch
 `content-defined-pages`, `COPY ... (FORMAT PARQUET, CONTENT_DEFINED_CHUNKING true)` — and its chunker is now a port
 of Arrow's rather than a DuckDB-shaped guess, checked page for page against pyarrow (`scripts/cdc_conformance.py`,
-*It cuts where arrow cuts*). What it is worth on a DuckDB-written file: on a mid-file row shift, 89.8% of the new
+*It cuts where Arrow cuts*). What it is worth on a DuckDB-written file: on a mid-file row shift, 89.8% of the new
 file's bytes are reusable against 50.7% today — 94.2% with the sizes tuned, against pyarrow's 95.0% for the same
 edits — and on a single cell changed deep in the file, 99.6% of that column's page bytes survive against 93.9%.
 "It is built now" below is what the port keeps, what it cannot keep, and what the design above did not predict.
@@ -233,7 +233,7 @@ that must stay byte-exact for cross-client dedup is the chunk hash in `src/hf_xe
 touch. What it missed is that a user tuning a Parquet writer tunes *parameters*, and a parameter that means
 different things in two writers — `min_chunk_size` meaning "floor and target" in one and "floor, with the target
 halfway to `max`" in the other — is not tunable across them. Converging on Arrow's arithmetic makes the three
-numbers mean one thing in DuckDB, arrow-cpp and arrow-rs, which is what *It cuts where arrow cuts* then checks.
+numbers mean one thing in DuckDB, arrow-cpp and arrow-rs, which is what *It cuts where Arrow cuts* then checks.
 The hash tables being Arrow's generated ones is along for the ride; what matters is the size arithmetic.
 
 *Superseded, for the record:* the case against it was that Arrow's tables are its own generated Gear tables keyed
@@ -263,6 +263,12 @@ DuckDB and 1,000,000 < 1048576 to Arrow, because DuckDB's size parser — the on
 reads `KB`/`MB`/`GB` as powers of 1000 and `KiB`/`MiB`/`GiB` as powers of 1024. A 4.6% difference in the ceiling
 moves every boundary after the first page, which is exactly the thing this option is for; a bare number is a byte
 count on both sides, so it is the form the conformance harness uses and now the form the parser documents.
+
+Nothing is paid for when the option is off. The loop that decides page cuts gained two predictable branches, and
+12 write shapes repeated 8 times each — 250 MB of uncompressed strings, fixed widths with a nullable column,
+snappy, a LIST column — time the same out of the patched and the unpatched binary, inside the run-to-run noise of
+either (a LIST column: 0.025 s and 0.026 s, which way round depends on the run). That measurement is the one a
+reviewer asks for, so it is in the PR text too.
 
 ### What the chunker is
 
@@ -333,7 +339,7 @@ vectors, the nested fallback, nulls, empty and oversized values, prepared-statem
 errors. `test/sql/copy/*` passes with the patch in — 660 cases, 197674 assertions; the 49 skips are `require
 httpfs`/`tpch`/`tpcds`/`encodings`/`windows` and one `mode skip flaky`.
 
-## It cuts where arrow cuts — and where it does not, it cuts less
+## It cuts where Arrow cuts — and where it does not, it cuts less
 
 Boundary agreement is the whole point of porting the algorithm rather than inventing one, so it is checked rather
 than argued: `scripts/cdc_conformance.py` writes one 400k-row, 9-column table twice — once with pyarrow
@@ -354,16 +360,16 @@ are equal:
 | `short` VARCHAR(5), 6 distinct | matches | refined | refined | refined |
 | `uuid`, `dec` (deliberately unsupported) | one page | one page | one page | one page |
 
-The arrow side of every one of those cells is frozen in `scripts/fixtures/arrow_<max>_<nulls>_400k.json`, so the
+The Arrow side of every one of those cells is frozen in `scripts/fixtures/arrow_<max>_<nulls>_400k.json`, so the
 check runs without pyarrow (`--check-fixture`) and against a recorded answer rather than against whatever version
 is installed. Exit code 0 means every column met its expectation; `--strict` also fails the refined cases.
 
-`short` is the one column that is not page-for-page identical, and it is arrow's page rules, not the boundaries:
-DuckDB cuts `[178163, 178162, 43675]` and arrow cuts `[133120, 45043, 133133, 45029, 43675]` — arrow's cuts are a
+`short` is the one column that is not page-for-page identical, and it is Arrow's page rules, not the boundaries:
+DuckDB cuts `[178163, 178162, 43675]` and Arrow cuts `[133120, 45043, 133133, 45029, 43675]` — Arrow's cuts are a
 strict superset, its `data_page_size` closing each of DuckDB's CDC pages at 1 MiB of encoded bytes, which for a
 5-byte string means 4 extra prefix bytes per value that the chunker never counts. A Python model of the chunker
 (feeding the same generated tables the same bytes) reproduces DuckDB's list exactly, so the chunker agrees and
-arrow's surroundings cut again. That is a writer-policy difference to know about, not to chase: replicating
+Arrow's surroundings cut again. That is a writer-policy difference to know about, not to chase: replicating
 parquet-cpp's encoded-byte accounting inside the chunker would make the *chunker* wrong.
 
 Three things had to be pinned for the comparison to mean anything, and all three will move every boundary in a
@@ -375,7 +381,7 @@ file if they are left implicit:
   writes the same values OPTIONAL. That is 0 versus 2 bytes per value going into the hash, so the harness asks for
   both explicitly (`--nulls mixed` puts a null in every column every 977 rows, `--nulls none` casts the Arrow
   schema to non-nullable) and reports the two separately;
-* **arrow's own page rules**, `max_rows_per_page` (20,000, so it is set to a billion here) and `data_page_size`.
+* **Arrow's own page rules**, `max_rows_per_page` (20,000, so it is set to a billion here) and `data_page_size`.
 
 Row groups are pinned to one on both sides so the state-scope difference stays out of the boundary comparison —
 and that it is a difference and not a rounding error is measured above, not assumed.
@@ -432,9 +438,9 @@ python scripts/cdc_conformance.py --max 524288 --nulls mixed --save-fixture scri
 ```
 
 A fixture carries its own conditions (`--min/--max/--norm/--rows/--nulls` default to what it says), so checking one
-is one argument and no pyarrow — the recorded arrow answer is in the file. The *values* are regenerated from the
+is one argument and no pyarrow — the recorded Arrow answer is in the file. The *values* are regenerated from the
 row number when the recorded `values_file` is gone, which is why the fixtures survive `/tmp` being cleared; they
-were recorded with pyarrow 26.0.0. A re-record is only honest against a pinned arrow — parquet-cpp's
+were recorded with pyarrow 26.0.0. A re-record is only honest against a pinned Arrow — parquet-cpp's
 `ContentDefinedChunker` is unchanged since #45360, but `data_page_size` refinement and the defaults around it are
 not guaranteed frozen.
 

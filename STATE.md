@@ -65,12 +65,15 @@ lagging-tag trap; it only has to differ from what was built.
 * The CI matrix fix (`e5bb74d`) was verified against the live matrix: push run `39157627780` built exactly
   `linux_amd64`, `linux_arm64`, `windows_amd64_mingw` + the reference-checks job, green.
 * **Content-defined pages, where that stands (this branch `parquet-page-cdc`, nothing pushed).** Two commits here:
-  the conformance harness with four frozen arrow answers, and the document rewritten around the chunker's
-  convergence on arrow plus the new `docs/CDC_UPSTREAM.md`. In the fork, `content-defined-pages` is one commit,
-  `d1e8cdeb0ba`, and it is now *standalone* — the first version of it did not `git add` the generated gear-table
-  header or its generator script, which `git status` after a clean `git show --stat HEAD` is how you catch. The
-  four fixtures re-check in about a second each (`scripts/cdc_conformance.py --check-fixture
-  scripts/fixtures/arrow_524288_mixed_400k.json`, exit 0), so the parity claim is cheap to re-verify.
+  the conformance harness with four frozen Arrow answers, and the document rewritten around the chunker's
+  convergence on Arrow plus the new `docs/CDC_UPSTREAM.md`. In the fork, `content-defined-pages` is one commit,
+  `6db6f00f1a0`, **pushed to `lhoestq/duckdb`** and ready for a PR — it is *standalone* (the first version of it did
+  not `git add` the generated gear-table header or its generator script, which `git status` after a clean
+  `git show --stat HEAD` is how you catch), clang-format clean under the version `scripts/format.py` pins, `typos`
+  clean, dead code out, and its commit message now carries the cost-when-off measurement. `docs/CDC_UPSTREAM.md`
+  → *Before opening it* has the one thing still true about it: 292 commits behind upstream, cherry-picks clean,
+  never rebuilt there. The four fixtures re-check in about a second each (`scripts/cdc_conformance.py
+  --check-fixture scripts/fixtures/arrow_524288_mixed_400k.json`, exit 0), so the parity claim is cheap to re-verify.
 
 ## Next, in order
 
@@ -114,7 +117,7 @@ lagging-tag trap; it only has to differ from what was built.
 | repo | `/home/quentin/hf/hf-duckdb-extension` (private remote `lhoestq/duckdb-hf-extension`) |
 | venv | `. .venv/bin/activate` — has `cmake`, `ninja`, `huggingface_hub`, `duckdb` 2.0.0.dev (no `numpy`) |
 | duckdb | `v2.0.0-alpha47600`, source `d4355d01c59362d57036ad377735dd5340276a5b`, *Cyanoptera*, vendored at `/home/quentin/hf/vendor/duckdb` |
-| duckdb fork | `/home/quentin/hf/duckdb`, remote `https://github.com/lhoestq/duckdb`, branch `content-defined-pages` (`d1e8cdeb0ba`, local only, off `c15a232a57`); build needs `PATH=/home/quentin/hf/hf-duckdb-extension/.venv/bin:$PATH` for cmake/ninja; shell at `build/release/duckdb` |
+| duckdb fork | `/home/quentin/hf/duckdb`, remote `https://github.com/lhoestq/duckdb`, branch `content-defined-pages` (`6db6f00f1a0`, **pushed**, off `c15a232a57` — 292 commits behind `duckdb/duckdb` main, cherry-picks clean onto `d71c926f431`, not rebuilt there); build needs `PATH=/home/quentin/hf/hf-duckdb-extension/.venv/bin:$PATH` for cmake/ninja; shell at `build/release/duckdb` |
 | xet-core | `/home/quentin/hf/xet-core` at `e922f74`; `cargo` is at `~/.cargo/bin` and **not on PATH**; the probe binary is `tools/xet_probe/target/release/xet-probe` |
 | token | `~/.cache/huggingface/token` (user `lhoestq`); `gh` authenticated as `lhoestq` |
 | signing key | `~/.config/duckdb-hf/signing.pem`, fingerprint `sha256:f007c8016bc2f3a2…dbfce` |
