@@ -274,12 +274,16 @@ reviewer asks for, so it is in the PR text too.
 
 `extension/parquet/include/writer/parquet_cdc_chunker.hpp` is a port of `parquet::internal::ContentDefinedChunker`
 kept close on purpose: the same 64-bit gear hash over the same eight tables — `parquet_cdc_gear_tables.hpp` is
-generated from Arrow's `chunker_internal_generated.h` by `extension/parquet/scripts/generate_cdc_gear_tables.py`
-and is byte-identical to it — the same mask arithmetic (`target = ((min + max) / 2 - min) / 8`, the top
+byte-identical to the values Arrow checks in as `cpp/src/parquet/chunker_internal_generated.h` (produced by
+`chunker_internal_codegen.py`, and the same numbers arrow-rs has in
+`parquet/src/column/chunker/cdc_generated.rs`) — the same mask arithmetic (`target = ((min + max) / 2 - min) / 8`, the top
 `floor(log2(target)) - norm_level` bits of 64, `norm_level` subtracted), the same gate that leaves the hash alone
 until `min_chunk_size` bytes have been counted, and the same eight-consecutive-hits rule (`nth_run` over eight
 gear tables) that turns a hit into a boundary. A `static_assert` pins the number Arrow's own unit test pins: its
-default sizes imply a 15-bit mask. The four earlier notes in this document about "the fork's own scheme" — a
+default sizes imply a 15-bit mask. The table is checked into the fork with no generator beside it: the recipe, and
+the four known-first entries that tell a right regeneration from a wrong one, are stated in its own header comment,
+and the script that runs it lives here with the rest of the tooling
+(`scripts/generate_cdc_gear_tables.py`). The four earlier notes in this document about "the fork's own scheme" — a
 32-bit avalanched hash, one table, a per-value probability, `min` as target, no `norm_level` — described the first
 version of this file and are now wrong: they were the port's guess at the algorithm, and the algorithm turned out
 to be reachable, so it is used instead.
