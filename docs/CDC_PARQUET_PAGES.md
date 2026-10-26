@@ -21,8 +21,9 @@ edits — and on a single cell changed deep in the file, 99.6% of that column's 
 
 Measured 2026-10. Tooling added with this document: `scripts/cdc_page_measure.py` (the grid),
 `scripts/parquet_pages.py` (a page-header walker with a `--compare` mode that hashes page bodies),
-`scripts/parquet_page_values.py` (per-page *value* counts, the only page property two writers can be compared on)
-and `scripts/cdc_conformance.py` (the arrow-cpp boundary check, with its answers recorded in `scripts/fixtures/`).
+`scripts/parquet_page_values.py` (per-page *value* counts, the only page property two writers can be compared on),
+`scripts/cdc_conformance.py` (the arrow-cpp boundary check, with its answers recorded in `scripts/fixtures/`), and
+`scripts/dedup_estimate.py` (the same question in one screenful, over a table you make, with nano-xet as the store).
 
 ## What cuts a page today
 
@@ -432,6 +433,27 @@ the script at a build before running it: `DUCKDB=/home/quentin/hf/duckdb/build/r
 default). Without that build the two rows stop the run with a message naming the variable — the grid keeps every
 file it wrote, so re-running against a real build costs only the rows that are missing. The grid writes ~2 GB of
 Parquet to `$CDC_WORK` (`CDC_WORK=/tmp/cdc_grid` to move it) and does not talk to the network.
+
+The same question, asked about a table you already have, with [nano-xet](https://pypi.org/project/nano-xet/) as
+the store instead of the reference chunker:
+
+```sh
+pip install 'nano-xet>=0.1.2' pyarrow duckdb
+python scripts/dedup_estimate.py --rows 500000 # one table, three edits, size-based pages next to CDC
+python scripts/dedup_estimate.py --rows 2000000 --edit insert --row-group 2000000
+```
+
+It writes the file twice out of one DuckDB table - once as it is, once after an edit - stores the first in a
+throwaway nano-xet store, and reports the share of the second's bytes that store did not have to take. Those
+percentages are directional rather than quoted: nano-xet's chunker cuts at 8 / 64 / 128 KiB, so a file wants a
+few dozen chunks before a number means anything, and the script says so when it has fewer - `cdc_page_measure.py`
+above is the one whose numbers this document quotes. The writes shell out to `$DUCKDB` for the same reason the
+grid does - the option is in the patched build, and that build has no python binding - and the `duckdb` import is
+used on the other end: importing nano-xet registers `nxet://` with fsspec, and `con.register_filesystem(fs)` lets
+DuckDB open the stored file back out, which is the check that the store holds what the writer wrote. That read
+wants nano-xet 0.1.2 or newer - before it, `modified` answered with an epoch float, fsspec promises a datetime,
+and DuckDB's bridge calls `.timestamp()` on whatever it is handed; the script checks the version up front rather
+than letting that land as an error from inside `read_parquet`.
 
 The boundary check against arrow-cpp, and the four recorded answers it compares against:
 
