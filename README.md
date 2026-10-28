@@ -7,6 +7,7 @@ INSTALL hf FROM hf_repo; LOAD hf FROM hf_repo;   -- one-time setup: see Installa
 
 SELECT * FROM 'hf://datasets/lhoestq/demo1/*.parquet';
 SELECT * FROM hf_ls('hf://datasets/lhoestq/demo1');
+SELECT count(*) FROM hf_dataset('lhoestq/demo1', split := 'train');   -- the dataset itself, not the files someone chose
 COPY (SELECT * FROM range(10) t(i)) TO 'hf://datasets/me/demo/out.parquet';
 COPY (SELECT * FROM read_parquet('hf://datasets/me/demo/*.parquet'))
   TO 'hf://datasets/me/demo/partitioned' (FORMAT PARQUET, PARTITION_BY (kind));
@@ -159,6 +160,7 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | --- | --- | --- |
 | `hf_token` | `` | API token (secrets and env vars take precedence as above) |
 | `hf_endpoint` | `https://huggingface.co` | Hub endpoint |
+| `hf_datasets_server_endpoint` | `https://datasets-server.huggingface.co` | the service that converts datasets to parquet, which is what `hf_dataset()` reads the file list from |
 | `hf_cache_dir` | `` | where to buffer files before uploading (falls back to `temp_directory`/`TMPDIR`) |
 | `hf_read_buffer_size` | `8388608` | smallest read-ahead window fetched for a `hf://` file (also one range request when a window is split) |
 | `hf_read_cache_size` | `268435456` | fetched bytes one `hf://` file may keep in memory (shared by all its readers) |
@@ -178,6 +180,8 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | --- | --- |
 | `hf_ls(path, recursive := false)` | `url, path, is_dir, size, sha256` |
 | `hf_meta(path)` | `url, exists, size, etag, repo_type, repository, revision` |
+| `hf_dataset(name[, config := …][, split := …][, revision := …][, allow_partial := bool])` | the rows of a Hub dataset, read from the parquet files the Hub converted it to — `hf_dataset('lhoestq/demo1')`, or `'hf://datasets/lhoestq/demo1@main'`, or its web page url. More than one config is refused until one is named; a half-converted dataset is refused until `allow_partial := true` |
+| `hf_dataset_files(name[, config := …][, split := …][, revision := …])` | `dataset, config, split, url, filename, size, partial` — what `hf_dataset()` would read, one row per converted file, with the `hf://` url it reads it from |
 | `hf_upload(local_path, hf_path, message := …)` | `url, size, sha256` |
 | `hf_delete(path_or_list, missing_ok := false)` | `url` — one commit per repository in the list |
 | `hf_bucket_copy(source, target[, hash_wait := n])` | `source, url, path, size, xet_hash, status` — points a bucket at content the Hub already holds; `hash_wait` (default 30s) is how long to wait for the Hub to finish hashing a file committed moments ago |
@@ -206,6 +210,9 @@ SELECT * FROM hf_ls('hf://spaces/dalle-mini/dalle-mini');
 SELECT content FROM read_text('hf://kernels/kernels-community/flash-attn3/README.md');
 SELECT * FROM read_parquet('hf://buckets/lhoestq/playground/duckdb/*.parquet');
 ```
+
+`hf_dataset()` is for the case where there are no *files* to name — where what you want is the dataset, and
+the Hub's own conversion says which files that is. See [docs/datasets.md](docs/datasets.md).
 
 Writes (parquet/csv/json, `PARTITION_BY`, overwrite, LFS-tracked files, multipart LFS for big blobs,
 create-on-write with `hf_create_repo = true`) work for `datasets`, `models`, `spaces` and `kernels`. A
@@ -238,6 +245,7 @@ old version used stay in the CAS — which is what content addressable storage i
 | [BENCHMARKS.md](BENCHMARKS.md) | what reading costs, measured against httpfs, and how to re-measure |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | the test suites, building from source, publishing an extension repository, source layout |
 | [docs/XET.md](docs/XET.md) | the Xet protocol port: hash chain, formats, upload, verification, M9 |
+| [docs/datasets.md](docs/datasets.md) | `hf_dataset()`: the datasets-server route, why its urls are rewritten, what `partial` refuses, which 404 is which |
 | [CHANGELOG.md](CHANGELOG.md) | what each release changed |
 | [STATE.md](STATE.md) | working handover: current position, next steps, constraints |
 

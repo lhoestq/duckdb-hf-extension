@@ -15,14 +15,39 @@
 
 namespace duckdb {
 
+namespace {
+
+//! Skip whitespace (defined below, with the rest of the scanning primitives)
+void SkipJSONWS(const string &s, idx_t &i);
+
+//! Position of the value that follows `"key":`, or npos when the json has no such member. Whitespace
+//! between the name, the colon and the value is skipped: the Hub writes none of it, but a reader that
+//! understands only one of the two valid spellings of an object is a trap for whoever answers it in a test.
+idx_t HFJsonValuePos(const string &json, const string &key, idx_t from = 0) {
+	string needle = "\"" + key + "\"";
+	auto pos = json.find(needle, from);
+	while (pos != string::npos) {
+		auto value = pos + needle.size();
+		SkipJSONWS(json, value);
+		if (value < json.size() && json[value] == ':') {
+			SkipJSONWS(json, ++value);
+			return value < json.size() ? value : string::npos;
+		}
+		// the name appeared inside a longer string or as a value rather than as a member: keep looking
+		pos = json.find(needle, pos + needle.size());
+	}
+	return string::npos;
+}
+
+} // namespace
+
 string HFJson::GetString(const string &json, const string &key, idx_t from, idx_t &end, bool &found) {
 	found = false;
-	string needle = "\"" + key + "\":\"";
-	auto pos = json.find(needle, from);
-	if (pos == string::npos) {
+	auto pos = HFJsonValuePos(json, key, from);
+	if (pos == string::npos || json[pos] != '"') {
 		return "";
 	}
-	pos += needle.size();
+	pos++; // the opening quote
 	string result;
 	while (pos < json.size()) {
 		auto c = json[pos];
@@ -335,14 +360,12 @@ bool HFJson::AsBool(const string &raw) {
 }
 
 string HFJson::FindArray(const string &json, const string &key) {
-	string needle = "\"" + key + "\":[";
-	auto pos = json.find(needle);
-	if (pos == string::npos) {
+	auto pos = HFJsonValuePos(json, key);
+	if (pos == string::npos || json[pos] != '[') {
 		return "";
 	}
-	auto start = pos + needle.size() - 1;
-	auto end = SkipJSONValue(json, start);
-	return json.substr(start, end - start);
+	auto end = SkipJSONValue(json, pos);
+	return json.substr(pos, end - pos);
 }
 
 void HFJson::ForEachObject(const string &json, const std::function<void(const string &)> &callback) {
