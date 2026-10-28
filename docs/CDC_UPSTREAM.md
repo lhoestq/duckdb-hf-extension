@@ -1,14 +1,18 @@
 # Content-defined pages: what goes upstream, in the words to send
 
 Two audiences, one patch. The DuckDB half is a PR from the fork (`lhoestq/duckdb`, branch
-`content-defined-pages`, pushed at `39f85de128a`). The Arrow half is two questions, not a patch — the
-behaviour we would have to copy is Arrow's, and whether it *should* be copied is Arrow's call. `docs/CDC_PARQUET_PAGES.md`
-has the measurements behind every number quoted here; `scripts/cdc_conformance.py` reproduces the boundary claims.
+`content-defined-pages`, pushed at `4c62eb544f7` — open as duckdb/duckdb#27911, draft). The Arrow half is two
+questions, not a patch — the behaviour we would have to copy is Arrow's, and whether it *should* be copied is
+Arrow's call, though one of the two has since been answered by Arrow itself (see *The state scope*, below).
+`docs/CDC_PARQUET_PAGES.md` has the measurements behind every number quoted here;
+`scripts/cdc_conformance.py` reproduces the boundary claims.
 
-## Before opening it
+## Before opening it — what is left now that it is open
 
-The branch is `39f85de128a`: one commit, seven files, on top of `c15a232a57`, which is the fork's `main` and 292
-commits behind `duckdb/duckdb`'s as of today. The gear table is checked in with no generator beside it — the recipe
+The branch tip is `4c62eb544f7`: six commits, on top of `c15a232a57`, which is the fork's `main` and 292 commits
+behind `duckdb/duckdb`'s as of late October. Five of the six are Krisztian Szucs's, stacked exactly on the first,
+and they are what the PR now is: the original patch plus a parameter-validation pass and the state-scope change
+below. The branch is still not rebased. The gear table is checked in with no generator beside it — the recipe
 and the four known-first entries that prove a regeneration is Arrow's are in the table's own header, and the script
 stays here with the rest of the tooling (`scripts/generate_cdc_gear_tables.py`), because a codegen script inside the
 Parquet extension only invites the question of why it is not wired into a build step, when the answer is that it ran
@@ -21,7 +25,8 @@ thrift-container refactor (`PageWriteInformation` now takes `row_group.columns.g
 `BeginWrite`, `RegisterToRowGroup` and the stats writer, while `Prepare`'s body is byte-identical to the one this
 patch was written against. No `ccache` here, so a rebased build is a full rebuild; after one, re-run
 `test/sql/copy/parquet/*` *and* the four fixtures, because a rebase moves the writer under the boundaries and a
-fixture is the only thing that notices.
+fixture is the only thing that notices. `parquet_writer.cpp` is now in the diff too, so the same question arises
+there: upstream has been busy around `Flush`.
 
 Two repo gates were checked with the tools DuckDB's own `scripts/format.py` uses, since a PR that fails them gets
 a bot comment: clang-format (11.0.1 is pinned, unavailable on aarch64, so 15.0.7 was used after confirming it
@@ -35,29 +40,49 @@ generator is a diff of numbers and nothing else.
 It lives in `docs/CDC_PR.md`, paste-ready and current with the branch. Keeping a second copy here would mean two
 texts to keep honest, and one of them would be the stale one.
 
-## The state scope, if anyone wants to argue it (DuckDB issue, or a note in the PR)
+## The state scope: argued, lost, and settled by Arrow
 
-Arrow's chunker is per leaf column, per file: `column_writer.cc` says "not reset between pages and row groups",
-and arrow-rs matches. DuckDB's cannot be, as the code stands: `ParquetWriter::Flush` calls `Prepare` with no lock
-held, and several row groups are prepared concurrently against one shared `ColumnWriter`. Putting the chunker on
-the writer is a data race — it first appeared as page counts that changed from run to run, not as a crash.
+This section used to argue that DuckDB's chunker could not live on the writer. It was right about the reason and
+wrong about the conclusion, and Arrow answered the same question in Arrow without consulting any of us.
 
-The cost, insert-one-row-mid-file into a 2M-row file, 256 KiB / 1 MiB, only `ROW_GROUP_SIZE` moving:
+The reason was real: `ParquetWriter::Flush` calls `Prepare` with no lock held, and several row groups are prepared
+concurrently against one shared `ColumnWriter`. Putting the chunker on the writer without changing that is a data
+race — it first appeared as page counts that changed from run to run, not as a crash. So the first patch held the
+state on `PrimitiveColumnWriterState`, which restarts per row group, and that is what arrow-cpp *ships* (pyarrow 26
+included) even though `column_writer.cc` says otherwise in a comment.
+
+Krisztian Szucs moved it onto `PrimitiveColumnWriter` anyway — one chunker per leaf column per file — and paid for
+it properly: `ParquetWriter::Flush` takes a `cdc_lock` across `PrepareRowGroup` and `FlushRowGroup` when the option
+is on, and batch mode defers `PrepareBatch` into `FlushBatch`, which already runs in batch order. Row groups reach
+the chunker one at a time, in file order, and the page boundaries stop depending on how many threads showed up.
+Arrow did the same thing in #51685 ("Keep the CDC chunking state across row groups") on 2026-10-12 — three days
+after 26.0.0 was cut, so it is in no released pyarrow.
+
+What it is worth, insert-one-row-mid-file into a 2M-row file, 256 KiB / 1 MiB, only `ROW_GROUP_SIZE` moving
+(`scripts/cdc_row_group_scope.py`):
 
 | `ROW_GROUP_SIZE` | 122880 (default) | 1048576 (pyarrow's default) | one row group |
 |---|---|---|---|
-| bytes of the new file already held | 89.8% | 95.7% | 96.4% |
+| bytes of the new file already held, before | 89.8% | 95.7% | 96.4% |
+| bytes of the new file already held, after | 92.3% | 96.3% | 96.4% |
 
-So of the ~5 points between DuckDB and pyarrow at default settings, about 4 are that a page cannot span row
-groups — a smaller row group forces a cut every 122880 rows whatever the hash thinks — and about 0.7 points is the
-state restart itself. Worth stating plainly because the easy reading ("Arrow keeps state longer, so it dedups
-better") overstates it: at Arrow's row-group size, DuckDB is already ahead of pyarrow's own number (95.7% against
-94.6% for the same edit). What the reset does cost is *boundary agreement with another writer's file*: two clients
-writing the same rows produce matching pages only inside the first row group.
+Two-and-a-half points at DuckDB's default row-group size, nothing at one row group — which is the shape you would
+want: the gain is exactly the boundaries the restart used to lose, and a file with one row group never had them to
+lose. The residual to pyarrow's 94.6% is not a chunker difference any more either; it is that a page cannot span a
+row group, and DuckDB's default row group is eight times smaller than pyarrow's. The same pair without the option
+moves 50.7% → 69.8% between the default and a single row group, so the row group was always a dedup lever that had
+nothing to do with the hash.
 
-If per-file state is ever wanted it needs a lock or a per-column mutex around the boundary decision, or row groups
-prepared in order — all three cost more than 0.7 points of dedup. The honest recommendation in the PR is to leave
-it and say why.
+The cost is write parallelism, and the PR should say so in the same breath: with the option on, a copy's writer
+stage is serial. Measured here (5M rows, one 128-byte string column, 8 row groups, `read_parquet` source, best of
+three): 0.92 s on 16 threads without CDC against 1.56 s with, where without CDC 16 threads still beats one
+(1.36 s) and with CDC it barely does (1.75 s). One-row-group files pay only the hashing (2.06 s to 2.35 s).
+
+What the *restart* used to cost in the only currency that matters for cross-client dedup — boundary agreement with
+another writer's file — is now zero against arrow's `main` and still real against pyarrow 26: two clients writing
+the same rows produce matching pages only inside the first row group, unless the other client is built from arrow
+after #51685. That is worth a line in the PR description, because a reviewer with a wheel will otherwise test it
+and see a mismatch.
 
 ## To Arrow (two questions, no patch)
 

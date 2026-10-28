@@ -1,7 +1,9 @@
 # The PR description, paste-ready
 
-Branch `content-defined-pages` at `39f85de128a` on `lhoestq/duckdb`, one commit, seven files, +1389/−13 (563 of
-those lines are the generated gear table). Everything below the rule is the description; `docs/CDC_UPSTREAM.md`
+Branch `content-defined-pages` at `4c62eb544f7` on `lhoestq/duckdb`, six commits, eight files, +1397/−13 (563 of
+those lines are the generated gear table). The first commit is the patch; the five after it are Krisztian Szucs's
+review pass — two parameter-validation fixes, one 32-bit-overflow fix, a comment fix, and the state-scope change
+that question 1 below is about. Everything below the rule is the description; `docs/CDC_UPSTREAM.md`
 holds the state-scope write-up and the two Arrow questions that are *not* part of it.
 
 ---
@@ -30,16 +32,16 @@ the rewritten file's bytes that a store already holds:
 
 | edit to the file | default pages | `DATA_PAGE_SIZE_LIMIT 1MiB` | `CONTENT_DEFINED_CHUNKING` |
 |---|---|---|---|
-| append a row | 98.7% | 98.5% | 98.7% |
-| one cell changed mid-file | 95.1% | 99.2% | **99.7%** |
-| one row inserted mid-file | 50.7% | 54.2% | **89.8%** (94.2% at 64 KiB sizes) |
-| that row deleted again | 50.8% | 50.7% | **89.8%** (94.2% at 64 KiB sizes) |
-| a column added | 66.7% | 66.7% | 66.7% |
+| append a row | 98.7% | 98.5% | 98.6% |
+| one cell changed mid-file | 95.1% | 99.2% | **99.8%** |
+| one row inserted mid-file | 50.7% | 54.2% | **92.3%** (94.9% at 64 KiB sizes) |
+| that row deleted again | 50.8% | 50.7% | **92.3%** (94.9% at 64 KiB sizes) |
+| a column added | 66.7% | 66.7% | 66.6% |
 
 The insert row is the whole argument: one shifted row invalidates every size-based cut after it, while a content
 boundary re-establishes itself within a page or two. The append row is the reassurance: content-defined pages do
-not make the easy case worse. Direct mechanism, same file pairs, counting pages whose *bodies* hash equal — 254
-content pages of the payload column, 253 identical after a mid-file edit.
+not make the easy case worse. Direct mechanism, same file pairs, counting pages whose *bodies* hash equal — 259
+content pages of the payload column, 258 identical after a mid-file edit.
 
 What it costs: **+0.8% file size** (150.2 → 151.4 MB) and an order of magnitude more pages, which is a read-path
 cost too — more headers, more page-lookup work, slightly worse compression per page. Arrow's defaults have the same
@@ -88,7 +90,9 @@ behaviours are tested.
 Three conditions have to be pinned for the comparison to mean anything, and the harness pins them: nullability
 declared explicitly (DuckDB infers `NOT NULL` from statistics, pyarrow keeps `OPTIONAL`, and definition levels are
 fed to the hash); `max_rows_per_page` lifted, or Arrow's default 20 000 rows/page closes pages the chunker did not;
-one row group per side, so the row-group scope below cannot move a boundary.
+one row group per side — not because the two implementations disagree about row groups (they do not, see question
+1) but because pyarrow 26.0.0, the version the recorded answers came from, restarts its chunker at every row group
+and does not match its own `column_writer.cc` comment until #51685 ships.
 
 #### Scope, deliberately narrow
 
@@ -105,40 +109,55 @@ one row group per side, so the row-group scope below cannot move a boundary.
 
 #### Nothing is paid for when the option is off
 
-The loop that decides page cuts gains two predictable branches. Measured by building the writer with and without
+The loop that decides page cuts gains two predictable branches, and the row-group lock is taken only when the
+option is on. Measured by building the writer with and without
 this commit and running 12 write shapes 8 times each — 250 MB of uncompressed strings, fixed widths with a
 nullable column, snappy on and off, a LIST column: min-of-8 times are equal within run-to-run noise (a LIST
 column: 0.025 s against 0.026 s, and which way round that falls depends on the run).
 
 #### Two things worth arguing about in review
 
-1. **The chunker state lives per row group, not per file.** Arrow's is per leaf column per file
-   (`column_writer.cc`: "not reset between pages and row groups"), and arrow-rs matches. DuckDB's cannot be, as the
-   code stands: `ParquetWriter::Flush` calls `Prepare` with no lock held and flushes row groups concurrently over
-   one shared `ColumnWriter`, so the only place per-write state can go without a lock is next to the `page_info` it
-   carves up. (That is not hypothetical — the first version put it on the writer and showed page counts that changed
-   from run to run.) The cost, insert-one-row-mid-file at 2M rows, 256 KiB / 1 MiB, with only `ROW_GROUP_SIZE`
-   moving:
+1. **The chunker state lives per leaf column per file, which makes a CDC copy's writer stage serial.** Arrow's is
+   the same shape (per leaf column per file; `column_writer.cc` says "not reset between pages and row groups",
+   arrow-rs matches, and arrow-cpp made it true as well as documented in #51685, merged 2026-10-12 — after 26.0.0,
+   so no released pyarrow has it). Per-file state needs serialising in DuckDB in a way it does not in Arrow:
+   `ParquetWriter::Flush` calls `Prepare` with no lock held and prepares row groups concurrently over one shared
+   `ColumnWriter`. So with the option on, `Flush` takes a mutex across `PrepareRowGroup` and `FlushRowGroup`, and
+   batch mode defers `PrepareBatch` into `FlushBatch`, which already runs in batch order; row groups then reach the
+   chunker one at a time and in file order. The lock is taken only when the option is on.
 
-   | `ROW_GROUP_SIZE` | 122880 (DuckDB's default) | 1048576 (pyarrow's) | one row group |
-   |---|---|---|---|
-   | shared bytes of the new file | 89.8% | 95.7% | 96.4% |
+   What that buys: boundaries stop depending on how the write was scheduled. Writing the same 400k-row table as one
+   row group and as four gives identical content cuts, with and without nulls — the only extra cuts are the forced
+   ones at the row-group ends — where the earlier per-row-group state moved six of eleven cuts in one column. That
+   is arrow's `IndependentOfRowGroupBoundaries` property. And it is worth 2.5 points of dedup on a shifted file at
+   DuckDB's default row-group size: insert-one-row-mid-file at 2M rows, 256 KiB / 1 MiB, with only `ROW_GROUP_SIZE`
+   moving, 89.8% of the new file's bytes held before against 92.3% now at 122880, 95.7% against 96.3% at pyarrow's
+   1048576, and 96.4% unchanged at a single row group.
 
-   so of the ~5 points behind pyarrow's 94.6% at default settings, about 4 are that a page cannot span row groups —
-   a small row group forces a cut every 122880 rows whatever the hash says — and the state reset is worth about 0.7
-   points. I would rather move the state to the writer and take the 0.7, but not in this commit and not without
-   deciding where a per-write serialising writer belongs.
+   What it costs, in the same units (5M rows, one 128-byte string column, 8 row groups, best of three): 16 threads
+   0.92 s without the option against 1.56 s with, and single-threaded 1.36 s against 1.75 s. Without the option 16
+   threads still beats one; with it, barely. A single-row-group file pays only the hashing (2.06 s to 2.35 s), and
+   the ratio depends on how cheap the rest of the write is — 20M `BIGINT` rows go 0.25 s to 0.39 s. So the trade is
+   write parallelism for boundaries independent of the write's scheduling, and I think it is the right way round,
+   since the option exists precisely to make boundaries predictable. The alternative is per-row-group state, which
+   is a smaller patch and buys a serial writer back, at 2.5 points of dedup and no boundary agreement with another
+   client's file past the first row group.
 2. **`data_page_size_limit` still cuts on top of content cuts.** Kept deliberately: it is an overflow rule, not a
-   boundary, and dropping it would let one huge value produce one huge page. If the consensus is that CDC should
-   own page sizes entirely, that is a one-line change and a documented behaviour difference from Arrow.
+   boundary, and dropping it would let one huge value produce one huge page. It no longer disturbs the chunker — a
+   size cut used to reset the count of bytes since the last boundary, which put `min_chunk_size` back to zero and,
+   below that threshold, turned the option into a no-op; Arrow's `data_pagesize` does not reset its chunker either.
+   If the consensus is that CDC should own page sizes entirely, that is a one-line change and a documented
+   behaviour difference from Arrow.
 
 #### Tests
 
-`test/sql/copy/parquet/writer/parquet_write_content_defined_pages.test` (52 assertions) covers the option in both
+`test/sql/copy/parquet/writer/parquet_write_content_defined_pages.test` (61 assertions) covers the option in both
 spellings, defaults, serialization through a prepared `COPY`, `false` being byte-identical to no option, size and
 norm bounds, unknown fields, and page counts against `parquet_metadata`'s `encoding_stats` for cut and uncut
-columns. `test/sql/copy/*` on this commit: 660 cases, 197674 assertions, all passed, 49 skipped (31 `tpch`,
-13 `httpfs`, 2 `tpcds`, 2 `windows`, 1 `encodings`, 1 `mode skip flaky`).
+columns — including that a `DATA_PAGE_SIZE_LIMIT` cut leaves the content boundaries where they were, and that
+splitting the same data over five row groups adds four forced cuts and moves none of the content ones.
+`test/sql/copy/*` on this branch: 660 cases, 197683 assertions, all passed,
+49 skipped (31 `tpch`, 13 `httpfs`, 2 `tpcds`, 2 `windows`, 1 `encodings`, 1 `mode skip flaky`).
 
-Measurements are from this commit on `linux-arm64`, pyarrow 26.0.0, the reference Xet chunker as built from
+Measurements are from this branch on `linux-arm64`, pyarrow 26.0.0, the reference Xet chunker as built from
 `xet-core` at `e922f74`.

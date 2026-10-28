@@ -147,9 +147,13 @@ def write_duckdb(duckdb_shell: str, values_path: Path, out_path: Path, options: 
     else:
         cdc = ""
     # row_group_size is pinned above the row count so the whole table is one row group, on both sides (arrow
-    # gets it from pyarrow's own 1M-row default). Row groups are held out of this comparison deliberately: the
-    # chunker state resets at every row group in duckdb and persists across them in arrow, which is a design
-    # difference about scope, not about the algorithm, and mixing it in would hide everything else.
+    # gets it from pyarrow's own 1M-row default). Row groups are held out of this comparison for a version
+    # reason rather than a design one: this build carries the chunker state across row groups, which is what
+    # arrow's column_writer.cc comment promises and what arrow-cpp actually does only since #51685 (merged
+    # 2026-10-12, three days after 26.0.0 was cut), while pyarrow 26.0.0 - the arrow these fixtures were
+    # recorded against - restarts the chunker at every row group. Leave two row groups in and the harness is
+    # measuring that release gap and reporting it as a chunker disagreement. Once a release carries #51685 the
+    # pin can come out, and the multi-row-group fixture becomes the interesting one.
     query = (f"COPY (FROM read_parquet('{values_path}')) TO '{out_path}' "
              f"(FORMAT PARQUET, ROW_GROUP_SIZE {rows * 2}{cdc})")
     subprocess.run([duckdb_shell, "-c", query], check=True, capture_output=True, text=True)

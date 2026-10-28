@@ -64,14 +64,13 @@ lagging-tag trap; it only has to differ from what was built.
   the rule is replayed from `xet-probe` vectors, never re-derived in C++.
 * The CI matrix fix (`e5bb74d`) was verified against the live matrix: push run `39157627780` built exactly
   `linux_amd64`, `linux_arm64`, `windows_amd64_mingw` + the reference-checks job, green.
-* **Content-defined pages, where that stands (this branch `parquet-page-cdc`, nothing pushed).** Three commits
-  here now: the conformance harness with four frozen Arrow answers, the document rewritten around the chunker's
-  convergence on Arrow plus `docs/CDC_UPSTREAM.md`, and the fork branch's push notes. In the fork,
-  `content-defined-pages` is one commit — `39f85de128a`, seven files, **+1389/−13** — **pushed to `lhoestq/duckdb`**
-  (five local commits on top of it since, tip `4c62eb544f7` — Next §3)
-  with the PR description drafted in `docs/CDC_PR.md`. It is *standalone* (the first version of it did not `git add`
-  the generated gear-table header, which `git status` after a clean `git show --stat HEAD` is how you catch),
-  clang-format clean under the version `scripts/format.py` pins, `typos` clean, dead code out, and its commit message
+* **Content-defined pages, where that stands (this branch `parquet-page-cdc`, nothing pushed).** The fork side is
+  public: `content-defined-pages` is six commits — `39f85de128a` plus five of Krisztian Szucs's review pass — eight
+  files, **+1397/−13**, pushed to `lhoestq/duckdb` and open as **duckdb/duckdb#27911** (draft), with the description
+  in `docs/CDC_PR.md` and the not-for-the-PR half in `docs/CDC_UPSTREAM.md`. The first commit is *standalone* (its
+  first version did not `git add` the generated gear-table header, which `git status` after a clean
+  `git show --stat HEAD` is how you catch), clang-format clean under the version `scripts/format.py` pins,
+  `typos` clean, dead code out, and its commit message
   carries the cost-when-off measurement. The gear-table *generator* is not in the fork — it is here, at
   `scripts/generate_cdc_gear_tables.py`, and the header it generates states the recipe plus the four known-first
   entries inline, so the table stays checkable without shipping a codegen script that no build step runs.
@@ -97,26 +96,25 @@ lagging-tag trap; it only has to differ from what was built.
    file twice, flag on then off, comparing what each reads back. A deduplicated shard is deliberately a different
    shard, so the assertion is about the bytes at the end of a read, not the bytes written — which is exactly the
    promise a user of the flag relies on.
-3. **Content-defined pages: the nullability fix first, then the PR text catching up with the branch.** The writer
-   patch is built and committed at `/home/quentin/hf/duckdb`, branch `content-defined-pages` — and the branch has
-   moved. origin still holds `39f85de128a`; five commits sit on top of it locally, authored by Krisztian Szucs and
-   ending at `4c62eb544f7`, which answers the state-scope question in the affirmative: the chunker moved onto
-   `PrimitiveColumnWriter` — one per leaf column per file, Arrow's scope — with a `ParquetWriter::cdc_lock` held
-   across `PrepareRowGroup` and `FlushRowGroup` so it sees row groups one at a time and in file order. His message
-   claims page boundaries then match arrow-cpp page for page across row groups, batch and parallel copies alike,
-   and names the price: the writer stage of a CDC copy stops running in parallel (20M rows, 16 threads: 2.4s with
-   CDC against 0.28s without; single-threaded 2.5s against 2.0s). Three things follow, none of them the writer's
-   problem. Push, so the two repos describe one thing. Re-measure: every number in `docs/CDC_PARQUET_PAGES.md`
-   came off `39f85de128a`, and `scripts/dedup_estimate.py` already shows what one commit to the writer is worth —
-   a shifted file 58.0% reusable then, 70.7% now, with the size-based row unchanged. Rewrite `docs/CDC_PR.md`'s
-   first review question, which asks *may* the state live on the writer, into the answer with its cost attached.
-   The four conformance fixtures were re-run against the new build and all four exit 0 — they pin one row group
-   per side, so the state change cannot move them, which is worth knowing before anyone reads a green run as
-   evidence. The second question stands (is parquet-cpp's `data_page_size` refinement of CDC chunks a behaviour a
-   second implementation should copy), and so does the rebase note in `docs/CDC_UPSTREAM.md`. The cheap fix on our
-   own path is still unbuilt and still worth more than any of it: stop rewrites from flipping a column
-   `required` → `optional` (`src/hf_write.cpp`; the 2.7% vs 97.2% number in `docs/CDC_PARQUET_PAGES.md`), which
-   pays on every write, content-defined pages or not.
+3. **Content-defined pages: the nullability fix first, then the PR's review round.** The patch is pushed and the
+   PR is open — `lhoestq/duckdb` branch `content-defined-pages` at `4c62eb544f7`, six commits, duckdb/duckdb#27911
+   (draft), description in `docs/CDC_PR.md`. Five of the six are Krisztian Szucs's, and the last answers the
+   state-scope question in the affirmative: the chunker moved onto `PrimitiveColumnWriter` — one per leaf column per
+   file, Arrow's scope — with a `ParquetWriter::cdc_lock` held across `PrepareRowGroup` and `FlushRowGroup` so it
+   sees row groups one at a time and in file order, which is what Arrow did in #51685 three days after 26.0.0 was
+   cut. Everything in `docs/` was re-measured against that tip on 2026-10-27: the grid (`scripts/cdc_page_measure.py
+   2000000`), the page-survival tables off the same files, and a new `scripts/cdc_row_group_scope.py` for the one
+   column of the grid that commit is about — 89.8% → 92.3% of a shifted file's bytes held at DuckDB's default row
+   group, unchanged at one row group, and 58.0% → 70.7% on the nano-xet version of the same question. `test/sql/
+   copy/*` re-run on the tip: 660 cases, 197683 assertions, 49 skipped, all passed. The four conformance fixtures
+   still exit 0 and still prove only one-row-group parity, because pyarrow 26 restarts the chunker per row group
+   while the fork no longer does; the pin in `write_duckdb` says so, and cross-row-group parity is only checkable
+   against an Arrow built after #51685. Three things are left, in this order: the cheap fix on our own path, stop
+   rewrites from flipping a column `required` → `optional` (`src/hf_write.cpp`; the 2.7% vs 97.2% number in
+   `docs/CDC_PARQUET_PAGES.md`), which pays on every write content-defined or not; the rebase decision in
+   `docs/CDC_UPSTREAM.md` (292 commits, cherry-picks clean, a full rebuild to prove it); and the Arrow question
+   that survives its own answer — whether parquet-cpp's `data_page_size` refinement of CDC chunks binds a second
+   implementation.
 4. **Shard-driven read prefetch** — walk a shard's chunk table instead of one range request per window; this
    is the fix for the `read_blob`-of-a-big-file gap that is still behind httpfs.
 5. Optional: decide whether CI should `strip` the mingw artifact (73 MB unstripped vs 31 MB for the MSVC
@@ -132,7 +130,7 @@ lagging-tag trap; it only has to differ from what was built.
 | repo | `/home/quentin/hf/hf-duckdb-extension` (private remote `lhoestq/duckdb-hf-extension`) |
 | venv | `. .venv/bin/activate` — has `cmake`, `ninja`, `huggingface_hub`, `duckdb` 2.0.0.dev (no `numpy`) |
 | duckdb | `v2.0.0-alpha47600`, source `d4355d01c59362d57036ad377735dd5340276a5b`, *Cyanoptera*, vendored at `/home/quentin/hf/vendor/duckdb` |
-| duckdb fork | `/home/quentin/hf/duckdb`, remote `https://github.com/lhoestq/duckdb`, branch `content-defined-pages` (origin at `39f85de128a`, **pushed**, off `c15a232a57` — 292 commits behind `duckdb/duckdb` main, cherry-picks clean onto `d71c926f431`, not rebuilt there — with five unpushed commits on top, tip `4c62eb544f7`, see Next §3; build needs `PATH=/home/quentin/hf/hf-duckdb-extension/.venv/bin:$PATH` for cmake/ninja; shell at `build/release/duckdb`, rebuilt today so it contains the tip; the gear-table generator is NOT in the fork — it is in this repo at `scripts/generate_cdc_gear_tables.py`) |
+| duckdb fork | `/home/quentin/hf/duckdb`, remote `https://github.com/lhoestq/duckdb`, branch `content-defined-pages` (tip `4c62eb544f7`, **pushed**, six commits, off `c15a232a57` — 292 commits behind `duckdb/duckdb` main, cherry-picks clean onto `d71c926f431`, not rebuilt there — open as duckdb/duckdb#27911; build needs `PATH=/home/quentin/hf/hf-duckdb-extension/.venv/bin:$PATH` for cmake/ninja; shell at `build/release/duckdb`, rebuilt today so it contains the tip; the gear-table generator is NOT in the fork — it is in this repo at `scripts/generate_cdc_gear_tables.py`) |
 | xet-core | `/home/quentin/hf/xet-core` at `e922f74`; `cargo` is at `~/.cargo/bin` and **not on PATH**; the probe binary is `tools/xet_probe/target/release/xet-probe` |
 | token | `~/.cache/huggingface/token` (user `lhoestq`); `gh` authenticated as `lhoestq` |
 | signing key | `~/.config/duckdb-hf/signing.pem`, fingerprint `sha256:f007c8016bc2f3a2…dbfce` |
@@ -194,21 +192,26 @@ scripts/ci_selftest.sh build/release/extension/hf/hf.duckdb_extension   # what C
   levels into every page of that column and reuses 2.7% of the file instead of 97.2%, content-defined pages
   included, and DuckDB takes nullability from the query's expressions — so `COPY` out of a declared `NOT NULL`
   table, or normalise every column to optional in the projection (`CASE WHEN c IS NOT NULL THEN c END`, 0.1% of
-  size). Scripts: `scripts/cdc_page_measure.py` (the grid), `scripts/parquet_pages.py` (page walker, `--compare`).
-  **Update, same month:** the writer patch is built, in `/home/quentin/hf/duckdb` branch `content-defined-pages`
-  (pushed to the fork as `39f85de128a`, five local commits on top now) — `CONTENT_DEFINED_CHUNKING`, boolean or
+  size). Scripts: `scripts/cdc_page_measure.py` (the grid), `scripts/parquet_pages.py` (page walker, `--compare`),
+  `scripts/cdc_row_group_scope.py` (the row-group lever, alone).
+  **Update, same month:** the writer patch is built and upstream as duckdb/duckdb#27911, in
+  `/home/quentin/hf/duckdb` branch `content-defined-pages`
+  (pushed to the fork, tip `4c62eb544f7`) — `CONTENT_DEFINED_CHUNKING`, boolean or
   `{min_chunk_size, max_chunk_size, norm_level}`, flat columns only, and the chunker is a port of Arrow's (its own
   generated gear tables, its mask
   arithmetic, its 8-hits-in-a-row rule, its cut-before convention), not a DuckDB-shaped scheme of our own. Which
   makes it checkable: `scripts/cdc_conformance.py` writes 400k rows with pyarrow and with the patched writer and
   compares values per data page per column — 6 of 7 CDC-eligible columns match page for page at every setting
   tried, the 7th is cut at a superset of DuckDB's offsets by arrow's own `data_page_size` rule, not by the chunker.
-  On the grid that is 89.8% of a shifted file reusable against 50.7% today (94.2% at 64 KiB sizes, pyarrow 95.0%);
-  the residual is row groups — same file, `ROW_GROUP_SIZE` 122880 → 1048576 → one row group moves 89.8% → 95.7% →
-  96.4%, so most of the gap to pyarrow is that pages cannot span row groups and only ~0.7 points is the per-row-group
-  state reset. Two known divergences left, both structural: state lifetime, and each writer's own page-closing rules.
-  Byte-level page identity across writers remains out of reach (headers, stats, codec, `created_by`) and is not the
-  goal.
+  On the grid that is 92.3% of a shifted file reusable against 50.7% today (94.9% at 64 KiB sizes, pyarrow 95.0%);
+  the residual is row groups — same file, `ROW_GROUP_SIZE` 122880 → 1048576 → one row group moves 92.3% → 96.3% →
+  96.4%, so all of what is left is that pages cannot span row groups (it was 89.8% → 95.7% → 96.4% while the
+  chunker restarted per row group; carrying its state across them, as `4c62eb544f7` does and as Arrow's #51685 did
+  three days after 26.0.0, is worth 2.5 points at DuckDB's default row group and costs the write stage its
+  parallelism). One structural divergence left: each writer's own page-closing rules. State lifetime converged,
+  in Arrow's direction — which means the fixtures' one-row-group pin is version skew now (pyarrow 26 restarts per
+  row group), not a design difference. Byte-level page identity across writers remains out of reach (headers,
+  stats, codec, `created_by`) and is not the goal.
   `scripts/dedup_estimate.py` is the small version of that grid: one table made on the spot, an edit, a throwaway
   nano-xet store, and the share of the edited file a store holding the original would not have to take — ten
   seconds at 500k rows, directional (nano-xet's chunker, 8 / 64 / 128 KiB) rather than quotable. Writes shell out
