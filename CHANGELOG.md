@@ -31,11 +31,23 @@ pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
   answer is re-filtered here and a request that filtered down to nothing names the configs and splits the
   dataset has. A body carrying `error` - which the route uses with status **200** when a listing is too big
   to send - is thrown rather than read as zero rows.
+* **The listing request carries the token as a bearer token**, which is the whole of what makes a private or
+  a gated dataset listable. The route reads it and answers the three cases apart, measured against a private
+  dataset created for the purpose: no header is a **401** ("not accessible *without authentication*"), a token
+  that cannot see the repo is the same **404** a misspelled name gets ("not accessible *with the current
+  credentials*"), and a token that can is the listing. The suite asserts it through a fixture route that
+  answers 401 to a request whose `Authorization` is missing or is not a bearer one, so a client that stopped
+  sending the header fails a test rather than quietly losing access to private data.
+* **An empty listing says which empty it is.** `"parquet_files":[]` is what a queued conversion, a set of
+  failed conversions and a dataset with nothing to convert all answer, and only the first is worth waiting
+  for - `partial` does not distinguish them, a queued conversion answers `partial: false`. The errors now
+  name the queued steps and ask for a retry, name the failures, or say the hub has not converted it.
 * **`hf_datasets_server_endpoint`** (default `https://datasets-server.huggingface.co`) is the new setting,
   normalized and scoped like `hf_endpoint`. It is how a private mirror is addressed, and how the suites
   answer with a canned listing: `tools/hf_datasets_server_fixture.py` stands in for the service and answers
-  the three states - half converted, refused with a 200, files that live elsewhere - that the Hub cannot be
-  asked to be in on demand. The files it lists are the real ones, so those reads still go over `hf://`.
+  the five states the Hub cannot be asked to be in on demand - half converted, queued with nothing listed,
+  refused with a 200, files that live somewhere else, and a listing that requires a token. The files it
+  lists are the real ones, so those reads still go over `hf://`.
 * **`HFJson::GetString` and `FindArray` now skip whitespace between a key, its colon and its value**, as
   `GetRaw` already did. The Hub answers compact, so nothing in production depended on it; a fixture answering
   with `json.dumps` defaults parsed as an empty listing, which is the kind of failure that reads as "the

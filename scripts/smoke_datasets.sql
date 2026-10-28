@@ -160,6 +160,11 @@ SELECT 'allow_partial reads what exists' AS t,
        count(*) = (SELECT count(*) FROM hf_dataset('lhoestq/demo1')) AS assert_demo1_is_fully_converted
 FROM hf_dataset('fixture/partial', allow_partial := true);
 
+-- Nothing converted yet, with the answer naming the step in flight. The response to that is to wait, so the
+-- error says so instead of "the hub has not converted it", which is what a dataset with no parquet gets.
+-- expect-fail: queued for it and no parquet file yet
+SELECT 'a conversion still in flight asks for a retry' AS t, count(*) FROM hf_dataset('fixture/queued');
+
 -- a url that is not the Hub's is left alone: it is all such a url can promise, and read_parquet reads it
 -- over httpfs
 SELECT 'a file that lives elsewhere is passed through' AS t,
@@ -169,3 +174,10 @@ FROM hf_dataset_files('fixture/external');
 -- the route answers some of its refusals as a 200 with the reason in the body
 -- expect-fail: the conversion of this dataset is queued
 SELECT 'a refusal that arrives as a 200' AS t, count(*) FROM hf_dataset('fixture/refused');
+
+-- The listing request has to carry the token as a bearer token, because that is the only way a private or a
+-- gated dataset lists at all. `fixture/private` answers 401 to anything that arrives without one, which is
+-- what the production service does for real (measured: 401 "not accessible without authentication" when
+-- anonymous, 404 "not accessible with the current credentials" for a token that cannot see the repo). A
+-- machine with no token has nothing to put in the header, so @AUTH@ is a note there rather than an assert.
+@AUTH@

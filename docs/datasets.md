@@ -95,6 +95,15 @@ gated)…`); a second success means the name is fine and the `config` was not, a
 that do exist. The retry is what turns a typo in `config :=` into something to type instead of a bare
 `Not found`.
 
+## An empty list is three different states
+
+`"parquet_files":[]` arrives for a dataset whose conversion is queued, for one whose conversions failed, and
+for one that has nothing to convert — and the first is worth waiting for while the other two are not. The
+route tells them apart with `pending` and `failed`, so the errors do too: "the hub has N conversion step(s)
+queued for it and no parquet file yet — retry in a moment", "…failed N conversion step(s) for it", and the
+plain "the hub has not converted it to parquet". A queued conversion answers `partial: false`, so `partial`
+is not the flag that distinguishes them — measured on a dataset created seconds before asking about it.
+
 ## Refusals that arrive as a 200
 
 For a conversion too large to enumerate, the route answers **200** with `{"error": "The computed response
@@ -108,13 +117,27 @@ the reason is the Hub's own words, so it is quoted in the error rather than para
 reason gets the generic "the hub has not converted it to parquet" message, which is the honest sentence for
 what is actually known then.
 
-## Reading a private or gated dataset
+## The listing carries the token, which is what a private or gated dataset needs
 
-Nothing special: the listing request carries the same token as a read (`HFResolveTarget` + `HFMakeClient`,
-no `anonymous: true`), so a dataset the token can see is a dataset `hf_dataset` can list and read. A dataset
-the token cannot see answers the listing the same way it answers a made-up name - `HTTP 404 …: The dataset
-does not exist, or is not accessible with the current credentials (private or gated)…`, quoted through.
-`hf_status()` answers who the token is. A public dataset needs no token for either the listing or the read.
+`GET {server}/parquet` is asked with `Authorization: Bearer <token>`: the same token a read of the dataset
+would use, resolved against the dataset's own `hf://` url (`HFResolveTarget` + `HFMakeClient`, no
+`anonymous: true`). That is not decoration — the route reads the header and answers the three cases
+separately, all of it measured against a private dataset created for the purpose:
+
+| who asks | status | what the body says |
+| --- | --- | --- |
+| nobody, no header | **401** | "not accessible **without authentication** (private or gated)" |
+| a token that cannot see it | **404** | "not accessible **with the current credentials** (private or gated)" |
+| a token that can | **200** | the listing (a brand new repo's conversion is queued for a minute first: **500** "the server is busier than usual", then 200 with `pending` filled in) |
+
+The 401 is the informative one: the dataset exists, and this request simply did not answer to it. The 404 is
+deliberately indistinguishable from a misspelled name, which is why the listing asks twice. `hf_status()`
+answers who the token is; a public dataset needs no token for the listing or the read.
+
+The suite checks the header really goes out, against a fixture route that answers 401 to any request whose
+`Authorization` is missing or is not a bearer one. A machine that resolves no token has nothing to send, and
+there the line prints a note instead of asserting: a job running without secrets must not fail over a token
+it was never given.
 
 ## What `revision` means here
 
@@ -131,9 +154,11 @@ a test suite that answers with a canned listing, is addressed. Normalized like `
 trailing slash removed). Global: the value picks a *service*, and the files it lists are then read from
 wherever its answer points.
 
-The tests for "half a conversion", "queued, nothing to list" and "refused with a 200" are necessarily against
+The tests for "half a conversion", "queued, nothing to list", "refused with a 200", "the files live
+somewhere else" and "this listing needs a token" are necessarily against
 `tools/hf_datasets_server_fixture.py` — a dataset is half converted for exactly as long as it takes to
 convert, so a suite that asked the production service would pass or fail depending on the hour. The fixture
-answers three made-up dataset names from fixed bodies and hands everything else to the production service,
-so the files it lists are the real ones and the reads still go over `hf://` with the token. What is canned is
-the listing, never the bytes.
+answers five made-up dataset names from fixed bodies (`fixture/partial`, `fixture/queued`,
+`fixture/external`, `fixture/refused`, `fixture/private`) and hands everything else to the production
+service, so the files it lists are the real ones and the reads still go over `hf://` with the token. What is
+canned is the listing, never the bytes.

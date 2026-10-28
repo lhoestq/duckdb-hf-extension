@@ -264,6 +264,19 @@ HFDatasetFiles HFLoadDatasetParquetFiles(DatabaseInstance &db, optional_ptr<File
 		                  HFDatasetSelectionHint(request, available));
 	}
 	if (result.files.empty()) {
+		// Three states answer as an empty list, and one of them is worth waiting for. A conversion that is
+		// still queued says so - `pending` filled in, `partial` still false, measured on a dataset created for
+		// the purpose - which asks for a retry rather than for a different dataset name.
+		if (result.pending > 0) {
+			throw IOException("Dataset '%s' is not ready to read: the hub has %llu conversion step(s) queued for "
+			                  "it and no parquet file yet - retry in a moment",
+			                  request.dataset, result.pending);
+		}
+		if (result.failed > 0) {
+			throw IOException("Dataset '%s' has no readable parquet files: the hub failed %llu conversion step(s) "
+			                  "for it",
+			                  request.dataset, result.failed);
+		}
 		throw IOException("No parquet files to read for dataset '%s'%s", request.dataset,
 		                  HFDatasetSelectionHint(request, result));
 	}

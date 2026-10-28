@@ -52,16 +52,59 @@ def external(body):
     return body
 
 
+def queued(body):
+    """Nothing converted yet, and the answer says why.
+
+    Measured on a dataset created for the purpose: `parquet_files` empty, `pending` naming the step in
+    flight, `partial` still false. The distinction is worth a route because the right response to it is to
+    wait, while the right response to "this dataset has no parquet" is to go and check the name.
+    """
+    shard = body["parquet_files"][0]
+    body["parquet_files"] = []
+    body["partial"] = False
+    body["pending"] = [{"kind": "config-parquet", "dataset": shard["dataset"], "config": shard["config"],
+                        "split": None}]
+    body["failed"] = []
+    return body
+
+
 def refused():
     """A refusal the service delivers as a 200, with the reason in the body."""
     return {"error": "the conversion of this dataset is queued and has not produced any file yet"}
 
 
-#: dataset name -> what to answer for it. Names with no entry fall through to the production service.
+class Refusal(Exception):
+    """Answer this status and body instead of a listing."""
+
+    def __init__(self, status, body):
+        super().__init__(str(body))
+        self.status = status
+        self.body = body
+
+
+def private(headers):
+    """A dataset that only a token can list.
+
+    The one fixture that tests the *client*: the listing request has to carry the token as a bearer token,
+    since that is the only way a private or a gated dataset lists at all. The production service draws the
+    same distinction for real - anonymous is a 401 ("not accessible without authentication"), a token that
+    cannot see the repo is a 404 ("not accessible with the current credentials"), both measured - so this
+    refuses the anonymous case and hands the authenticated one a real listing.
+    """
+    authorization = headers.get("Authorization") or ""
+    if not authorization.startswith("Bearer ") or len(authorization) <= len("Bearer "):
+        raise Refusal(401, {"error": "Credentials are required to access this dataset."})
+    return listing("lhoestq/demo1")
+
+
+#: dataset name -> what to answer for it, given the request headers. Names with no entry fall through to
+#: the production service.
 FIXTURES = {
-    "fixture/partial": lambda: partial(listing("lhoestq/demo1")),
-    "fixture/external": lambda: external(listing("lhoestq/demo1")),
-    "fixture/refused": refused,
+    "fixture/partial": lambda headers: partial(listing("lhoestq/demo1")),
+    "fixture/queued": lambda headers: queued(listing("lhoestq/demo1")),
+    "fixture/external": lambda headers: external(listing("lhoestq/demo1")),
+    "fixture/refused": lambda headers: refused(),
+    "fixture/private": private,
 }
 
 
@@ -76,7 +119,10 @@ class Handler(BaseHTTPRequestHandler):
         dataset = (query.get("dataset") or [""])[0]
         make = FIXTURES.get(dataset)
         try:
-            body = make() if make else listing(dataset)
+            body = make(self.headers) if make else listing(dataset)
+        except Refusal as refusal:
+            self.send_json(refusal.status, refusal.body)
+            return
         except urllib.error.HTTPError as error:
             # what the production service answers for that dataset, answered here - the suites get to see
             # the same 404 for an unknown dataset whether or not a fixture is standing in for the service

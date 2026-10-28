@@ -180,7 +180,7 @@ CREATE SECRET (TYPE HUGGINGFACE, TOKEN 'hf_...', SCOPE 'hf://datasets/my-org/');
 | --- | --- |
 | `hf_ls(path, recursive := false)` | `url, path, is_dir, size, sha256` |
 | `hf_meta(path)` | `url, exists, size, etag, repo_type, repository, revision` |
-| `hf_dataset(name[, config := …][, split := …][, revision := …][, allow_partial := bool])` | the rows of a Hub dataset, read from the parquet files the Hub converted it to — `hf_dataset('lhoestq/demo1')`, or `'hf://datasets/lhoestq/demo1@main'`, or its web page url. More than one config is refused until one is named; a half-converted dataset is refused until `allow_partial := true` |
+| `hf_dataset(name[, config := …][, split := …][, revision := …][, allow_partial := bool])` | the rows of a Hub dataset, read from the parquet files the Hub converted it to — `hf_dataset('lhoestq/demo1')`, or `'hf://datasets/lhoestq/demo1@main'`, or its web page url. More than one config is refused until one is named; a half-converted dataset is refused until `allow_partial := true`; a private or gated dataset is listed and read with the token, as any `hf://` read does |
 | `hf_dataset_files(name[, config := …][, split := …][, revision := …])` | `dataset, config, split, url, filename, size, partial` — what `hf_dataset()` would read, one row per converted file, with the `hf://` url it reads it from |
 | `hf_upload(local_path, hf_path, message := …)` | `url, size, sha256` |
 | `hf_delete(path_or_list, missing_ok := false)` | `url` — one commit per repository in the list |

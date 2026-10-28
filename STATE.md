@@ -14,11 +14,18 @@ parquet files it made and handing those to `read_parquet`. `src/hf_dataset.cpp`,
 (the token; and the conversion revision stays percent-encoded because the Hub 404s the decoded spelling),
 the answer is re-filtered here because the route *ignores* a `split=` it does not know, `partial: true` is
 refused until `allow_partial := true`, more than one config is refused, and a body carrying `error` — which
-the route sends with status **200** — is thrown rather than read as zero rows. `new scripts/smoke_datasets.sh`
-answers the three states the Hub cannot be asked to be in on demand through
-`tools/hf_datasets_server_fixture.py` (canned listings, real files, everything else proxied).
+the route sends with status **200** — is thrown rather than read as zero rows. The listing request carries
+the token as a **bearer** token, which is the whole of what makes a private or gated dataset listable: that
+was measured three ways against a private dataset created for the purpose (anonymous **401** "not accessible
+*without authentication*", a token that cannot see it **404** — the same answer a misspelled name gets — a
+token that can **200**), and the probe repo was deleted afterwards. An empty listing says *which* empty it
+is, because a conversion that is still queued answers `partial: false` and `pending` filled in: "N conversion
+step(s) queued … retry in a moment" versus failed conversions versus nothing to convert. `new
+scripts/smoke_datasets.sh` answers the five states the Hub cannot be asked to be in on demand through
+`tools/hf_datasets_server_fixture.py` (canned listings, real files, everything else proxied), one of them a
+route that answers 401 unless the request carries a bearer header.
 
-Numbers on this tree: `datasets` **30 passed / 11 expected failures / 0 failed**, and unchanged elsewhere —
+Numbers on this tree: `datasets` **31 passed / 12 expected failures / 0 failed**, and unchanged elsewhere —
 `xet` 12/3, `read` 55/0, `write` 57/6, `models` 24/0, `buckets` 22/2 — plus `scripts/ci_selftest.sh` at
 **1090 / 0** with **16** `hf_*` table functions (was 14).
 
