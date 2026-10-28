@@ -125,6 +125,8 @@ def main() -> None:
     if not args.no_cdc:
         sizes = f"min_chunk_size: {args.cdc_min}, max_chunk_size: {args.cdc_max}"
         writers["CONTENT_DEFINED_CHUNKING"] = {"content_defined_chunking": "{" + sizes + "}"}
+    if not writers:
+        die("--size-limit is empty and --no-cdc asked for no content-defined row, which leaves no writer to run")
     for options in writers.values():
         if args.row_group:
             options["row_group_size"] = str(args.row_group)

@@ -484,6 +484,22 @@ wants nano-xet 0.1.2 or newer - before it, `modified` answered with an epoch flo
 and DuckDB's bridge calls `.timestamp()` on whatever it is handed; the script checks the version up front rather
 than letting that land as an error from inside `read_parquet`.
 
+`scripts/dedup_estimate_dev.py` is the same measurement with nothing in the middle. Registering the filesystem
+makes `nxet://` a path DuckDB can `COPY` into, so the writer's bytes reach the store as they are made, the store's
+own counters say what the second file cost, and there is no subprocess, no temp directory and no upload step - the
+statements are the whole script. It runs on a python module built off the branch: duckdb-python with its
+`external/duckdb` submodule swapped for a clone of the fork, since the python client left the duckdb repo and a
+fork checkout pip-installs nothing on its own. The recipe is in the script's header and it takes four minutes -
+unity builds, 20 cores - which is not the hour a duckdb core build takes. A CDC file written through that module
+came out byte-identical to the same `COPY` written by the patched shell to a local file, twelve bytes of
+`created_by` apart, so the two entry points drive one writer and the two scripts report the same rows.
+
+```sh
+DUCKDB_PY=/home/quentin/hf/duckdb-python/.venv/lib/python3.11/site-packages \
+    python scripts/dedup_estimate_dev.py --rows 500000
+python scripts/dedup_estimate_dev.py --no-cdc # same code on a stock duckdb; then the rows are not comparable
+```
+
 The boundary check against arrow-cpp, and the four recorded answers it compares against:
 
 ```sh

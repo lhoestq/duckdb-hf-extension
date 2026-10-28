@@ -114,7 +114,9 @@ lagging-tag trap; it only has to differ from what was built.
    `docs/CDC_PARQUET_PAGES.md`), which pays on every write content-defined or not; the rebase decision in
    `docs/CDC_UPSTREAM.md` (292 commits, cherry-picks clean, a full rebuild to prove it); and the Arrow question
    that survives its own answer — whether parquet-cpp's `data_page_size` refinement of CDC chunks binds a second
-   implementation.
+   implementation. None of the three needs a python module, but one now exists (`/home/quentin/hf/duckdb-python/.venv`,
+   `DUCKDB_PY`), and it writes byte-identical files to the shell — so whichever of these scripts gets touched
+   next can drop its shell-out.
 4. **Shard-driven read prefetch** — walk a shard's chunk table instead of one range request per window; this
    is the fix for the `read_blob`-of-a-big-file gap that is still behind httpfs.
 5. Optional: decide whether CI should `strip` the mingw artifact (73 MB unstripped vs 31 MB for the MSVC
@@ -130,7 +132,8 @@ lagging-tag trap; it only has to differ from what was built.
 | repo | `/home/quentin/hf/hf-duckdb-extension` (private remote `lhoestq/duckdb-hf-extension`) |
 | venv | `. .venv/bin/activate` — has `cmake`, `ninja`, `huggingface_hub`, `duckdb` 2.0.0.dev (no `numpy`) |
 | duckdb | `v2.0.0-alpha47600`, source `d4355d01c59362d57036ad377735dd5340276a5b`, *Cyanoptera*, vendored at `/home/quentin/hf/vendor/duckdb` |
-| duckdb fork | `/home/quentin/hf/duckdb`, remote `https://github.com/lhoestq/duckdb`, branch `content-defined-pages` (tip `4c62eb544f7`, **pushed**, six commits, off `c15a232a57` — 292 commits behind `duckdb/duckdb` main, cherry-picks clean onto `d71c926f431`, not rebuilt there — open as duckdb/duckdb#27911; build needs `PATH=/home/quentin/hf/hf-duckdb-extension/.venv/bin:$PATH` for cmake/ninja; shell at `build/release/duckdb`, rebuilt today so it contains the tip; the gear-table generator is NOT in the fork — it is in this repo at `scripts/generate_cdc_gear_tables.py`) |
+| duckdb fork | `/home/quentin/hf/duckdb`, remote `https://github.com/lhoestq/duckdb`, branch `content-defined-pages` (tip `4c62eb544f7`, **pushed**, six commits, off `c15a232a57` — 292 commits behind `duckdb/duckdb` main, cherry-picks clean onto `d71c926f431`, not rebuilt there — open as duckdb/duckdb#27911; build needs `PATH=/home/quentin/hf/hf-duckdb-extension/.venv/bin:$PATH` for cmake/ninja; shell at `build/release/duckdb`, rebuilt 2026-10-27 so it carries the tip although its stamped version still names `c15a232a57` — see the stamp bullet below; the gear-table generator is NOT in the fork — it is in this repo at `scripts/generate_cdc_gear_tables.py`) |
+| duckdb-python | `/home/quentin/hf/duckdb-python` — `duckdb/duckdb-python` with `external/duckdb` holding a local clone of the fork on `content-defined-pages`; module `2.1.0.dev2610280918`, engine `v2.1.0-dev89772` at `4c62eb544f7`, venv `.venv`, four-minute build, needs `python3-dev`; hand it to a script as `DUCKDB_PY=/home/quentin/hf/duckdb-python/.venv/lib/python3.11/site-packages` |
 | xet-core | `/home/quentin/hf/xet-core` at `e922f74`; `cargo` is at `~/.cargo/bin` and **not on PATH**; the probe binary is `tools/xet_probe/target/release/xet-probe` |
 | token | `~/.cache/huggingface/token` (user `lhoestq`); `gh` authenticated as `lhoestq` |
 | signing key | `~/.config/duckdb-hf/signing.pem`, fingerprint `sha256:f007c8016bc2f3a2…dbfce` |
@@ -216,15 +219,37 @@ scripts/ci_selftest.sh build/release/extension/hf/hf.duckdb_extension   # what C
   nano-xet store, and the share of the edited file a store holding the original would not have to take — ten
   seconds at 500k rows, directional (nano-xet's chunker, 8 / 64 / 128 KiB) rather than quotable. Writes shell out
   to the patched binary (no python binding for it); the read-back goes through `nxet://` in the `duckdb` module,
-  which is what proves the store holds the file. It takes `--row-group`, which is where the grid's biggest lever
-  is. The nullability fix above is still the bigger one on our path and still unbuilt.
+  which is what proves the store holds the file. `scripts/dedup_estimate_dev.py` drops the shell-out entirely —
+  `register_filesystem` makes `nxet://` a path DuckDB `COPY`s into, so the store is the sink and the statements
+  are the measurement — but it needs a module off the fork, which is the next bullet. Both take `--row-group`,
+  which is where the grid's biggest lever is. The nullability fix above is still the bigger one on our path and
+  still unbuilt.
 * **Local build, the two traps that produce a confident wrong answer.** (1) An artifact built against the vendored
   shallow DuckDB (HEAD `d4355d01c5`, no tags) is stamped with that sha unless `DUCKDB_VERSION` is set at configure
   time, and the pre-release Python build then refuses to LOAD it; the Makefile now defaults the version, and a CI
   pin still wins. (2) `scripts/try.py` loads `dist/hf.duckdb_extension`, and only `run_all.sh` copies a fresh build
   there — a `smoke_*.sh` run on its own grades whatever `dist/` happens to hold. `try.py` prints path, bytes and
   mtime for exactly this reason.
+* **The fork's python module is four minutes away, not an hour.** The python client is out of tree now — `tools/`
+  is shell, swift, sqllogic, cpp and utils, no `pythonpkg` — so an importable `content-defined-pages` means
+  duckdb-python (nanobind, scikit-build-core) with its `external/duckdb` submodule holding a *local clone* of the
+  fork on the branch, plus `apt-get install python3-dev` for `Python.h` and cmake/ninja on `PATH`. The recipe is
+  in `scripts/dedup_estimate_dev.py`'s header; it built at `/home/quentin/hf/duckdb-python/.venv` in four minutes
+  because the core compiles as unity objects, not as the hour a duckdb core build feels like. `DUCKDB_PY` is what
+  lets a script import it in front of the released module, and `PRAGMA version` — not `duckdb.__version__` — is
+  what proves the answer came from the patched one.
+* **A stamped version string is a configure-time fact, not a build-time one.** The shell at `build/release/duckdb`
+  announces `v2.1.0-dev89766 (build c15a232a57)` — the branch's *base*, none of the six CDC commits — because
+  CMake wrote the version file while the tree sat there and no CDC commit touches a `CMakeLists.txt`, so relinking
+  never re-stamped it. It is not a stale build: the shell and the freshly built module write byte-identical CDC
+  files, twelve bytes of `created_by` apart, with and without `DATA_PAGE_SIZE_LIMIT` and across two row groups.
+  When a binary's own version string disagrees with its behaviour, re-run configure or compare bytes — do not
+  decide what a build contains from its word for itself.
 * **Tools**: `numpy` is not in the venv — use `cur.description` / `fetchall()`, never `fetchdf()`.
+  `parquet_metadata`'s `encoding_stats` is a LIST of structs, one entry per (page_type, encoding) *run*, so page
+  counts want `FROM parquet_metadata(f), unnest(encoding_stats) AS t(es)` with `sum(es.count)`; `->>'$.count'`
+  answers NULL on a list, and `count(*)` counts runs — which reads as exactly one page per column per row group
+  and looks, to whoever misreads it, like a chunker doing nothing.
   `duckdb.register_filesystem` wants an *fsspec* filesystem — hand it a `pyarrow.fs` one and it says "Bad
   filesystem instance" — so `nxet://` works in DuckDB right after `import nano_xet`, on nano-xet 0.1.2 or newer:
   0.1.1 answered `modified` with an epoch float where fsspec promises a datetime, DuckDB's bridge calls
