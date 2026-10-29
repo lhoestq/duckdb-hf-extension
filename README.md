@@ -13,9 +13,9 @@ A native C++ DuckDB extension to read/write to `hf://` buckets, datasets, etc.
 ```sql
 INSTALL hf FROM hf_repo; LOAD hf FROM hf_repo;   -- one-time setup: see Installation
 
-SELECT * FROM 'hf://datasets/lhoestq/demo1/*.parquet';
-SELECT * FROM hf_ls('hf://datasets/lhoestq/demo1');
-SELECT count(*) FROM hf_dataset('lhoestq/demo1', split := 'train');   -- the dataset itself, not the files someone chose
+SELECT * FROM 'hf://datasets/stanfordnlp/imdb/**/*.parquet';
+SELECT * FROM hf_ls('hf://datasets/stanfordnlp/imdb');
+SELECT count(*) FROM hf_dataset('stanfordnlp/imdb', split := 'train');
 COPY (SELECT * FROM range(10) t(i)) TO 'hf://datasets/me/demo/out.parquet';
 COPY (SELECT * FROM read_parquet('hf://datasets/me/demo/*.parquet'))
   TO 'hf://datasets/me/demo/partitioned' (FORMAT PARQUET, PARTITION_BY (kind));
