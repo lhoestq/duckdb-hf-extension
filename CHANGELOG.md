@@ -5,7 +5,7 @@ Two independent version numbers: **this project's** (what the extension can do, 
 one DuckDB identifier, so a release is one binary per identifier per platform, and rebuilding for a newer
 pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
 
-## Unreleased
+## 0.0.3 for Hugging Face Datasets
 
 * **`hf_dataset('namespace/name')` answers a query with the rows of a Hugging Face dataset**, and
   `hf_dataset_files()` lists the files it will read to do it. The files are not a guess and not a convention:

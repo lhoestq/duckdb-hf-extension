@@ -5,7 +5,7 @@ story is `README.md`, the per-release story is `CHANGELOG.md`, the protocol stor
 long form of every decision — the failed attempts and the measurements behind it — is in `git log` bodies.
 This file only holds what is true right now and what to do next.
 
-## Position — 2026-10-28, `feat/hf-dataset-table-function` (unreleased)
+## Position — 2026-10-28, `feat/hf-dataset-table-function` (0.0.3)
 
 **`hf_dataset()` and `hf_dataset_files()` are on that branch, built, and green.** They read a Hub dataset as
 a table by asking the Hub's own conversion service (`GET {hf_datasets_server_endpoint}/parquet`) which

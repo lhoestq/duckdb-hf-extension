@@ -16,7 +16,7 @@ A dataset repo and a bucket are two ways of serving that layout, and the differe
 client: a dataset is a git repository, so its files are served under `/resolve/main/` (a revision), every
 upload is a commit, and big files are stored as pointers; a bucket is object storage, served under
 `/resolve/` with no revision at all, and `hf buckets sync` writes bytes with no history behind them. A
-tree a client walks by name is closer to what a bucket is for, which is why 0.0.2 publishes to
+tree a client walks by name is closer to what a bucket is for, which is why it publishes to
 <https://huggingface.co/buckets/duckdb-extensions/builds/resolve>. Publishing never removes anything, from
 either target: the dataset repository still serves every file that went into it before the move.
 

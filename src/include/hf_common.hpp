@@ -14,7 +14,7 @@ struct FileOpenerInfo;
 //! the DuckDB version identifier the binary is built for, which has to match the running DuckDB exactly.
 //! Hand-moved per release, together with the assertion in scripts/smoke_write.sql: nothing derives it, so
 //! a release that forgets ships an artifact reporting the previous release's number.
-static constexpr const char *HF_EXTENSION_VERSION = "0.0.2";
+static constexpr const char *HF_EXTENSION_VERSION = "0.0.3";
 
 //! Default endpoint. Overridable through the `hf_endpoint` setting, the `HF_ENDPOINT` env var or a secret.
 static constexpr const char *HF_DEFAULT_ENDPOINT = "https://huggingface.co";
