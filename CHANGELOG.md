@@ -52,9 +52,22 @@ pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
   `GetRaw` already did. The Hub answers compact, so nothing in production depended on it; a fixture answering
   with `json.dumps` defaults parsed as an empty listing, which is the kind of failure that reads as "the
   service returned nothing".
-* **Suite**: `scripts/smoke_datasets.sh` — 41 statements, 30 of them reads and 11 of them expected refusals —
+* **Suite**: `scripts/smoke_datasets.sh` — 43 statements, 31 of them reads and 12 of them expected refusals —
   is in `scripts/run_all.sh`, and `scripts/ci_selftest.sh` now counts 16 `hf_*` table functions registered
   where it counted 14.
+* **Fixed: `hf_xet_upload` could not upload to a dataset, model or space.** Every git-scoped upload of a file
+  was refused by the CAS — `HTTP 400 … (19) invalid shard Shard validation failure, missing metadata
+  extension for git repository` — because the shard it wrote named no sha256 for the content, and the CAS
+  requires that field for a repository with a git history. Bucket uploads were unaffected, which is how the
+  failure sat in one suite rather than across the write path: `hf commit` already had the digest from
+  preupload and passed it, `hf_xet_upload` had nobody to ask. The digest is now computed over the file - in
+  the same pass that chunks it, so it costs a BLAKE3-sized amount of work and no extra read - by whoever
+  uploads to a git-backed scope without naming one, which keeps the invariant in the one place that writes
+  shards instead of being an obligation each entry point has to remember. `hf_xet_upload` also *reports*
+  the digest now, as a `sha256` column (`NULL` for a bucket, which names its file by xet hash and carries
+  none): the CAS refuses a shard with no digest and accepts one with the wrong one, so `sha256 =
+  (SELECT sha256(content) FROM read_blob(path))` in `smoke_xet_upload.sql` is the only check that the value
+  is the file's and not merely present.
 
 ## 0.0.2 — DuckDB 2.0.0 is out: the first release built against a released DuckDB, and the first published to a bucket
 

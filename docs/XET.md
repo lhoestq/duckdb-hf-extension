@@ -154,6 +154,15 @@ wrong reading still writes 32 bytes, still produces a shard the CAS accepts, and
 to nothing; the selftest pins two vectors plus the flags word, because an extension written without being flagged
 (or flagged without being written) is invisible to a byte diff of a *correct* shard.
 
+What the CAS enforces is the **presence** of that extension, not its value. A git-backed shard written without it
+is refused outright — `HTTP 400 … (19) invalid shard Shard validation failure, missing metadata extension for git
+repository`, measured on `hf_xet_upload` of a CSV to a dataset, where every git-scoped upload failed while the
+bucket ones in the same run passed. One written with the *wrong* digest is accepted: checking it would cost the
+CAS the content it is being told about. Both halves are dealt with in `hf_cas`: it computes the digest over the
+file whenever the caller does not already have one (only the commit path does, preupload hands it over), so no
+entry point can forget to ask, and it reports the digest it wrote as a column of `hf_xet_upload`, because the
+only way to tell which sha256 a shard names is to be shown one.
+
 Nothing on the read side gates any of this: the write-token route answers for datasets, models and spaces —
 including a repo created `xetEnabled: false` (`lhoestq/hf-ext-nonxet-probe`, whose API info reports
 `xetEnabled: None`, was handed a token for `cas-server.xethub.hf.co`) — and `preupload` answers `uploadMode: "lfs"`

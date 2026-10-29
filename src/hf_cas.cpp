@@ -2,6 +2,7 @@
 
 #include "hf_xet_dedup.hpp"
 
+#include "hf_crypto.hpp"
 #include "hf_http.hpp"
 #include "hf_xet_chunk.hpp"
 
@@ -449,6 +450,16 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 	// per chunk: 40 bytes, about 2 MB per GiB at the chunker's 64 KiB average - against the 64 MiB of
 	// in-flight xorb buffers already in play, so this is not what bounds file size.
 	vector<HFXetHashNode> file_chunks;
+	// A git-backed shard has to carry the sha256 that its commit will name this content by, and the CAS now
+	// says so out loud ("(19) invalid shard Shard validation failure, missing metadata extension for git
+	// repository"). A caller that already has the digest - the commit path, which preupload handed it -
+	// passes it and none of this is used; a caller that does not gets it here, over the same read that
+	// chunks the file, rather than from an obligation per entry point. Per-caller obligations are how the
+	// newest entry point, hf_xet_upload(), ended up refused for every git-scoped file it was given.
+	// A bucket wants no digest at all: its entry is addressed by its xet hash.
+	HFSha256 file_sha;
+	string computed_sha256;
+	const auto needs_file_sha256 = !target.url.IsBucket();
 	{
 		HFXetChunker chunker;
 		string buffer(HF_DEFAULT_READ_BUFFER, '\0');
@@ -461,10 +472,16 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 			// bytes that precede them.
 			fs.Read(file, buffer.data(), int64_t(want), offset);
 			offset += want;
+			file_sha.Update(const_data_ptr_cast(buffer.data()), want);
 			chunker.Process(const_data_ptr_cast(buffer.data()), want,
 			                [&](const_data_ptr_t data, idx_t len) { file_chunks.push_back({HFXetChunkHash(data, len), len}); });
 		}
 		chunker.Finish([&](const_data_ptr_t data, idx_t len) { file_chunks.push_back({HFXetChunkHash(data, len), len}); });
+	}
+	if (needs_file_sha256) {
+		// the whole file, including the chunks dedup meant were never uploaded - the same reason the file's
+		// xet hash covers all of them: a file's identity is its content, not the part of it that was sent
+		computed_sha256 = file_sha.FinalHex();
 	}
 
 	vector<HFXetHash> chunk_hashes;
@@ -680,12 +697,19 @@ HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, 
 	shard_file.segments = segments;
 	shard_file.chunk_hashes = chunk_hashes;
 	// The sha256 metadata extension is what ties this content to the sha256 a git-backed commit will
-	// name it by, so a git upload passes it and a bucket upload does not (huggingface_hub uploads bucket
-	// adds the same way, with SKIP_SHA256). It travels as a DataHash, which parses hex as four
-	// little-endian words - the same convention as every other hash in the shard, and not the naive one.
-	if (sha256_hex && !sha256_hex->empty()) {
+	// name it by. The scope decides whether the shard carries one at all - a git-backed repo needs it, a
+	// bucket file has none to be named by and huggingface_hub uploads those with SKIP_SHA256 - and the
+	// caller's argument only says where the digest comes from. It travels as a DataHash, which parses hex
+	// as four little-endian words - the same convention as every other hash in the shard, and not the naive
+	// one.
+	string sha256_to_write;
+	if (needs_file_sha256) {
+		sha256_to_write = (sha256_hex && !sha256_hex->empty()) ? *sha256_hex : computed_sha256;
+	}
+	result.sha256 = sha256_to_write;
+	if (!sha256_to_write.empty()) {
 		shard_file.has_sha256 = true;
-		auto parsed = HFXetHash::FromHex(*sha256_hex);
+		auto parsed = HFXetHash::FromHex(sha256_to_write);
 		for (idx_t i = 0; i < 32; i++) {
 			shard_file.sha256[i] = parsed.bytes[i];
 		}

@@ -139,6 +139,13 @@ struct HFXetUploadResult {
 	string shard_hash;
 	string shard_result;
 	idx_t shard_bytes = 0;
+	//! The sha256 written into the shard's metadata extension, empty when the shard carries none (which is
+	//! every bucket upload - a bucket file is addressed by its xet hash). Worth reporting because a CAS
+	//! refusal proves the field is *absent*, while an accepted upload proves nothing about whether it holds
+	//! the file's actual sha256 - and a shard naming the wrong digest leaves the Hub's mapping from xet
+	//! content to sha256 pointing at content that is not what that sha256 says, which no read of the file
+	//! that was just uploaded can notice.
+	string sha256;
 
 	//! Cross-repository dedup, as of this file. These describe the *file*, not one xorb, so a caller
 	//! reading one row per xorb sees the same numbers on every row (`deduped_chunks` is a property of the
@@ -164,10 +171,13 @@ struct HFXetUploadResult {
 //! is reachable *by hash*; naming it as a file in a repository is the caller's business - a bucket
 //! does it with a batch `addFile`, a git-backed repo with an LFS pointer (docs/XET.md, M5).
 //!
-//! `sha256_hex`, when given, is written into the file entry's metadata extension. That field is the
-//! only place where the content's xet hash and the sha256 a git commit names the blob by are stated
-//! together, so a git-backed upload that wants the Hub to see its content as Xet has to pass it, and a
-//! bucket upload must not (a bucket file has no sha256 to be named by).
+//! The file entry's metadata extension carries the content's sha256, which is the only place the content's
+//! xet hash and the sha256 a git commit names the blob by are stated together - so a git-backed upload has
+//! to have one, and the CAS refuses a shard without it. `sha256_hex` supplies it when the caller knows it
+//! (the commit path does, preupload handed it over); otherwise it is computed here over the file, because a
+//! git-backed shard without it is not a thing the CAS accepts and an entry point should not have to know to
+//! ask. A bucket upload carries none either way - a bucket file has no sha256 to be named by, and passing
+//! one for a bucket target is ignored.
 HFXetUploadResult HFXetUploadFileContents(DatabaseInstance &db, FileSystem &fs, optional_ptr<FileOpener> opener,
                                           const HFTarget &target, const string &path,
                                           const string *sha256_hex = nullptr);

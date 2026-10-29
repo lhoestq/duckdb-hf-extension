@@ -1189,6 +1189,12 @@ static unique_ptr<FunctionData> HFXetUploadBind(ClientContext &context, TableFun
 	return_types.push_back(LogicalType::BIGINT);
 	names.emplace_back("dedup_shard_failures");
 	return_types.push_back(LogicalType::BIGINT);
+	//! Also per file. The CAS refuses a git-backed shard that carries no sha256 and accepts one that carries
+	//! the wrong one, so the only way to know the digest a shard names is to be shown it - and the only way
+	//! to check that it is the file's own is to put it beside `(SELECT sha256(content) FROM read_blob(path))`.
+	//! NULL for a bucket upload, whose shard names no digest by design.
+	names.emplace_back("sha256");
+	return_types.push_back(LogicalType::VARCHAR);
 	return std::move(bind_data);
 }
 
@@ -1205,6 +1211,8 @@ static void HFXetUploadFunction(ClientContext &context, TableFunctionInput &data
 	ClientContextFileOpener file_opener(context);
 	auto &db = DatabaseInstance::GetDatabase(context);
 	if (state.next == 0 && !state.published) {
+		// no sha256 passed: nothing here knows the file's digest, and HFXetUploadFileContents computes the
+		// one a git-backed shard has to carry. A bucket target ignores it either way.
 		state.result = HFXetUploadFileContents(db, FileSystem::GetFileSystem(context), &file_opener,
 		                                       bind_data.target, bind_data.path);
 		if (bind_data.publish) {
@@ -1245,6 +1253,7 @@ static void HFXetUploadFunction(ClientContext &context, TableFunctionInput &data
 		output.data[11].SetValue(count, Value::BIGINT(state.result.dedup_queries));
 		output.data[12].SetValue(count, Value::BIGINT(state.result.dedup_hits));
 		output.data[13].SetValue(count, Value::BIGINT(state.result.dedup_shard_failures));
+		output.data[14].SetValue(count, state.result.sha256.empty() ? Value() : Value(state.result.sha256));
 		state.next++;
 		count++;
 	}

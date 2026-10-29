@@ -5,9 +5,9 @@ story is `README.md`, the per-release story is `CHANGELOG.md`, the protocol stor
 long form of every decision — the failed attempts and the measurements behind it — is in `git log` bodies.
 This file only holds what is true right now and what to do next.
 
-## Position — 2026-10-28, `feat/hf-dataset-table-function` (0.0.3)
+## Position — 2026-10-29, `main` (0.0.3)
 
-**`hf_dataset()` and `hf_dataset_files()` are on that branch, built, and green.** They read a Hub dataset as
+**`hf_dataset()` and `hf_dataset_files()` are merged (PR #1) and green on `main`.** They read a Hub dataset as
 a table by asking the Hub's own conversion service (`GET {hf_datasets_server_endpoint}/parquet`) which
 parquet files it made and handing those to `read_parquet`. `src/hf_dataset.cpp`, and
 [docs/datasets.md](docs/datasets.md) for why: the answer's `https://` urls are rewritten to `hf://` ones
@@ -25,20 +25,29 @@ scripts/smoke_datasets.sh` answers the five states the Hub cannot be asked to be
 `tools/hf_datasets_server_fixture.py` (canned listings, real files, everything else proxied), one of them a
 route that answers 401 unless the request carries a bearer header.
 
-Numbers on this tree: `datasets` **31 passed / 12 expected failures / 0 failed**, and unchanged elsewhere —
-`xet` 12/3, `read` 55/0, `write` 57/6, `models` 24/0, `buckets` 22/2 — plus `scripts/ci_selftest.sh` at
-**1090 / 0** with **16** `hf_*` table functions (was 14).
+Numbers on this tree, whole runner green: `xet` 12/3, **`xet_upload` 42/2**, `datasets` 31/12, `read` 55/0,
+`write` 57/6, `models` 24/0, `buckets` 22/2 — **243 passed / 25 expected failures / 0 failed** — plus
+`scripts/ci_selftest.sh` at **1090 / 0** with **16** `hf_*` table functions (was 14). One caveat about the
+runner rather than the code: `buckets` starts by committing two fixture files to `hf-smoke-staging`, and the
+Hub sometimes answers those with "Failed to commit ... the repository is likely being written to
+concurrently" while nothing else is writing — seen once on a full run, and the suite passed unchanged on its
+own immediately after. Re-run it before believing that failure.
 
-**`xet_upload` is at 7 failures and it is not this branch.** Seven shard uploads to a *git-backed* scope now
-answer `HTTP 400 … (19) invalid shard Shard validation failure, missing metadata extension for git
-repository` from `cas-server.xethub.hf.co`. Checked rather than assumed: rebuilding with `src/hf_http.cpp`
-back at `HEAD` fails identically (35/2/7), and `hf_cas.cpp` reads JSON through `GetRaw` only — the one
-scanner function this branch did not touch. What the CAS is asking for is the metadata extension a
-git-backed shard carries its sha256 in, and `hf_cas.cpp:686` adds it only `if (sha256_hex && !empty)`
-("a git upload passes it and a bucket upload does not"), so the reading is that the CAS started enforcing
-what the reference clients send. Bucket-scope uploads — every other shard this project writes — still pass.
-Someone has to decide whether `hf_xet_upload` should compute and pass the sha256 whenever the scope is a
-git repo, and whether the suite should then cover both scopes.
+**`xet_upload`'s 7 failures are fixed, and they were a bug in `hf_xet_upload` itself, not collateral from the
+datasets work.** Seven shard uploads to a
+*git-backed* scope answered `HTTP 400 … (19) invalid shard Shard validation failure, missing metadata
+extension for git repository`: `HFXetUploadFileContents` wrote the sha256 metadata extension only when the
+caller handed it one, and only the commit path had one to hand (preupload gives it), so `hf_xet_upload` —
+newer than that path, and with nobody to ask — wrote git-scoped shards with the field absent, which the CAS
+now refuses. Bucket shards were fine, because a bucket shard is *supposed* to carry no sha256. The computation
+moved into the upload: `needs_file_sha256` is `!IsBucket()`, the digest is streamed in the pass that already
+reads every byte to chunk the file (no second read), and the caller's value wins when it has one. Which scope
+*type* decides whether a shard carries a digest at all, so a caller cannot put one on a bucket shard by
+accident either. `HFXetUploadResult` and `hf_xet_upload` now report the digest (`NULL` for a bucket), because
+the CAS refuses an absent one and accepts a wrong one — presence is all it can check without reading the
+content — so `smoke_xet_upload.sql` compares the column against `sha256(content)` computed by duckdb for the
+same file, and asserts NULL for the bucket upload. Both are checked, not assumed: the digest reported for a
+dataset-scoped upload is what `hashlib` says the file is.
 
 `HFJson::GetString` and `FindArray` now skip whitespace between key, colon and value, as `GetRaw` already
 did — the Hub answers compact, so production never noticed; a fixture written with `json.dumps` defaults

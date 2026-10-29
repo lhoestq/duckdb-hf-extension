@@ -78,7 +78,13 @@ RESET hf_xet_compression;
 COPY (SELECT md5((i * random())::VARCHAR) AS a, random() AS b FROM range(9000) t(i))
      TO '/tmp/hf_xet_upload_probe.csv' (FORMAT CSV);
 
-SELECT bool_and(inserted) AS assert_local_content_is_inserted, count(*) >= 1 AS assert_uploaded
+-- A git-backed shard also has to name the file's sha256, because that is the id its commit's pointer will
+-- use and the shard is the only place the two are stated together. The CAS refuses the upload when the
+-- field is missing, and accepts it when the field holds some other file's digest - so the digest is
+-- returned, and compared here against sha256() computed by duckdb itself rather than by this extension.
+SELECT bool_and(inserted) AS assert_local_content_is_inserted, count(*) >= 1 AS assert_uploaded,
+       bool_and(sha256 = (SELECT sha256(content) FROM read_blob('/tmp/hf_xet_upload_probe.csv')))
+           AS assert_the_shard_names_this_files_sha256
 FROM hf_xet_upload('/tmp/hf_xet_upload_probe.csv', scope := 'hf://datasets/lhoestq/hf-smoke-staging');
 
 SELECT bool_and(NOT inserted) AS assert_local_repeat_is_already_stored
@@ -108,7 +114,10 @@ SELECT bool_and(published) AS assert_published,
        bool_and(len(xet_hash) = 64) AS assert_hash_is_a_xet_hash,
        bool_and(inserted) AS assert_content_is_new,
        bool_and(shard_bytes > 0) AS assert_shard_was_uploaded,
-       bool_and(shard_result IN ('exists', 'sync performed')) AS assert_shard_answered
+       bool_and(shard_result IN ('exists', 'sync performed')) AS assert_shard_answered,
+       -- a bucket file *is* its content, addressed by its xet hash: there is no pointer and no sha256 for
+       -- the shard to name, so the digest a git-backed upload reports is absent here by design
+       bool_and(sha256 IS NULL) AS assert_a_bucket_upload_names_no_sha256
 FROM hf_xet_upload('/tmp/hf_xet_bucket_probe.csv',
                    scope := 'hf://buckets/lhoestq/playground/duckdb/xet_upload.csv', publish := true);
 
