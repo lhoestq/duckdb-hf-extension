@@ -3,6 +3,15 @@
 The protocol behind the Xet path is [docs/XET.md](docs/XET.md); the current release is
 [CHANGELOG.md](CHANGELOG.md).
 
+## Why not just httpfs
+
+`httpfs` ships a *read-only* `hf://` filesystem, and rejects `models`. This adds **writes** (`COPY TO`,
+`INSERT`, `hf_upload`, `hf_delete`, `hf_bucket_copy`), the table functions below, all five repo types,
+`@revision` and the short `hf://user/repo/path` form, and registers with `IsManuallySet()` so it wins over
+httpfs whoever loads first. The `huggingface` **secret type** is shared, so one `CREATE SECRET` serves both.
+It does not link httpfs' C++ classes (no stable ABI, extensions are `dlopen`'d `RTLD_LOCAL`); it drives
+DuckDB's own `HTTPUtil`/`HTTPParams`/`HTTPHeaders` and lets DuckDB autoload httpfs purely as the transport.
+
 ## Testing
 
 The suites run against the **live Hub** — they write to scratch repositories and clean up, so they need a
@@ -79,6 +88,31 @@ Two rules follow from how that file has broken twice:
 
 
 ## Distributing
+
+A binary is tied to exactly one version identifier, so the alpha this project was built against up to and
+including 0.0.2-pre8 (`v2.0.0-alpha47600`, what a pre-2.0 client reports) is a different artifact, not the
+same one relabelled. [Installation](#installation) says which client to pin against which identifier.
+
+Current release: **0.0.2**, built for **DuckDB 2.0.0** (`v2.0.0`) on all eight DuckDB client platforms, and the
+first release published to a **bucket** rather than a dataset repository:
+`https://hf.co/buckets/duckdb-extensions/builds/resolve`. It carries cross-repository dedup (`COPY TO` an
+upload can point at content another repository already stored: 0 bytes and 1.4 s to re-upload 237 MB you
+already have). The last build for the pre-2.0 identifier is **0.0.2-pre8** (`v2.0.0-alpha47600`), which keeps
+serving every `v2.0.0-alpha…` client from the dataset tree. HEAD may carry fixes beyond either.
+Suites: 212 passed / 13 expected failures / 0 failed, plus 1090 offline reference checks. Release notes in
+[CHANGELOG.md](CHANGELOG.md); the Xet protocol port and its measurements in [docs/XET.md](docs/XET.md).
+
+All eight platforms are published under each identifier, signed at the root and unsigned under `unsigned/`.
+`v2.0.0` — from 0.0.2 — lives in a bucket, `https://hf.co/buckets/duckdb-extensions/builds/resolve`: object
+storage, no revision in the url. Every `v2.0.0-alpha…` identifier before it lives in a dataset repo,
+`https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main`, which is where pre1–pre8 went and
+what those clients still fetch. The bucket tree was checked by fetching every served path and re-reading each
+binary's footer against the directory serving it (33 files, `scripts/verify_published.py`), and installed over
+https from the long and the short host and from the unsigned tree (`scripts/test_install.py`); the dataset tree
+went through the same two checks when pre8 was published. Take the signed
+one — `INSTALL` then checks bytes against a key instead of trusting the CDN.
+`windows_amd64` vs `windows_amd64_mingw` is not about which Windows you run: DuckDB composes that name
+itself, and `_mingw` appears only when DuckDB was *compiled* with mingw (`#ifdef __MINGW32__`).
 
 A repository is a static file tree, `<prefix>/<duckdb_version>/<platform>/hf.duckdb_extension[.gz]` — any
 web server, `file://` directory, or Hub repo. `scripts/make_extension_repo.sh` assembles one from a build;
