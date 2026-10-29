@@ -93,8 +93,8 @@ A binary is tied to exactly one version identifier, so the alpha this project wa
 including 0.0.2-pre8 (`v2.0.0-alpha47600`, what a pre-2.0 client reports) is a different artifact, not the
 same one relabelled. [Installation](#installation) says which client to pin against which identifier.
 
-Current release: **0.0.2**, built for **DuckDB 2.0.0** (`v2.0.0`) on all eight DuckDB client platforms, and the
-first release published to a **bucket** rather than a dataset repository:
+Built for **DuckDB 2.0.0** (`v2.0.0`) on all eight DuckDB client platforms, and the
+first release published to a **bucket**:
 `https://hf.co/buckets/duckdb-extensions/builds/resolve`. It carries cross-repository dedup (`COPY TO` an
 upload can point at content another repository already stored: 0 bytes and 1.4 s to re-upload 237 MB you
 already have). The last build for the pre-2.0 identifier is **0.0.2-pre8** (`v2.0.0-alpha47600`), which keeps

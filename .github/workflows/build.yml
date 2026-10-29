@@ -2,12 +2,6 @@ name: Build extension
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    # a build gets DuckDB (downloaded for a released version, compiled for anything else) and then builds
-    # this extension for up to eight platforms, macOS minutes metering at 10x - so a build only starts when
-    # something a build consumes changed. scripts/ is tooling that runs *on* the artifact, never to make it
-    paths-ignore: ["**/*.md", "scripts/**", "**/*.yml"]
 
 permissions:
   contents: read

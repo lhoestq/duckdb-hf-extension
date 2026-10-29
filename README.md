@@ -52,7 +52,7 @@ import duckdb
 con = duckdb.connect(config={"allow_extension_repositories": "allowed"})
 con.execute("CREATE OR REPLACE EXTENSION REPOSITORY hf_repo WITH PREFIX "
             "'https://hf.co/buckets/duckdb-extensions/builds/resolve'")
-con.execute("INSTALL hf FROM hf_repo");
+con.execute("INSTALL hf FROM hf_repo")
 ```
 
 ## Usage
@@ -86,6 +86,14 @@ COPY (SELECT * FROM events) TO 'hf://buckets/me/playground/events/' (FORMAT PARQ
 ```
 
 `hf_bucket_copy` enables free file copies since files are pointers in Xet.
+
+A **dataset** repository is a table you can load with `hf_dataset()`:
+
+```sql
+SELECT * FROM hf_dataset('stanfordnlp/imdb');
+SELECT * FROM hf_dataset('stanfordnlp/imdb', split := 'train');
+SELECT * FROM hf_dataset('Idavidrein/gpqa', config := 'gpqa_diamond', split := 'train');
+```
 
 ## Authentication
 
