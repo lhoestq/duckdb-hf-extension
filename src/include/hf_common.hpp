@@ -14,10 +14,15 @@ struct FileOpenerInfo;
 //! the DuckDB version identifier the binary is built for, which has to match the running DuckDB exactly.
 //! Hand-moved per release, together with the assertion in scripts/smoke_write.sql: nothing derives it, so
 //! a release that forgets ships an artifact reporting the previous release's number.
-static constexpr const char *HF_EXTENSION_VERSION = "0.0.2";
+static constexpr const char *HF_EXTENSION_VERSION = "0.0.3";
 
 //! Default endpoint. Overridable through the `hf_endpoint` setting, the `HF_ENDPOINT` env var or a secret.
 static constexpr const char *HF_DEFAULT_ENDPOINT = "https://huggingface.co";
+
+//! The service that converts a dataset to parquet and lists the result, which is what hf_dataset() reads.
+//! A different deployment of it is a different set of conversions, so it is a setting of its own rather than
+//! a path under `hf_endpoint`.
+static constexpr const char *HF_DEFAULT_DATASETS_SERVER = "https://datasets-server.huggingface.co";
 
 //! Page size of the Hub tree API listings
 constexpr idx_t HF_DEFAULT_LIST_PAGE_SIZE = 1000;

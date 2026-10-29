@@ -5,6 +5,57 @@ Two independent version numbers: **this project's** (what the extension can do, 
 one DuckDB identifier, so a release is one binary per identifier per platform, and rebuilding for a newer
 pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
 
+## 0.0.3 for Hugging Face Datasets
+
+* **`hf_dataset('namespace/name')` answers a query with the rows of a Hugging Face dataset**, and
+  `hf_dataset_files()` lists the files it will read to do it. The files are not a guess and not a convention:
+  they are what the Hub's own conversion service says they are (`GET {hf_datasets_server_endpoint}/parquet`),
+  which is the same route `datasets`/`hf datasets` use. `hf_dataset('lhoestq/demo1')`,
+  `hf_dataset('lhoestq/demo1', split := 'train')`, `hf_dataset('ns/name', config := 'foo')`, and the same
+  dataset written as an `hf://` url or as its web page url, are all the same call. `config`, `split`,
+  `revision` and `allow_partial` are keyword-only, so a positional `hf_dataset('ns/name', 'train')` is a
+  binder error rather than a silently wrong read.
+* **The answer's `https://` urls are rewritten to `hf://` ones**, because httpfs would fetch them
+  anonymously and a gated or private dataset answers that with a refusal. The `hf://` form puts the same
+  bytes through this extension's read path - range requests, the shared cache, the token from `HF_TOKEN` or
+  `CREATE SECRET`. The conversion revision stays percent-encoded (`@refs%2Fconvert%2Fparquet`): the Hub
+  serves that and answers **404** for the same url with the revision decoded, which was checked against the
+  live service rather than inferred from the format. A url that is not a Hub `/resolve/` url is passed
+  through as it came. [docs/datasets.md](docs/datasets.md) has the route, the conversion and what it costs.
+* **Three things it refuses, because a table that answers quietly is worse than an error.** `partial: true`
+  - the Hub has converted some of the dataset, and reading the converted part answers `COUNT(*)` with a
+  number that is not the dataset's - refuses and names how much is missing, until `allow_partial := true`.
+  More than one config, which would be a `union_by_name` over different schemas answering a question nobody
+  asked. And a `split` or `config` that does not exist: the route **ignores** a `split=` it does not
+  recognise (200, every split) and answers a bare `{"error":"Not found."}` 404 for a wrong `config`, so the
+  answer is re-filtered here and a request that filtered down to nothing names the configs and splits the
+  dataset has. A body carrying `error` - which the route uses with status **200** when a listing is too big
+  to send - is thrown rather than read as zero rows.
+* **The listing request carries the token as a bearer token**, which is the whole of what makes a private or
+  a gated dataset listable. The route reads it and answers the three cases apart, measured against a private
+  dataset created for the purpose: no header is a **401** ("not accessible *without authentication*"), a token
+  that cannot see the repo is the same **404** a misspelled name gets ("not accessible *with the current
+  credentials*"), and a token that can is the listing. The suite asserts it through a fixture route that
+  answers 401 to a request whose `Authorization` is missing or is not a bearer one, so a client that stopped
+  sending the header fails a test rather than quietly losing access to private data.
+* **An empty listing says which empty it is.** `"parquet_files":[]` is what a queued conversion, a set of
+  failed conversions and a dataset with nothing to convert all answer, and only the first is worth waiting
+  for - `partial` does not distinguish them, a queued conversion answers `partial: false`. The errors now
+  name the queued steps and ask for a retry, name the failures, or say the hub has not converted it.
+* **`hf_datasets_server_endpoint`** (default `https://datasets-server.huggingface.co`) is the new setting,
+  normalized and scoped like `hf_endpoint`. It is how a private mirror is addressed, and how the suites
+  answer with a canned listing: `tools/hf_datasets_server_fixture.py` stands in for the service and answers
+  the five states the Hub cannot be asked to be in on demand - half converted, queued with nothing listed,
+  refused with a 200, files that live somewhere else, and a listing that requires a token. The files it
+  lists are the real ones, so those reads still go over `hf://`.
+* **`HFJson::GetString` and `FindArray` now skip whitespace between a key, its colon and its value**, as
+  `GetRaw` already did. The Hub answers compact, so nothing in production depended on it; a fixture answering
+  with `json.dumps` defaults parsed as an empty listing, which is the kind of failure that reads as "the
+  service returned nothing".
+* **Suite**: `scripts/smoke_datasets.sh` — 41 statements, 30 of them reads and 11 of them expected refusals —
+  is in `scripts/run_all.sh`, and `scripts/ci_selftest.sh` now counts 16 `hf_*` table functions registered
+  where it counted 14.
+
 ## 0.0.2 — DuckDB 2.0.0 is out: the first release built against a released DuckDB, and the first published to a bucket
 
 The target moved from `v2.0.0-alpha47600` to **`v2.0.0`** (upstream `d54cbbe3df17e8e5ce68312f483b4155836112aa`, 736

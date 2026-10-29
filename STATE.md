@@ -5,6 +5,46 @@ story is `README.md`, the per-release story is `CHANGELOG.md`, the protocol stor
 long form of every decision — the failed attempts and the measurements behind it — is in `git log` bodies.
 This file only holds what is true right now and what to do next.
 
+## Position — 2026-10-28, `feat/hf-dataset-table-function` (0.0.3)
+
+**`hf_dataset()` and `hf_dataset_files()` are on that branch, built, and green.** They read a Hub dataset as
+a table by asking the Hub's own conversion service (`GET {hf_datasets_server_endpoint}/parquet`) which
+parquet files it made and handing those to `read_parquet`. `src/hf_dataset.cpp`, and
+[docs/datasets.md](docs/datasets.md) for why: the answer's `https://` urls are rewritten to `hf://` ones
+(the token; and the conversion revision stays percent-encoded because the Hub 404s the decoded spelling),
+the answer is re-filtered here because the route *ignores* a `split=` it does not know, `partial: true` is
+refused until `allow_partial := true`, more than one config is refused, and a body carrying `error` — which
+the route sends with status **200** — is thrown rather than read as zero rows. The listing request carries
+the token as a **bearer** token, which is the whole of what makes a private or gated dataset listable: that
+was measured three ways against a private dataset created for the purpose (anonymous **401** "not accessible
+*without authentication*", a token that cannot see it **404** — the same answer a misspelled name gets — a
+token that can **200**), and the probe repo was deleted afterwards. An empty listing says *which* empty it
+is, because a conversion that is still queued answers `partial: false` and `pending` filled in: "N conversion
+step(s) queued … retry in a moment" versus failed conversions versus nothing to convert. `new
+scripts/smoke_datasets.sh` answers the five states the Hub cannot be asked to be in on demand through
+`tools/hf_datasets_server_fixture.py` (canned listings, real files, everything else proxied), one of them a
+route that answers 401 unless the request carries a bearer header.
+
+Numbers on this tree: `datasets` **31 passed / 12 expected failures / 0 failed**, and unchanged elsewhere —
+`xet` 12/3, `read` 55/0, `write` 57/6, `models` 24/0, `buckets` 22/2 — plus `scripts/ci_selftest.sh` at
+**1090 / 0** with **16** `hf_*` table functions (was 14).
+
+**`xet_upload` is at 7 failures and it is not this branch.** Seven shard uploads to a *git-backed* scope now
+answer `HTTP 400 … (19) invalid shard Shard validation failure, missing metadata extension for git
+repository` from `cas-server.xethub.hf.co`. Checked rather than assumed: rebuilding with `src/hf_http.cpp`
+back at `HEAD` fails identically (35/2/7), and `hf_cas.cpp` reads JSON through `GetRaw` only — the one
+scanner function this branch did not touch. What the CAS is asking for is the metadata extension a
+git-backed shard carries its sha256 in, and `hf_cas.cpp:686` adds it only `if (sha256_hex && !empty)`
+("a git upload passes it and a bucket upload does not"), so the reading is that the CAS started enforcing
+what the reference clients send. Bucket-scope uploads — every other shard this project writes — still pass.
+Someone has to decide whether `hf_xet_upload` should compute and pass the sha256 whenever the scope is a
+git repo, and whether the suite should then cover both scopes.
+
+`HFJson::GetString` and `FindArray` now skip whitespace between key, colon and value, as `GetRaw` already
+did — the Hub answers compact, so production never noticed; a fixture written with `json.dumps` defaults
+parsed as an empty listing. `test/` has no coverage of `HFJson` itself, worth knowing before someone
+re-tightens it.
+
 ## Position — 2026-10-21, ~20:00 UTC
 
 **`0.0.2` is published and live for DuckDB `v2.0.0`.** CI run `39624699278`, dispatched on the tag ref

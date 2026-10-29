@@ -28,13 +28,10 @@ static void RequireGlobalScope(SetScope scope, const char *setting) {
 	}
 }
 
-static void SetHFEndpoint(ClientContext &, SetScope scope, Value &parameter) {
-	RequireGlobalScope(scope, "hf_endpoint");
-	if (parameter.IsNull()) {
-		parameter = Value(HF_DEFAULT_ENDPOINT);
-		return;
-	}
-	auto value = StringUtil::Lower(StringValue::Get(parameter));
+//! Normalize a base url: a bare host gets a scheme (http for a local one, https anywhere else) and a
+//! trailing '/' is dropped, so that a configured url and a built-in default concatenate the same way.
+static string NormalizeBaseUrl(const string &input) {
+	auto value = StringUtil::Lower(input);
 	if (!value.empty() && value.find("://") == string::npos) {
 		if (value == "localhost" || value.find("localhost:") == 0 || value == "127.0.0.1" ||
 		    value.find("127.0.0.1:") == 0) {
@@ -46,7 +43,25 @@ static void SetHFEndpoint(ClientContext &, SetScope scope, Value &parameter) {
 	while (!value.empty() && value.back() == '/') {
 		value.pop_back();
 	}
-	parameter = Value(value);
+	return value;
+}
+
+static void SetHFEndpoint(ClientContext &, SetScope scope, Value &parameter) {
+	RequireGlobalScope(scope, "hf_endpoint");
+	if (parameter.IsNull()) {
+		parameter = Value(HF_DEFAULT_ENDPOINT);
+		return;
+	}
+	parameter = Value(NormalizeBaseUrl(StringValue::Get(parameter)));
+}
+
+static void SetHFDatasetsServerEndpoint(ClientContext &, SetScope scope, Value &parameter) {
+	RequireGlobalScope(scope, "hf_datasets_server_endpoint");
+	if (parameter.IsNull()) {
+		parameter = Value(HF_DEFAULT_DATASETS_SERVER);
+		return;
+	}
+	parameter = Value(NormalizeBaseUrl(StringValue::Get(parameter)));
 }
 
 static void SetHFXetCompression(ClientContext &, SetScope, Value &parameter) {
@@ -80,6 +95,11 @@ void HFSettings::Register(DBConfig &config) {
 	                          LogicalType::VARCHAR, Value(""));
 	config.AddExtensionOption("hf_endpoint", "Hugging Face endpoint to use", LogicalType::VARCHAR,
 	                          Value(HF_DEFAULT_ENDPOINT), SetHFEndpoint, SetScope::GLOBAL);
+	config.AddExtensionOption("hf_datasets_server_endpoint",
+	                          "Endpoint of the service that converts datasets to parquet and lists the files "
+	                          "hf_dataset() reads",
+	                          LogicalType::VARCHAR, Value(HF_DEFAULT_DATASETS_SERVER), SetHFDatasetsServerEndpoint,
+	                          SetScope::GLOBAL);
 	config.AddExtensionOption("hf_cache_dir", "Directory used to buffer files before uploading them to the Hub",
 	                          LogicalType::VARCHAR, Value(""), SetHFCacheDir, SetScope::GLOBAL);
 	config.AddExtensionOption("hf_max_per_page", "Limit the number of entries fetched per listing request",

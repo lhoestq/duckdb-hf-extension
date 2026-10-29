@@ -1,4 +1,5 @@
 #include "hf_common.hpp"
+#include "hf_dataset.hpp"
 #include "hf_fs.hpp"
 #include "hf_functions.hpp"
 #include "hf_secrets.hpp"
@@ -17,6 +18,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	HFSecrets::Register(loader);
 	HFFileSystem::Register(loader);
 	HFFunctions::Register(loader);
+	HFDatasetFunctions::Register(loader);
 }
 
 } // namespace duckdb

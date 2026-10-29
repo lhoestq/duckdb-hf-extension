@@ -10,6 +10,7 @@ set(HF_SOURCES
     hf_commit.cpp
     hf_write.cpp
     hf_functions.cpp
+    hf_dataset.cpp
     hf_xet_chunk.cpp
     hf_xet_hash.cpp
     hf_cas.cpp
