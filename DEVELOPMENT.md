@@ -56,22 +56,122 @@ match a DuckDB compiled from source.
 
 ## Building
 
+A loadable artifact needs three things to say the same version, and the build checks only one of them: the
+duckdb sources that get *compiled*, the version string the footer *carries*, and the client that later *loads*
+it. `LOAD` compares the footer against its own version and platform as exact strings
+(`src/main/extension.cpp`), so a mismatch is either a refusal you can read or a mismatch nobody reads at all.
+
+### Point the checkout at the version, then say it out loud
+
+`OVERRIDE_GIT_DESCRIBE` sets a string, and a string is all it sets: duckdb's `CMakeLists.txt` turns it into
+`DUCKDB_EXPLICIT_VERSION` → `DUCKDB_VERSION` → `DUCKDB_NORMALIZED_VERSION`, and `DUCKDB_NORMALIZED_VERSION` is
+what the footer records. Nothing in that chain looks at the sources being compiled. A checkout that has drifted
+past the tag therefore builds an artifact every released 2.0.0 client will *accept* — and then run as another
+commit's code, since a `CPP`-ABI extension is compiled against those headers. `make` succeeds. So:
+
 ```bash
-# duckdb + extension-ci-tools are either checked out beside this Makefile (./duckdb, ./extension-ci-tools,
-# as in CI) or vendored one level up in ../vendor
-. .venv/bin/activate                      # the version to build against comes from the running duckdb
-make release OVERRIDE_GIT_DESCRIBE="$(python -c 'import duckdb;print(duckdb.sql("PRAGMA version").fetchall()[0][0])')"
-# -> build/release/extension/hf/hf.duckdb_extension (copied to dist/)
+git -C ../vendor/duckdb fetch --tags
+git -C ../vendor/duckdb checkout v2.0.0
+git -C ../vendor/duckdb describe --tags --exact-match   # v2.0.0 — a -3-gabc1234 suffix IS the drift
+git -C ../vendor/duckdb status --short                  # empty; edits to duckdb are invisible to the footer too
 ```
 
-A locally built extension is unsigned, so loading it needs the flag:
+`v2.0.0` is `d54cbbe3df17e8e5ce68312f483b4155836112aa` and has no submodules, so a checkout is the whole thing.
+The two inputs are found by layout: `DUCKDB_SRCDIR` is `./duckdb` when one exists beside the Makefile (what CI
+gets) and `../vendor/duckdb` otherwise, `extension-ci-tools` likewise beside or `../vendor/extension-ci-tools`,
+pinned to `4a5752ce7689b547344a91067bddb2b2b5395fac` — the same sha `build.yml` dispatches. Either path can be
+overridden by hand: `DUCKDB_SRCDIR=/path/to/duckdb make release`. CI cannot drift, because extension-ci-tools
+checks duckdb *out* at the `duckdb_version` input it is given; a local checkout is the one place where the pin
+and the content can disagree.
+
+Omit the pin and you get the loud failure instead: with no `DUCKDB_EXPLICIT_VERSION`, duckdb builds its version
+from `scripts/ci/release_version.txt` plus a commit count — `v2.0.0-dev49307` — which matches `-dev[0-9]+$`, and
+the `if` in `CMakeLists.txt` then stamps the footer with the **sha**. The refusal is unreadable in proportion:
+
+```
+The file was built specifically for DuckDB version 'd4355d01c593...' and can only be loaded with that
+version of DuckDB. (this version of DuckDB is 'vd4355d01c593...')
+```
+
+which is exactly what the first release run of this repository shipped — a green matrix, and no client that
+could load it. The Makefile sets `DUCKDB_VERSION=v2.0.0` when neither variable is passed, so a bare
+`make release` is stamped correctly.
+
+### On a machine that has never built it (`.venv` is gitignored)
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install cmake ninja duckdb==2.0.0     # build + suites; add huggingface_hub for the tools/ that call the Hub
+```
+
+The suites load `dist/` into the venv's duckdb, so that package has to agree with the pin too. `python -c
+'import duckdb; print(duckdb.sql("PRAGMA version").fetchall())'` answers `('v2.0.0', 'd54cbbe3df',
+'Cyanoptera')` — the same commit the checkout sits on. Out of step, a suite fails as a crash instead of as a
+version error, which is the least useful way to be told.
+
+`make` is not in the venv (the system supplies it); `cmake` and `ninja` are, so a shell that skipped the
+`activate` line stops at `cmake: command not found`, which reads like a broken build system and is a PATH.
+
+### Build
+
+```bash
+. .venv/bin/activate
+make release OVERRIDE_GIT_DESCRIBE="$(python -c 'import duckdb;print(duckdb.sql("PRAGMA version").fetchall()[0][0])')"
+# -> build/release/extension/hf/hf.duckdb_extension, and now:  cp it to dist/
+cp build/release/extension/hf/hf.duckdb_extension dist/hf.duckdb_extension
+```
+
+Taking the pin from the running duckdb keeps artifact and client agreeing by construction; `scripts/run_all.sh
+--build` takes it from `DUCKDB_VERSION` (default `v2.0.0`) instead, copies to `dist/` itself, and refuses to
+test a `dist/` older than the build tree — `make release` does not copy, and a stale `dist/` is how a suite
+reports a verdict that belongs to a binary nobody built.
+
+When you move the checkout to a different duckdb, wipe `build/release`: the `release` target is `mkdir -p` plus
+a configure, never a clean.
+
+### Use it
+
+A local build is unsigned (`ext_footer.py` says `signed False`), so the client has to be told:
+
+```bash
+duckdb -unsigned -c "LOAD 'dist/hf.duckdb_extension'; FROM hf_status()"
+```
+
+(`duckdb -h | grep unsigned`; `scripts/pick_test_client.sh` fetches that same release binary into
+`.ci-cache/client-<arch>/duckdb` — `client-osx-arm64` on a Mac — when the harness wants to test an artifact
+with the binary users run)
 
 ```python
 con = duckdb.connect(config={"allow_unsigned_extensions": True})
-con.execute("LOAD '/path/to/hf.duckdb_extension'")
+con.execute("LOAD 'dist/hf.duckdb_extension'")
 ```
 
-`scripts/check.sh` is a compile-only syntax check of every source file.
+And it is built for one platform — the machine that ran the compiler — which the same footer check enforces:
+
+```
+Invalid Input Error: Failed to load 'hf.duckdb_extension', The file was built for the platform 'osx_arm64',
+but we can only load extensions built for platform 'linux_arm64'.
+```
+
+So an artifact built on a linux box will not load in a Mac client, and copying it over is not a workaround:
+build it on the Mac, or install the published `osx_arm64` one. Before debugging anything else, read the footer,
+which is a structure and has a reader that knows it:
+
+```bash
+.venv/bin/python3 scripts/ext_footer.py --all dist/hf.duckdb_extension
+# linux_arm64	v2.0.0	90f03e2e94
+#    ^ LOAD checks this	^ LOAD checks this	^ git describe of *this* repo, which LOAD ignores
+```
+
+That third field comes from `git describe --tags --always` run over this repository by duckdb's
+`extension_build_tools.cmake`, and it survives as a version only when the build sits *exactly on* a tag:
+`v0.0.3` yes, `v0.0.3-8-g6e661b4` no — the regex wants `vX.Y.Z(-rc)?` and falls back to the sha. CI dispatches
+on a tag ref, which is why released artifacts say `v0.0.2` and local builds say a sha. No client reads it, and
+`hf_status()` answers from `HF_EXTENSION_VERSION` instead, so a sha there is not a bug.
+
+`scripts/check.sh` is a compile-only syntax check of every source file — with one caveat worth knowing when a
+build seems to have swallowed a feature: it globs `src/*.cpp`, while the build compiles `HF_SOURCES` in
+`src/CMakeLists.txt`, so a new file not added there passes `check.sh` and is simply absent from the extension.
 
 ### Generated files, and the toolchain that checks them
 

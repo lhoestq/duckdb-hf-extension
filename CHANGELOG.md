@@ -68,6 +68,17 @@ pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
   none): the CAS refuses a shard with no digest and accepts one with the wrong one, so `sha256 =
   (SELECT sha256(content) FROM read_blob(path))` in `smoke_xet_upload.sql` is the only check that the value
   is the file's and not merely present.
+* **DEVELOPMENT.md now states what a local build actually depends on**, after a first build on a Mac failed
+  and the file did not name any of the reasons it could. The short one: `OVERRIDE_GIT_DESCRIBE` is the string
+  the footer *carries*, and nothing more — the thing that has to *be* `v2.0.0` is the checkout at
+  `DUCKDB_SRCDIR`, because a `CPP`-ABI extension is compiled against those headers, and a checkout drifted
+  past the tag is an artifact every released client accepts and then runs as another commit's code (`make`
+  succeeding is not evidence). The others: what a machine with no `.venv` needs, since the directory is
+  gitignored and `cmake`/`ninja` come from it while `make` does not; that `make release` does not copy to
+  `dist/`, which is how a suite grades an artifact nobody built; that an artifact belongs to the platform that
+  compiled it, so one built on linux will not load on a Mac; and how to tell which of these you are holding —
+  `scripts/ext_footer.py --all` reads the footer that `LOAD` compares, quoted here from the loader's own
+  strings rather than paraphrased.
 
 ## 0.0.2 — DuckDB 2.0.0 is out: the first release built against a released DuckDB, and the first published to a bucket
 
