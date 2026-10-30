@@ -73,8 +73,10 @@ pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
   the footer *carries*, and nothing more — the thing that has to *be* `v2.0.0` is the checkout at
   `DUCKDB_SRCDIR`, because a `CPP`-ABI extension is compiled against those headers, and a checkout drifted
   past the tag is an artifact every released client accepts and then runs as another commit's code (`make`
-  succeeding is not evidence). The others: what a machine with no `.venv` needs, since the directory is
-  gitignored and `cmake`/`ninja` come from it while `make` does not; that `make release` does not copy to
+  succeeding says nothing about what was compiled). The others: nothing the build reads comes from this
+  repository — `.venv` is gitignored and `cmake`/`ninja` come from it while `make` does not, and the two trees
+  it compiles against (`../vendor/duckdb`, `../vendor/extension-ci-tools`) sit outside it entirely, so a fresh
+  clone has to fetch them; that `make release` does not copy to
   `dist/`, which is how a suite grades an artifact nobody built; that an artifact belongs to the platform that
   compiled it, so one built on linux will not load on a Mac; and how to tell which of these you are holding —
   `scripts/ext_footer.py --all` reads the footer that `LOAD` compares, quoted here from the loader's own

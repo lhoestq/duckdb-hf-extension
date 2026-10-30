@@ -97,12 +97,23 @@ which is exactly what the first release run of this repository shipped — a gre
 could load it. The Makefile sets `DUCKDB_VERSION=v2.0.0` when neither variable is passed, so a bare
 `make release` is stamped correctly.
 
-### On a machine that has never built it (`.venv` is gitignored)
+### On a machine that has never built it — nothing the build reads comes from this repository
 
 ```bash
+# the two trees the build reads, in the layout local development expects beside this repository
+git clone --branch v2.0.0 https://github.com/duckdb/duckdb ../vendor/duckdb
+git clone https://github.com/duckdb/extension-ci-tools ../vendor/extension-ci-tools
+git -C ../vendor/extension-ci-tools checkout 4a5752ce7689b547344a91067bddb2b2b5395fac
+
 python3 -m venv .venv && . .venv/bin/activate
 pip install cmake ninja duckdb==2.0.0     # build + suites; add huggingface_hub for the tools/ that call the Hub
 ```
+
+`--branch v2.0.0` is what makes the first rule hold by construction: HEAD lands on the tag, so the sources and
+the pin say the same thing. Not `--depth 1`: the version duckdb derives *without* a pin counts commits with
+`git rev-list --count HEAD`, and a shallow clone counts wrong — a mistake that surfaces as a footer carrying a
+sha. A missing `../vendor/duckdb` fails early and legibly — `CMake Error: The source directory "…/vendor/duckdb"
+does not exist.` — the one to fear is the checkout that exists and sits elsewhere.
 
 The suites load `dist/` into the venv's duckdb, so that package has to agree with the pin too. `python -c
 'import duckdb; print(duckdb.sql("PRAGMA version").fetchall())'` answers `('v2.0.0', 'd54cbbe3df',
@@ -117,8 +128,8 @@ version error, which is the least useful way to be told.
 ```bash
 . .venv/bin/activate
 make release OVERRIDE_GIT_DESCRIBE="$(python -c 'import duckdb;print(duckdb.sql("PRAGMA version").fetchall()[0][0])')"
-# -> build/release/extension/hf/hf.duckdb_extension, and now:  cp it to dist/
-cp build/release/extension/hf/hf.duckdb_extension dist/hf.duckdb_extension
+# -> build/release/extension/hf/hf.duckdb_extension
+cp build/release/extension/hf/hf.duckdb_extension dist/hf.duckdb_extension   # make release does not copy
 ```
 
 Taking the pin from the running duckdb keeps artifact and client agreeing by construction; `scripts/run_all.sh
@@ -131,15 +142,13 @@ a configure, never a clean.
 
 ### Use it
 
-A local build is unsigned (`ext_footer.py` says `signed False`), so the client has to be told:
+A local build is unsigned (`ext_footer.py` says `signed False`), so the client has to be told — `-unsigned` on
+the CLI (`duckdb -h | grep unsigned`; `scripts/pick_test_client.sh` fetches that same release binary into
+`.ci-cache/client-<arch>/duckdb`, `client-osx-arm64` on a Mac), the config key in Python:
 
 ```bash
 duckdb -unsigned -c "LOAD 'dist/hf.duckdb_extension'; FROM hf_status()"
 ```
-
-(`duckdb -h | grep unsigned`; `scripts/pick_test_client.sh` fetches that same release binary into
-`.ci-cache/client-<arch>/duckdb` — `client-osx-arm64` on a Mac — when the harness wants to test an artifact
-with the binary users run)
 
 ```python
 con = duckdb.connect(config={"allow_unsigned_extensions": True})
