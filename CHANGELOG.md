@@ -81,6 +81,14 @@ pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
   compiled it, so one built on linux will not load on a Mac; and how to tell which of these you are holding —
   `scripts/ext_footer.py --all` reads the footer that `LOAD` compares, quoted here from the loader's own
   strings rather than paraphrased.
+* **The first build of this release failed on both macOS jobs and passed on the other six**, which is the shape
+  a type-identity break takes: `idx_t` is `uint64_t`, and Apple's libc++ spells that `unsigned long long` while
+  `std::string::size_type` is `unsigned long` — same width, different type, so a value coming out of
+  `string::find()` cannot bind to a helper declared `idx_t &`. x86-64 gcc spells both `unsigned long`, so
+  linux and both windows jobs compiled the line and `scripts/check.sh` said `syntax OK` for it. The new
+  `HFJsonValuePos` took its index type from `auto`, in a file whose own comment a little further down explains
+  the trap (`HFJson::ForEachMember`, which names `idx_t` explicitly for this reason). Nothing was published broken: the run was red, it uploaded nothing, and the
+  suites that run against the built artifact were skipped rather than passed.
 
 ## 0.0.2 — DuckDB 2.0.0 is out: the first release built against a released DuckDB, and the first published to a bucket
 

@@ -25,9 +25,14 @@ void SkipJSONWS(const string &s, idx_t &i);
 //! understands only one of the two valid spellings of an object is a trap for whoever answers it in a test.
 idx_t HFJsonValuePos(const string &json, const string &key, idx_t from = 0) {
 	string needle = "\"" + key + "\"";
-	auto pos = json.find(needle, from);
+	// idx_t and not auto: json.find answers std::string::size_type, which on apple silicon is `unsigned long`
+	// while DuckDB's idx_t is `unsigned long long`. Two names for 64 bits that x86-64 gcc spells identically and
+	// clang on osx does not - and only a *reference* parameter notices, since the conversion is otherwise silent.
+	// SkipJSONWS takes `idx_t &`, so osx_arm64 failed the build with `no matching function for call` while
+	// linux and both windows jobs compiled the same line.
+	idx_t pos = json.find(needle, from);
 	while (pos != string::npos) {
-		auto value = pos + needle.size();
+		idx_t value = pos + needle.size();
 		SkipJSONWS(json, value);
 		if (value < json.size() && json[value] == ':') {
 			SkipJSONWS(json, ++value);

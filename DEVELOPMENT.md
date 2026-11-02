@@ -181,6 +181,12 @@ on a tag ref, which is why released artifacts say `v0.0.2` and local builds say 
 `scripts/check.sh` is a compile-only syntax check of every source file — with one caveat worth knowing when a
 build seems to have swallowed a feature: it globs `src/*.cpp`, while the build compiles `HF_SOURCES` in
 `src/CMakeLists.txt`, so a new file not added there passes `check.sh` and is simply absent from the extension.
+And it compiles with the local toolchain, which is linux gcc wherever this repository is developed, so it
+cannot see the class of break a runner finds: 0.0.3's first build died on both macOS jobs with `no matching
+function for call to 'SkipJSONWS'`, where `idx_t` is `unsigned long long` and `string::size_type` is
+`unsigned long` — same width, different type, and only a *reference* parameter notices, so linux and both
+windows jobs compiled the same line. The fix is to name `idx_t` where a helper takes one instead of taking the
+type from `auto`; `HFJson::ForEachMember` says so in a comment, and the helper added next to it ignored it.
 
 ### Generated files, and the toolchain that checks them
 
