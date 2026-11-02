@@ -274,12 +274,29 @@ Three rules the scripts enforce, each because breaking it once failed silently:
   from a repository created with the key pinned *and* keyless.
 
 ```bash
+# Versioned output directories, never dist/repo. dist/repo{,-signed} hold the previous release's binaries;
+# publishing into them replaces them path for path when the matrix is complete, and when a run built fewer
+# than eight platforms it publishes a tree that is half one release and half the other - and
+# verify_published.py still calls that clean, since it compares served bytes against the tree it is given,
+# not against what a release is supposed to contain. dist/ci-artifacts/<run>/ is per-run; the output
+# directory is the only thing standing between two releases' bytes.
 RUN=<ci-run-id> DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" \
-  scripts/make_extension_repo_from_ci.sh dist/repo-signed
-RUN=<ci-run-id> scripts/make_extension_repo_from_ci.sh dist/repo         # same tree, unsigned
-HF_BUCKET=duckdb-extensions/builds scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo
-HF_BUCKET=duckdb-extensions/builds scripts/verify_published.py   dist/repo-signed --unsigned-tree dist/repo
+  scripts/make_extension_repo_from_ci.sh dist/repo-<version>-signed
+RUN=<ci-run-id> scripts/make_extension_repo_from_ci.sh dist/repo-<version>      # same bytes, unsigned tree
+HF_BUCKET=duckdb-extensions/builds scripts/publish_extension_repo.py dist/repo-<version>-signed \
+  --unsigned-tree dist/repo-<version> --dry-run                                  # reads the client recipes
+HF_BUCKET=duckdb-extensions/builds scripts/publish_extension_repo.py dist/repo-<version>-signed \
+  --unsigned-tree dist/repo-<version>
+HF_BUCKET=duckdb-extensions/builds scripts/verify_published.py   dist/repo-<version>-signed \
+  --unsigned-tree dist/repo-<version>
 ```
+
+The `--dry-run` line is there because the block the publish script prints is what a release note gets written
+from, and for 0.0.3 both of its recipe lines were ones that do not work (a prefix ending in `/`, which DuckDB
+joins into `//v2.0.0/…`, and a `SET allow_unsigned_extensions` typed into a running database). Reading them
+costs nothing; publishing them costs a release's users. Better still, run the printed block yourself on a
+clean home *and* a clean `extension_directory` before the note goes out - the two settings are separate, and
+`extension_directory` is where an incompatible `httpfs` hides.
 
 The last line is the one that cannot be skipped: it re-fetches every file the publish uploaded, from the url a
 client will use, and fails unless the sha256 matches the tree it was built from *and* each served binary's footer

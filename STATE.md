@@ -5,6 +5,52 @@ story is `README.md`, the per-release story is `CHANGELOG.md`, the protocol stor
 long form of every decision — the failed attempts and the measurements behind it — is in `git log` bodies.
 This file only holds what is true right now and what to do next.
 
+## Position — 2026-11-02, `main` (0.0.3 published for `v2.0.0`)
+
+**`0.0.3` is published and live for DuckDB `v2.0.0`, eight platforms.** Annotated tag `v0.0.3` → `79247da`,
+CI run `41502641684` dispatched with `gh workflow run "Build extension" --ref refs/tags/v0.0.3`, all eight
+matrix jobs green plus the artifact reference-check job, every binary's footer `v2.0.0` / `ext_version=v0.0.3`
+/ `signed=yes`. `scripts/verify_published.py` fetched **33 served files / 0 problems**; `scripts/test_install.py`
+installed and loaded from the long host, the short `hf.co` host and the unsigned tree, and a clean client
+(fresh `home_directory` *and* fresh `extension_directory`) running the recipe the publish script prints answers
+`hf_ls('hf://datasets/lhoestq/demo1')` = 3 — the unsigned and signed paths both auto-install httpfs, which is
+the only way the https transport arrives. The bucket sync never deletes, so the alpha tree is untouched.
+
+**The trees were assembled into fresh directories, `dist/repo-0.0.3{,-signed}`, and that is the pattern to
+keep.** `dist/repo` and `dist/repo-signed` still hold 0.0.2's eight binaries; publishing into them replaces
+them path for path when the matrix is complete, and publishes a half-0.0.2 tree when it is not — and
+`verify_published.py` would still call that clean, because it compares served bytes against *the tree*, not
+against a release. `dist/ci-artifacts/<run>/` is per-run, so a fresh output directory is the only step that
+distinguishes one release's bytes from another's.
+
+**`v0.0.3` had three owners on the day it was cut** — worth knowing before trusting a `v0.0.3` seen in a
+clone: the local tag sat on `6a30341` (eight commits behind, no `src/hf_dataset.cpp` in it), the remote tag
+sat on `6e661b4` (the CAS fix, before the macOS fix), and the tag now points at `79247da`. A stale local tag
+is invisible to `git fetch` (it is not a branch) and `--follow-tags` skips the lightweight ones that caused
+this; `git tag -d v0.0.3 && git fetch origin refs/tags/v0.0.3:refs/tags/v0.0.3` is the repair, and annotating
+release tags is what keeps it from recurring.
+
+**The first build of the tag was red, and the fix is inside the tag.** Both macOS jobs died on `no matching
+function for call to 'SkipJSONWS'` — `HFJsonValuePos` took its index from `auto`, `string::find` answers
+`size_type`, and on Apple's libc++ that is not `idx_t`, while x86-64 gcc spells both `unsigned long` so linux
+and both windows jobs compiled it. Ninja stopped at 12/100, so the log could not say whether more waited
+behind it; every file changed since the last green eight-platform build was then read for both classes
+(every `idx_t &` argument, every new `std::` facility and its include). `scripts/check.sh` cannot see this
+class at all — it is a linux gcc compile — which DEVELOPMENT.md now says where it describes `check.sh`.
+
+**Two lines the publish script printed for every platform were lines that do not work**, and the release is
+where that was measured: the prefix ended in `/` (DuckDB adds its own → `//v2.0.0/…` → 404), and
+`SET allow_unsigned_extensions = true` is refused once the database is open. `CREATE` became `CREATE OR
+REPLACE` too, because a repository definition lives in `~/.duckdb/extension_repositories/<name>.duckdb_extension.repo.json`
+regardless of `home_directory`, so a repeat install fails in a brand-new home. The README had been correct
+about all of this for a release already; the script that prints the same recipe for the release notes had not
+followed it. `--dry-run` now prints those recipes without uploading 600 MB, and the block it emits for
+linux_arm64 was executed verbatim as part of this release.
+
+Unchanged and still true below: the parked iceberg/upload work in `stash@{0}`, the untracked `docs/ICEBERG.md`,
+`docs/UPLOAD.md`, `tools/faceberg-0.4.0.patch`, `tools/hf_iceberg_rest_shim.py`, and `hf_status()` answering
+`v2.0.0-alpha49307` on a released 2.0.0 client (README documents why: it is the archive label, not the footer).
+
 ## Position — 2026-10-29, `main` (0.0.3)
 
 **`hf_dataset()` and `hf_dataset_files()` are merged (PR #1) and green on `main`.** They read a Hub dataset as

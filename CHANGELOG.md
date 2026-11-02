@@ -5,7 +5,7 @@ Two independent version numbers: **this project's** (what the extension can do, 
 one DuckDB identifier, so a release is one binary per identifier per platform, and rebuilding for a newer
 pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
 
-## 0.0.3 for Hugging Face Datasets
+## 0.0.3 for Hugging Face Datasets — published 2026-11-02, built for DuckDB `v2.0.0` on all eight platforms
 
 * **`hf_dataset('namespace/name')` answers a query with the rows of a Hugging Face dataset**, and
   `hf_dataset_files()` lists the files it will read to do it. The files are not a guess and not a convention:
@@ -81,14 +81,33 @@ pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
   compiled it, so one built on linux will not load on a Mac; and how to tell which of these you are holding —
   `scripts/ext_footer.py --all` reads the footer that `LOAD` compares, quoted here from the loader's own
   strings rather than paraphrased.
+* **Published 2026-11-02.** Annotated tag `v0.0.3` at `79247da`, CI run `41502641684` dispatched from the tag
+  ref, eight platforms green in one run, every binary stamped `duckdb_version=v2.0.0 ext_version=v0.0.3
+  signed=yes`; `verify_published.py` fetched **33 served files / 0 problems**, and `test_install.py` installed
+  and loaded from the long host, the short `hf.co` host and the unsigned tree — each against a throwaway home
+  *and* a throwaway `extension_directory`, each answering `hf_ls('hf://datasets/lhoestq/demo1')` with its
+  three files, which is the check that `hf_dataset()`'s transport really ships and not just compiles.
+* **The recipes `publish_extension_repo.py` printed were the ones that do not work, twice over.** They were
+  `CREATE EXTENSION REPOSITORY hf_repo WITH PREFIX '<…>/resolve/'` and `INSTALL hf FROM '<…>/resolve/unsigned/'`
+  — DuckDB pastes its own `/` between prefix and `<version>/<platform>/hf.duckdb_extension`, so those ask the
+  hub for `//v2.0.0/…`, which is a **404** (the single-slash spelling is a 200, measured on this bucket), and
+  the client's whole report of it is `Failed to install remote extension "hf" from url "…"`. And
+  `SET allow_unsigned_extensions = true` is refused in a running database — that one is fixed when the database
+  opens, with `duckdb -unsigned` or as connect config — which is exactly the error anyone following the
+  printed recipe met first. Both now read like the README, which had been correct for a release already: the
+  prefix is slash-free, `CREATE OR REPLACE` (a repository definition is saved in the client's own config, not
+  in the home directory, so a second plain `CREATE` fails in a brand-new home too), and the unsigned lines say
+  how unsigned is allowed. `--dry-run` prints the recipes without uploading anything, and the linux_arm64
+  block it emits was run verbatim against a clean client as part of releasing this version.
 * **The first build of this release failed on both macOS jobs and passed on the other six**, which is the shape
   a type-identity break takes: `idx_t` is `uint64_t`, and Apple's libc++ spells that `unsigned long long` while
   `std::string::size_type` is `unsigned long` — same width, different type, so a value coming out of
   `string::find()` cannot bind to a helper declared `idx_t &`. x86-64 gcc spells both `unsigned long`, so
   linux and both windows jobs compiled the line and `scripts/check.sh` said `syntax OK` for it. The new
   `HFJsonValuePos` took its index type from `auto`, in a file whose own comment a little further down explains
-  the trap (`HFJson::ForEachMember`, which names `idx_t` explicitly for this reason). Nothing was published broken: the run was red, it uploaded nothing, and the
-  suites that run against the built artifact were skipped rather than passed.
+  the trap (`HFJson::ForEachMember`, which names `idx_t` explicitly for this reason). Nothing was published
+  broken: the run was red, it uploaded nothing, and the suites that run against the built artifact were skipped
+  rather than passed.
 
 ## 0.0.2 — DuckDB 2.0.0 is out: the first release built against a released DuckDB, and the first published to a bucket
 

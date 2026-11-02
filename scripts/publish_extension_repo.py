@@ -107,6 +107,9 @@ def main() -> int:
                         help="target bucket id, e.g. duckdb-extensions/builds — serves /resolve/, no revision")
     parser.add_argument("--private", action="store_true", help="create the repository private (dataset target)")
     parser.add_argument("--commit-message", default="Publish the hf extension build")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="validate the tree and print the client recipes, upload nothing - the recipes are "
+                             "what a release note is written from, and they are worth running before a publish")
     args = parser.parse_args()
 
     if args.repo and args.bucket:
@@ -122,7 +125,11 @@ def main() -> int:
     # fail here rather than half-publish itself
     version = footer_version(args.tree)
 
-    if args.repo:
+    if args.dry_run:
+        target = f"hf://buckets/{args.bucket}" if args.bucket else f"dataset {args.repo}"
+        extra = f", plus {args.unsigned_tree} under unsigned/" if args.unsigned_tree else ""
+        print(f"dry run: {args.tree} would go to {target}{extra}; nothing is uploaded\n")
+    elif args.repo:
         api = HfApi()
         api.create_repo(args.repo, repo_type="dataset", private=args.private, exist_ok=True)
         api.upload_folder(
@@ -144,7 +151,7 @@ def main() -> int:
         p for p in os.listdir(os.path.join(args.tree, version)) if os.path.isdir(os.path.join(args.tree, version, p))
     )
 
-    if args.unsigned_tree:
+    if args.unsigned_tree and not args.dry_run:
         if args.repo:
             api.upload_folder(
                 folder_path=args.unsigned_tree,
@@ -156,12 +163,21 @@ def main() -> int:
         else:
             sync_to_bucket(args.unsigned_tree, args.bucket, "unsigned")
 
+    # DuckDB pastes a '/' of its own between the prefix and <duckdb_version>/<platform>/hf.duckdb_extension,
+    # so a prefix ending in a slash asks the hub for '//v2.0.0/...' and the hub answers that with a 404
+    # (measured on this bucket: resolve//v2.0.0/linux_arm64/hf.duckdb_extension -> 404, the same URL with a
+    # single slash -> 200). Nothing says so where it matters: the client reports only
+    # `Failed to install remote extension "hf" from url "..."`, which reads like a key or permission problem
+    # and sends someone looking in the wrong direction. The trap stayed invisible because a local file://
+    # prefix swallows the doubled slash (scripts/test_install.py:28 has known this since it was written) - the
+    # only prefix anyone copies is the https one, and until now the printed recipe was the one form that was
+    # never run. So the prefix here is slash-free, and the unsigned tree hangs off it as '/unsigned'.
     if args.repo:
         home = f"https://huggingface.co/datasets/{args.repo}"
-        prefix = f"{home}/resolve/main/"
+        prefix = f"{home}/resolve/main"
     else:
         home = f"https://huggingface.co/buckets/{args.bucket}"
-        prefix = f"{home}/resolve/"
+        prefix = f"{home}/resolve"
     key_file = os.path.join(args.tree, ".well-known", "duckdb-extension-repo.json")
     signed = os.path.isfile(key_file)
 
@@ -176,12 +192,22 @@ def main() -> int:
             compact = "".join(
                 line for line in json.load(open(key_file))["signature_keys"][0].splitlines() if not line.startswith("-----")
             ).strip()
+            # CREATE OR REPLACE, as the README already said: a repository definition is saved in the client's
+            # own configuration (~/.duckdb/extension_repositories/<name>.duckdb_extension.repo.json), not in
+            # the home directory, so a second CREATE of the same name fails even in a brand-new home - and the
+            # error DuckDB answers with already says to use OR REPLACE.
             print("  SET allow_extension_repositories = 'allowed';")
-            print(f"  CREATE EXTENSION REPOSITORY hf_repo WITH PREFIX '{prefix}' USING PUBLIC KEY '{compact}';")
+            print(f"  CREATE OR REPLACE EXTENSION REPOSITORY hf_repo WITH PREFIX '{prefix}' USING PUBLIC KEY '{compact}';")
             print("  INSTALL hf FROM hf_repo; LOAD hf FROM hf_repo;")
         if args.unsigned_tree:
-            print("  SET allow_unsigned_extensions = true;   -- the unsigned copy, no pinned key")
-            print(f"  INSTALL hf FROM '{prefix}unsigned/'; LOAD hf;")
+            # The unsigned copy needs unsigned extensions *allowed*, and that is decided when the database
+            # opens: the CLI takes -unsigned, the API takes it as connect configuration. Writing it as a SET -
+            # which is how it reads, and how this recipe used to read - is refused in a running database, with
+            # an error (Cannot change allow_unsigned_extensions setting while database is running) that points
+            # nowhere near the tree it is actually about.
+            print("  -- unsigned copy, no pinned key: start the client with unsigned extensions allowed, i.e.")
+            print("  --   duckdb -unsigned, or duckdb.connect(config={'allow_unsigned_extensions': True}))")
+            print(f"  INSTALL hf FROM '{prefix}/unsigned'; LOAD hf;")
         print()
     return 0
 
