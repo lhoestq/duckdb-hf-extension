@@ -47,6 +47,16 @@ about all of this for a release already; the script that prints the same recipe 
 followed it. `--dry-run` now prints those recipes without uploading 600 MB, and the block it emits for
 linux_arm64 was executed verbatim as part of this release.
 
+One thing the probing turned up, because it will confuse the next person who probes from a dirty home: this
+machine's `~/.duckdb/extensions/v2.0.0/linux_arm64/httpfs.duckdb_extension` (26,476,950 bytes, 2026-10-21,
+footer `v2.0.0` with a sha where its own extension version should be) was built by a *development* duckdb and
+stamped with the release identifier — the pin-versus-content problem of the Building section, on the other
+side of the load. When hf's autoload lands on such a file the refusal the user sees is the transport message
+("reading Hugging Face assets requires an HTTP transport that supports https://"), because `TryAutoLoadExtension`
+answers a boolean and the nested duckdb error is dropped. Point a fresh `extension_directory` at the session
+instead, or read the `INSTALL httpfs; LOAD httpfs;` you are told to type as the actual diagnostic. Worth a
+follow-up: that refusal should carry the nested error the way every other refusal in this extension does.
+
 Unchanged and still true below: the parked iceberg/upload work in `stash@{0}`, the untracked `docs/ICEBERG.md`,
 `docs/UPLOAD.md`, `tools/faceberg-0.4.0.patch`, `tools/hf_iceberg_rest_shim.py`, and `hf_status()` answering
 `v2.0.0-alpha49307` on a released 2.0.0 client (README documents why: it is the archive label, not the footer).
