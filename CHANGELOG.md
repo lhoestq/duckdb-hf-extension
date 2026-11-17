@@ -5,6 +5,32 @@ Two independent version numbers: **this project's** (what the extension can do, 
 one DuckDB identifier, so a release is one binary per identifier per platform, and rebuilding for a newer
 pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
 
+## Unreleased
+
+* **A scan over enough files could abort the process inside `malloc()`**
+  ([issue #2](https://github.com/lhoestq/duckdb-hf-extension/issues/2), reported by `@davanstrien` over 850
+  gated parquet files). `HFFileCache::Acquire` inserted the new file's entry, trimmed the whole registry
+  against `hf_read_cache_total_size`, and then read the cache back out of the entry it had just inserted.
+  Until the handle takes its copy the registry is that cache's only owner (`use_count() == 1`), and the trim
+  drops the entries the registry is the only owner of - so once the files open *right now* hold more than the
+  budget, every idle entry goes first and the fresh one is the last candidate left. Erasing it frees nothing
+  (the handle keeps every byte of it), and it frees the map node the `return` was about to read a `shared_ptr`
+  out of: copying that increments a control block that is no longer there, and the heap finds out later,
+  which is the `malloc(): unsorted double linked list corrupted`. The defaults sit on that edge - a file's
+  share of the budget is the budget over the files open when it was opened, floored at 64MB, so 16 threads
+  at the 1GB default is 16 x 64MB, and any moment with one file more open leaves the trim hunting for a
+  victim it only finds in the entry it is handing over. It is why 8 files never crashed and 850 did: 8 open
+  files is half the budget, so there was always an idle entry to drop instead. The same erasing explains the
+  memory in the report: an entry the registry lost is invisible to the budget, can never be dropped again,
+  and gets re-downloaded the next time the same file is opened. Measured with `MALLOC_PERTURB_`, which is
+  what turns the read of a freed node into a failure instead of an `ok`:
+
+  ```
+  --files 64 --threads 8 --cache-total 1 --mode count   count(*) over read_parquet, public parquet files
+  0.0.3 as published   3 runs, 3 x `Error: Invalid argument` about 2s in (from std::mutex::lock on hf's side)
+  this commit          3 runs, 3 x completed, 6-8s
+  ```
+
 ## 0.0.3 for Hugging Face Datasets — published 2026-11-02, built for DuckDB `v2.0.0` on all eight platforms
 
 * **`hf_dataset('namespace/name')` answers a query with the rows of a Hugging Face dataset**, and
