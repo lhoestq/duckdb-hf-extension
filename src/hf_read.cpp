@@ -47,38 +47,54 @@ namespace {
 //! scratch too. When entries died with their last handle, each of those opens downloaded the file all over
 //! again - one `count(*)` over a 287MB file pulled 1.8x its own size off the CDN. Entries are owned here
 //! instead, and evicted least recently used first once more than `hf_read_cache_total_size` bytes are
-//! held, skipping files that a handle has open right now.
+//! held, skipping files that a handle has open right now and the entry that is being handed to a handle as
+//! it opens - see Evict.
 struct HFReadCacheRegistry {
 	struct Entry {
 		shared_ptr<HFFileCache> cache;
-		string key;
 		//! the repository the bytes come from, so a commit can drop exactly the entries it invalidated
 		string repo_key;
 		uint64_t last_used = 0;
 	};
 
+	using Caches = std::unordered_map<string, Entry>;
+
 	std::mutex lock;
-	std::unordered_map<string, Entry> caches;
+	Caches caches;
 	uint64_t clock = 0;
 
-	//! Drop idle entries until the held bytes fit in `total_budget` - callers must hold `lock`
-	void Evict(idx_t total_budget) {
+	//! Drop idle entries until the held bytes fit in `total_budget` - callers must hold `lock`.
+	//!
+	//! `keep` is the one entry the trim must not touch, and `Acquire` always names it: the entry it has just
+	//! inserted for the handle it is about to return. That entry is owned by nobody but the registry - its
+	//! `use_count()` is 1 until the handle takes its copy - so it is precisely what the scan below picks as
+	//! soon as every *other* entry is in use, which is the normal state of a scan whose open files already
+	//! hold more than the budget (a file's limit is the budget divided over the files open at that moment and
+	//! never below HF_MIN_READ_CACHE, so the files open at once can add up to more than the budget itself).
+	//! Erasing it frees nothing - the handle keeps every byte of it alive - and orphans the cache: invisible
+	//! to `total`, never evictable again, re-downloaded by the next open of the same file, and alive until
+	//! that handle closes. And it frees the map node the caller still wanted to read its shared_ptr out of,
+	//! which is the `malloc(): unsorted double linked list corrupted` of issue #2.
+	void Evict(idx_t total_budget, Caches::const_iterator keep) {
 		while (true) {
 			idx_t total = 0;
-			Entry *oldest = nullptr;
-			for (auto &item : caches) {
-				total += item.second.cache->CachedBytes();
-				if (item.second.cache.use_count() > 1) {
+			Caches::const_iterator oldest = caches.end();
+			for (auto it = caches.begin(); it != caches.end(); ++it) {
+				total += it->second.cache->CachedBytes();
+				if (it->second.cache.use_count() > 1) {
 					continue; // in use: dropping the registry reference would not free the bytes anyway
 				}
-				if (!oldest || item.second.last_used < oldest->last_used) {
-					oldest = &item.second;
+				if (it == keep) {
+					continue; // the entry the caller is being handed, which is in use the moment this returns
+				}
+				if (oldest == caches.end() || it->second.last_used < oldest->second.last_used) {
+					oldest = it;
 				}
 			}
-			if (total <= total_budget || !oldest) {
+			if (total <= total_budget || oldest == caches.end()) {
 				return;
 			}
-			caches.erase(oldest->key);
+			caches.erase(oldest); // by iterator: the key lives in the node, so erasing by key reads through it
 			HFReadCountersGet().evictions++;
 		}
 	}
@@ -264,12 +280,16 @@ shared_ptr<HFFileCache> HFFileCache::Acquire(const string &key, idx_t buffer_siz
 	const auto effective_limit = MinValue<idx_t>(cache_limit, MaxValue<idx_t>(total_budget / open_files, floor_limit));
 	HFReadCacheRegistry::Entry fresh;
 	fresh.cache = make_shared_ptr<HFFileCache>(key, buffer_size, effective_limit, max_parallel);
-	fresh.key = key;
 	fresh.repo_key = repo_key;
 	fresh.last_used = registry.clock;
-	auto inserted = registry.caches.emplace(fresh.key, std::move(fresh));
-	registry.Evict(total_budget);
-	return inserted.first->second.cache;
+	// The reference the handle goes on living on is taken *before* the trim, and the entry holding it is kept
+	// out of the trim: until this returns the registry is that cache's only owner, so `Evict` could erase the
+	// entry - and reading the shared_ptr out of the node afterwards, which is what this used to do, reads a
+	// node the trim freed. See Evict.
+	auto cache = fresh.cache;
+	const auto inserted = registry.caches.emplace(key, std::move(fresh));
+	registry.Evict(total_budget, inserted.first);
+	return cache;
 }
 
 idx_t HFFileCache::Size(HFClient &client, const string &url, const string &path) {
