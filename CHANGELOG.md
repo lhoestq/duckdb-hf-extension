@@ -78,6 +78,38 @@ pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
   'v2.0.0-alpha49307')" from inside a process whose own `PRAGMA version` is `v2.0.0`. That is a build-side
   label rather than a load-order problem; the refusal now says so in those words instead of hiding it.
 
+* **Every artifact CI built carried a DuckDB identifier that does not exist as a release, which made it
+  unable to load the extension it needs as its https transport.** `DuckDB::LibraryVersion()` in a CI build
+  said `v2.0.0-alpha49307` while the same artifact's footer - and `PRAGMA version` in the client that loads
+  it - said `v2.0.0`. It came from extension-ci-tools' workflow-level `CI_FETCH_PREBUILT_DUCKDB: true`: the
+  phase asks `duckdb-staging.duckdb.org/<sha>/latest_alpha_version.txt`, gets the label DuckDB's staging
+  pipeline picked for the commit tagged `v2.0.0`, downloads that archive and links DuckDB out of it, so the
+  identifier is the one compiled *into the archive*. The footer is written from `DUCKDB_VERSION`, so the
+  artifact loads, and then it refuses every released extension whose footer names the real tag - including
+  httpfs, which this extension needs, and which the client around it loads without complaint:
+
+  ```
+  IO Error: Failed to load 'httpfs', The file was built specifically for DuckDB version 'v2.0.0' and can
+  only be loaded with that version of DuckDB. (this version of DuckDB is 'v2.0.0-alpha49307')
+  ```
+
+  It also installs into `~/.duckdb/extensions/v2.0.0-alpha49307/<platform>/`, a directory no client looks in.
+  This is the half of [issue #5](https://github.com/lhoestq/duckdb-hf-extension/issues/5) that hf code
+  cannot fix: a released artifact could not acquire a transport at all. The workflow that decides it exposes
+  no input for the setting - it is hard-coded in a `workflow_call` `env:` block - so the distribution
+  workflow is vendored as a copy at the pinned sha with that one line set to `false`, and `ci_selftest.sh`
+  now refuses an artifact whose compiled-in identifier differs from its own footer. Verified both ways with
+  the arm64 client and the previous run's artifact: green on a build that compiled DuckDB, and
+
+  ```
+  FAIL: the artifact reports DuckDB 'v2.0.0-alpha49307' while its footer says 'v2.0.0' - it was linked
+        against a staged DuckDB, and it will refuse every released extension (issue #5).
+  ```
+
+  The cost is ~7 minutes of compiling per architecture per job, which is what every alpha run of this
+  repository already paid; the benefit is that `hf_status().duckdb_version` stops being a lie, and that the
+  release can reach an https transport.
+
 ## 0.0.3 for Hugging Face Datasets — published 2026-11-02, built for DuckDB `v2.0.0` on all eight platforms
 
 * **`hf_dataset('namespace/name')` answers a query with the rows of a Hugging Face dataset**, and
