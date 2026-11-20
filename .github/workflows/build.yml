@@ -71,7 +71,9 @@ jobs:
       # than `== 'push' || == 'pull_request'`. `exclude_archs: …;wasm_threadstrue` in a build log is what a
       # poisoned suffix looks like: `wasm_threads` stops matching, everything the suffix named stops being
       # excluded, and the run is green anyway.
-      exclude_archs: "windows_arm64;wasm_mvp;wasm_eh;wasm_threads${{ github.event_name != 'workflow_dispatch' && ';linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64' || '' }}"
+      # PROBE BRANCH ONLY, never merge: this run exists to produce one linux_amd64 artifact for diagnosing
+      # issue #5, so every other architecture is excluded and the run is over in one build instead of eight.
+      exclude_archs: "windows_arm64;wasm_mvp;wasm_eh;wasm_threads;linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64;linux_arm64;linux_i386"
       # opt_in_archs is conditional for the same billing reason, and because a run that builds all eight is
       # a release run rather than a push. `reduced_ci_mode` below is set by the same test: on a dispatch it
       # switches off fail-fast, which the first pre7 release run used to cancel two healthy builds
@@ -79,7 +81,8 @@ jobs:
       # is green is allow_failure_archs' job, not fail-fast's. (This line existed only as a comment for four
       # releases: the input was never forwarded, so the dispatch that produced pre7 still ran with fail-fast
       # on. A workflow comment describing an input nobody passes is a wish, not a configuration.)
-      opt_in_archs: ${{ github.event_name == 'workflow_dispatch' && 'linux_amd64_musl;linux_arm64_musl;osx_amd64;windows_amd64' || '' }}
+      # PROBE BRANCH ONLY, never merge (see the exclude_archs comment).
+      opt_in_archs: ''
       reduced_ci_mode: ${{ github.event_name == 'workflow_dispatch' && 'disabled' || 'auto' }}
       allow_failure_archs: "linux_amd64_musl;linux_arm64_musl;windows_amd64"
       skip_tests: false

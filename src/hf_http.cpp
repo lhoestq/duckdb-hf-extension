@@ -4,10 +4,16 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
+#include "duckdb/main/extension_load_options.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/common/file_opener.hpp"
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/string_util.hpp"
 
 #include <cctype>
 #include <chrono>
+#include <cstdio>
+#include <mutex>
 #include <thread>
 
 #include <cstdint>
@@ -421,15 +427,87 @@ bool NeedsHttpfs(const string &transport_name) {
 	return transport_name.empty() || transport_name == "none" || transport_name == "Built-In";
 }
 
+//! PROBE ONLY: what each way of getting httpfs into the process answered, recorded once per process, and
+//! printed to stderr as well so a run that *succeeds* still shows how it got there.
+std::mutex HFProbeLock;
+string HFProbeDiag;
+
+string HFProbeDiagGet() {
+	std::lock_guard<std::mutex> guard(HFProbeLock);
+	return HFProbeDiag;
+}
+
+void HFProbeRecord(const string &piece) {
+	std::lock_guard<std::mutex> guard(HFProbeLock);
+	HFProbeDiag += piece;
+}
+
+string HFHttpfsState(DatabaseInstance &db) {
+	return db.ExtensionIsLoaded("httpfs") ? "loaded" : "absent";
+}
+
+//! PROBE ONLY: try every way of bringing in the transport, and keep what each one said.
+void HFUpgradeTransportProbe(DatabaseInstance &db, optional_ptr<FileOpener> opener) {
+	string diag = "transport=" + HTTPUtil::Get(db).GetName();
+	diag += StringUtil::Format(" autoinstall=%d autoload=%d",
+	                           Settings::Get<AutoinstallKnownExtensionsSetting>(db) ? 1 : 0,
+	                           Settings::Get<AutoloadKnownExtensionsSetting>(db) ? 1 : 0);
+	auto &fs = FileSystem::GetFileSystem(db);
+	auto loaded = [&db]() { return db.ExtensionIsLoaded("httpfs"); };
+	if (!loaded()) {
+		const bool avail = ExtensionHelper::TryAutoLoadAvailableExtension(db, "httpfs");
+		diag += StringUtil::Format(" | load_if_available=%d -> %s", avail ? 1 : 0, HFHttpfsState(db));
+	}
+	if (!loaded()) {
+		try {
+			ExtensionHelper::LoadExternalExtension(db, fs, ExtensionLoadOptions("httpfs"));
+			diag += " | direct=ok";
+		} catch (std::exception &ex) {
+			diag += " | direct threw: " + string(ex.what());
+		}
+	}
+	if (!loaded()) {
+		const bool tried = ExtensionHelper::TryAutoLoadExtension(db, "httpfs");
+		diag += StringUtil::Format(" | autoload(install)=%d -> %s", tried ? 1 : 0, HFHttpfsState(db));
+	}
+	if (!loaded()) {
+		try {
+			ExtensionHelper::LoadExternalExtension(db, fs, ExtensionLoadOptions("httpfs"));
+			diag += " | direct_after_install=ok";
+		} catch (std::exception &ex) {
+			diag += " | direct_after_install threw: " + string(ex.what());
+		}
+	}
+	auto ctx = FileOpener::TryGetClientContext(opener);
+	diag += StringUtil::Format(" | opener_has_context=%d", ctx ? 1 : 0);
+	if (!loaded() && ctx) {
+		try {
+			ExtensionHelper::LoadExternalExtension(*ctx, ExtensionLoadOptions("httpfs"));
+			diag += " | load_with_context=ok";
+		} catch (std::exception &ex) {
+			diag += " | load_with_context threw: " + string(ex.what());
+		}
+	}
+	diag += StringUtil::Format(" | final=%s", HFHttpfsState(db));
+	fprintf(stderr, "[hf-http-probe] %s\n", diag.c_str());
+	fflush(stderr);
+	HFProbeRecord(" " + diag);
+}
+
 //! Turn the low-level "there is no https-capable HTTP client" failures into something actionable.
 void RethrowWithTransportHint(const std::exception &ex, const string &transport_name, const string &url) {
 	string message = ex.what();
-	if (message.find("scheme is not supported") != string::npos || message.find("no HTTP client for") != string::npos) {
+	const bool transport_shaped =
+	    message.find("scheme is not supported") != string::npos || message.find("no HTTP client for") != string::npos;
+	const string diag = HFProbeDiagGet();
+	if (transport_shaped || !diag.empty()) {
 		throw IOException("reading Hugging Face assets requires an HTTP transport that supports https://, and the "
 		                  "registered one ('%s') does not - provide it with `INSTALL httpfs; LOAD httpfs;`. This "
 		                  "extension normally loads httpfs by itself, which settings like "
-		                  "autoinstall_known_extensions or autoload_known_extensions can block. Failed request: %s (%s)",
-		                  transport_name, url, message);
+		                  "autoinstall_known_extensions or autoload_known_extensions can block. Failed request: %s (%s)"
+		                  "%s%s",
+		                  transport_name, url, message, transport_shaped ? "" : " [probe: message was not the "
+		                  "transport-shaped one]", diag.empty() ? "" : (" [probe:" + diag + "]").c_str());
 	}
 	std::rethrow_exception(std::current_exception());
 }
@@ -446,7 +524,7 @@ HFClient::HFClient(DatabaseInstance &db_p, optional_ptr<FileOpener> opener_p, HF
 	// extension is unavailable (autoinstall switched off), in which case requests fail with the
 	// actionable error from RethrowWithTransportHint below.
 	if (NeedsHttpfs(util.GetName())) {
-		ExtensionHelper::TryAutoLoadExtension(db, "httpfs");
+		HFUpgradeTransportProbe(db, opener);
 	}
 	http_util = &HTTPUtil::Get(db);
 	FileOpenerInfo info;
