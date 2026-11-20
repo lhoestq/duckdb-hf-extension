@@ -1,13 +1,18 @@
 #include "hf_http.hpp"
 
 #include "duckdb/common/exception/http_exception.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
+#include "duckdb/main/extension_load_options.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/common/file_opener.hpp"
 
 #include <cctype>
 #include <chrono>
+#include <mutex>
 #include <thread>
 
 #include <cstdint>
@@ -414,6 +419,14 @@ string HFJson::NextLinkUrl(const string &link_header, bool &found) {
 
 namespace {
 
+//! The transport this extension needs, and the two states that only this process can know: what the loader
+//! said when httpfs could not be brought in, and whether hf had to take the `huggingface` secret type.
+//! Attempts happen in code that must not throw (extension load, client construction); the only place a
+//! user can be told anything is the request-time error, so the facts are carried in a process-wide note.
+std::mutex HFHttpfsNoteLock;
+string HFHttpfsFailure;
+bool HFHttpfsHoldsSecretType = false;
+
 //! Transports that cannot talk https to the Hub: the empty placeholder, and the built-in httplib
 //! client, which ships without TLS in the official DuckDB builds (an https request through it fails
 //! with "'https' scheme is not supported.", raised inside third_party/httplib).
@@ -421,20 +434,155 @@ bool NeedsHttpfs(const string &transport_name) {
 	return transport_name.empty() || transport_name == "none" || transport_name == "Built-In";
 }
 
+//! DuckDB's loader answers a failed load with a JSON-wrapped exception, and hf already has a tolerant
+//! scanner for that envelope (`HFJson`). The user wants the sentence, not the envelope - and one line of it,
+//! since the loader's own text spans several ("... not found.\nExtension ... is an existing extension.\n\n
+//! Install it first ...") and a refusal reads better as a sentence than as a stanza.
+string UnwrapLoaderError(const string &raw) {
+	string message = raw;
+	if (raw.find("\"exception_message\"") != string::npos) {
+		bool found = false;
+		auto inner = HFJson::GetString(raw, "exception_message", found);
+		if (found && !inner.empty()) {
+			message = inner;
+		}
+	}
+	string flat;
+	flat.reserve(message.size());
+	bool pending_space = false;
+	for (auto c : message) {
+		if (c == '\n' || c == '\r' || c == '\t') {
+			c = ' ';
+		}
+		if (c == ' ') {
+			pending_space = !flat.empty();
+			continue;
+		}
+		if (pending_space) {
+			flat += ' ';
+			pending_space = false;
+		}
+		flat += c;
+	}
+	return flat;
+}
+
+
 //! Turn the low-level "there is no https-capable HTTP client" failures into something actionable.
 void RethrowWithTransportHint(const std::exception &ex, const string &transport_name, const string &url) {
 	string message = ex.what();
 	if (message.find("scheme is not supported") != string::npos || message.find("no HTTP client for") != string::npos) {
-		throw IOException("reading Hugging Face assets requires an HTTP transport that supports https://, and the "
-		                  "registered one ('%s') does not - provide it with `INSTALL httpfs; LOAD httpfs;`. This "
-		                  "extension normally loads httpfs by itself, which settings like "
-		                  "autoinstall_known_extensions or autoload_known_extensions can block. Failed request: %s (%s)",
-		                  transport_name, url, message);
+		// Telling the user to load httpfs is only good advice while hf is not the one holding the secret type:
+		// httpfs registers `huggingface` too, without tolerating a collision, so once hf has taken it the load
+		// throws in every later attempt of this session - including the one this message would ask for.
+		string advice = HFHttpfs::HoldsSecretType()
+		                      ? "`LOAD httpfs` cannot work in this session: hf has registered the 'huggingface' "
+		                        "secret type, which httpfs registers too. Load httpfs before hf in a new session, "
+		                        "or install hf into this duckdb (`INSTALL hf FROM hf_repo`), which lets duckdb "
+		                        "load httpfs on hf's behalf"
+		                      : "provide it with `INSTALL httpfs; LOAD httpfs;`";
+		auto failure = HFHttpfs::LastFailure();
+		// Concatenated rather than formatted: `IOException(fmt, ...)` runs the text through duckdb's format
+		// engine, and a failed url - which is percent-encoded as often as not - lands in it as data. A `%s` in
+		// the data would then be filled from an argument list that has already run out.
+		string text = "reading Hugging Face assets requires an HTTP transport that supports https://, and the "
+		              "registered one ('" +
+		              transport_name + "') does not: " + advice +
+		              ". This extension normally loads httpfs by itself, which settings like "
+		              "autoinstall_known_extensions or autoload_known_extensions can block";
+		if (!failure.empty()) {
+			text += ", and the attempt here reported: " + failure;
+		}
+		text += ". Failed request: " + url + " (" + message + ")";
+		throw IOException(text);
 	}
 	std::rethrow_exception(std::current_exception());
 }
 
 } // namespace
+
+bool HFHttpfs::AcquireInstalled(DatabaseInstance &db, string &reason) {
+	if (db.ExtensionIsLoaded("httpfs")) {
+		return true;
+	}
+	try {
+		// Bare `LOAD httpfs` options: the core and community repositories, which is the set of keys a user's
+		// own LOAD trusts, and nothing is fetched - a file that is not there makes this throw.
+		ExtensionHelper::LoadExternalExtension(db, FileSystem::GetFileSystem(db), ExtensionLoadOptions("httpfs"));
+	} catch (std::exception &ex) {
+		reason = UnwrapLoaderError(ex.what());
+	}
+	return db.ExtensionIsLoaded("httpfs");
+}
+
+bool HFHttpfs::LoadThroughClient(DatabaseInstance &db, string &reason) {
+	if (db.ExtensionIsLoaded("httpfs")) {
+		return true;
+	}
+	try {
+		Connection con(db);
+		auto result = con.Query("LOAD httpfs");
+		if (result->HasError()) {
+			reason = UnwrapLoaderError(result->GetError());
+		}
+	} catch (std::exception &ex) {
+		reason = UnwrapLoaderError(ex.what());
+	}
+	return db.ExtensionIsLoaded("httpfs");
+}
+
+bool HFHttpfs::MayStillArrive(DatabaseInstance &db) {
+	if (db.ExtensionIsLoaded("httpfs")) {
+		return false; // it is here already; nothing is being waited for
+	}
+	auto &config = DBConfig::GetConfig(db);
+	return Settings::Get<AutoinstallKnownExtensionsSetting>(config) ||
+	       Settings::Get<AutoloadKnownExtensionsSetting>(config);
+}
+
+bool HFHttpfs::Acquire(DatabaseInstance &db, bool allow_install, string &reason) {
+	if (AcquireInstalled(db, reason) || LoadThroughClient(db, reason)) {
+		return true;
+	}
+	if (!allow_install) {
+		return false;
+	}
+	auto &config = DBConfig::GetConfig(db);
+	if (!Settings::Get<AutoinstallKnownExtensionsSetting>(config) &&
+	    !Settings::Get<AutoloadKnownExtensionsSetting>(config)) {
+		// Keep whatever the load said - normally "not found, Install it first" - and add why hf cannot act on
+		// it, which is the half a user cannot see from the loader's side.
+		if (reason.empty()) {
+			reason = "nothing is installed here";
+		}
+		reason += "; hf cannot install it either, as autoinstall_known_extensions and "
+		          "autoload_known_extensions are both off";
+		return false;
+	}
+	// duckdb's install-and-load-in-one-go helper, the only path allowed to reach the network. Silent by
+	// contract: it answers a bool and returns false for anything it catches, so the reason has to be asked
+	// for separately - which the two offline attempts do, on the file it may just have installed.
+	ExtensionHelper::TryAutoLoadExtension(db, "httpfs");
+	if (!AcquireInstalled(db, reason) && !LoadThroughClient(db, reason) && reason.empty()) {
+		reason = "the install attempt reported no error and left nothing loadable";
+	}
+	return db.ExtensionIsLoaded("httpfs");
+}
+
+string HFHttpfs::LastFailure() {
+	std::lock_guard<std::mutex> guard(HFHttpfsNoteLock);
+	return HFHttpfsFailure;
+}
+
+bool HFHttpfs::HoldsSecretType() {
+	std::lock_guard<std::mutex> guard(HFHttpfsNoteLock);
+	return HFHttpfsHoldsSecretType;
+}
+
+void HFHttpfs::NoteHoldsSecretType(bool holds) {
+	std::lock_guard<std::mutex> guard(HFHttpfsNoteLock);
+	HFHttpfsHoldsSecretType = holds;
+}
 
 HFClient::HFClient(DatabaseInstance &db_p, optional_ptr<FileOpener> opener_p, HFConnection connection_p,
                    const string &path)
@@ -442,11 +590,14 @@ HFClient::HFClient(DatabaseInstance &db_p, optional_ptr<FileOpener> opener_p, HF
 	auto &util = HTTPUtil::Get(db);
 	// httpfs is the transport this extension is designed to run on. The built-in client is compiled
 	// without TLS in the official DuckDB distributions, so "Built-In" cannot serve the https:// Hub
-	// endpoints either - it has to be upgraded too. TryAutoLoadExtension is a silent no-op when the
-	// extension is unavailable (autoinstall switched off), in which case requests fail with the
-	// actionable error from RethrowWithTransportHint below.
+	// endpoints either - it has to be upgraded too. A request-time attempt may install (the user is waiting
+	// for a read they asked for); what the loader said when it could not is kept for the error below.
 	if (NeedsHttpfs(util.GetName())) {
-		ExtensionHelper::TryAutoLoadExtension(db, "httpfs");
+		string reason;
+		if (!HFHttpfs::Acquire(db, /*allow_install=*/true, reason)) {
+			std::lock_guard<std::mutex> guard(HFHttpfsNoteLock);
+			HFHttpfsFailure = reason;
+		}
 	}
 	http_util = &HTTPUtil::Get(db);
 	FileOpenerInfo info;
