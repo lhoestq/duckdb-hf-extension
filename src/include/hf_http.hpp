@@ -11,6 +11,41 @@ namespace duckdb {
 class DatabaseInstance;
 struct FileOpenerInfo;
 
+//! https transport for the Hub is httpfs, and there are exactly two ways to fail to get it: nothing on disk
+//! to load, and something on disk that this build cannot load. Both look identical from a request - the
+//! request just says the registered transport cannot do https - which is why the attempts record what the
+//! loader actually answered here, for the message at `RethrowWithTransportHint` to spend.
+struct HFHttpfs {
+	//! Load an httpfs that is already on disk, without fetching anything. This one does not consult the
+	//! autoload settings: they govern fetching extensions on the user's behalf, and loading a file the user
+	//! installed is not a fetch. It has to happen before hf registers the `huggingface` secret type, because
+	//! that registration is what makes every later `LOAD httpfs` throw.
+	static bool AcquireInstalled(DatabaseInstance &db, string &reason);
+	//! Ask the client to run the `LOAD httpfs` a user would have run. More than a stylistic choice: a loaded
+	//! extension carries its own copy of duckdb's loader, and that copy compares the file's footer against the
+	//! identifier *compiled into hf* - which in a CI build is the staged label DuckDB's static-libs archive
+	//! came with, `v2.0.0-alpha49307` for the commit tagged `v2.0.0` - so a CI-built hf refuses the released
+	//! httpfs that the very client it runs inside loads without complaint. Only legal outside an extension
+	//! load: see HFHttpfs::Acquire and the note in HFPlugin::LoadInternal.
+	static bool LoadThroughClient(DatabaseInstance &db, string &reason);
+
+	//! Whether duckdb could still bring httpfs in later in this session, which is true whenever a fetch is
+	//! permitted: `CREATE SECRET (TYPE huggingface)` alone makes the manager autoload the extension registered
+	//! as owning the type, and the request path does the same before it needs a socket.
+	static bool MayStillArrive(DatabaseInstance &db);
+	//! Load httpfs. `allow_install` permits a settings-gated install first (a request-time attempt); an
+	//! offline attempt (at extension load) is only ever "load what is already there". Returns whether the
+	//! transport is loaded afterwards, and on failure what the loader said.
+	static bool Acquire(DatabaseInstance &db, bool allow_install, string &reason);
+	//! What the last failed attempt said, empty if none failed. Read by the request-time error message.
+	static string LastFailure();
+	//! True when hf registered the `huggingface` secret type itself, which is what makes a later
+	//! `LOAD httpfs` throw (httpfs registers the same type unguarded). The error message has to know,
+	//! because "just load httpfs" is advice that only works when this is false.
+	static bool HoldsSecretType();
+	static void NoteHoldsSecretType(bool holds);
+};
+
 //! A paginated listing page: the raw body plus the `Link: <...>; rel="next"` continuation, if any.
 struct HFListPage {
 	string body;

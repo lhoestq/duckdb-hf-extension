@@ -1,6 +1,7 @@
 #include "hf_secrets.hpp"
 
 #include "hf_common.hpp"
+#include "hf_http.hpp"
 
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/main/config.hpp"
@@ -50,6 +51,23 @@ void HFSecrets::Register(ExtensionLoader &loader) {
 	auto &manager = *config.secret_manager;
 
 	// The type may already exist: httpfs registers `huggingface` too, and both extensions can be loaded.
+	// Asking the manager is also the one moment duckdb fetches httpfs on hf's behalf: a lookup autoloads the
+	// extension registered as owning the type (the static EXTENSION_SECRET_TYPES table hands `huggingface`
+	// to httpfs), so where the autoload is permitted httpfs arrives first, registers the type, and hf skips.
+	//
+	// Where it does not arrive, whether to take the name is a real choice, because a registered secret type
+	// cannot be handed back (v2.0.0 has no API to drop one) and httpfs registers the same name without
+	// tolerating a collision: once hf holds it, every later `LOAD httpfs` in the process throws
+	// `Attempted to register an already registered secret type: "huggingface"` - including the one hf's own
+	// transport error recommends, which is issue #4. So hf takes it only when it is the last possible owner:
+	// with autoinstall_known_extensions or autoload_known_extensions on, duckdb can still bring httpfs in by
+	// itself at the first lookup - and through its own copy of the loader, whose version identifier matches
+	// the released files, unlike the copy compiled into an extension. Taking the name there would trade a
+	// refusal that explains itself for a session permanently unable to read anything.
+	//
+	// With both settings off nothing can arrive, hf is the only thing that can own the type, and it does: a
+	// `CREATE SECRET (TYPE huggingface, ...)` still works offline, and NoteHoldsSecretType records the choice
+	// so the transport error stops recommending a `LOAD httpfs` that can only throw.
 	static constexpr const char *TYPE_NAME = HF_SECRET_TYPE;
 	bool type_exists = false;
 	try {
@@ -58,13 +76,14 @@ void HFSecrets::Register(ExtensionLoader &loader) {
 	} catch (std::exception &) {
 		type_exists = false;
 	}
-	if (!type_exists) {
+	if (!type_exists && !HFHttpfs::MayStillArrive(db)) {
 		SecretType secret_type;
 		secret_type.name = Identifier(TYPE_NAME);
 		secret_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 		secret_type.default_provider = "config";
 		secret_type.extension = "hf";
 		manager.RegisterSecretType(secret_type);
+		HFHttpfs::NoteHoldsSecretType(true);
 	}
 
 	// Providers are registered with IGNORE so that httpfs' providers win when it is loaded first - they are

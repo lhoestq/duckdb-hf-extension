@@ -31,6 +31,53 @@ pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
   this commit          3 runs, 3 x completed, 6-8s
   ```
 
+* **A path-loaded `hf.duckdb_extension` could leave the session with no way to read anything, and the error
+  it printed sent you to the one command that could no longer work**
+  ([issue #4](https://github.com/lhoestq/duckdb-hf-extension/issues/4),
+  [issue #5](https://github.com/lhoestq/duckdb-hf-extension/issues/5)). A lookup of an unknown secret type
+  makes duckdb autoload the extension registered as owning it, and `EXTENSION_SECRET_TYPES` hands
+  `huggingface` to httpfs - so the probe hf runs to ask whether httpfs got there first is itself the moment
+  duckdb decides whether hf gets an https transport. Where that cannot happen - a fresh extension directory,
+  or `autoinstall_known_extensions` off - hf registered the type itself, and httpfs registers the same name
+  without tolerating a collision, so from then on every `LOAD httpfs` in the process throws `Attempted to
+  register an already registered secret type: "huggingface"`: the user's, and hf's own retry from `HFClient`'s
+  constructor, which is why the self-heal could not happen either. Registered types cannot be handed back,
+  there being no API to drop one in v2.0.0, so the advice printed - `provide it with INSTALL httpfs; LOAD
+  httpfs;` - named the one action the session could no longer perform. Now: an httpfs already on disk is
+  loaded while hf loads, before the type is touched (not a fetch, so the autoload settings, which govern
+  fetching, no longer decide whether an installed transport can be used); and hf registers the type only
+  when duckdb cannot still bring httpfs in by itself, i.e. only as the last possible owner of the name, so
+  the default session keeps `LOAD httpfs` available and `CREATE SECRET (TYPE huggingface, ...)` works either
+  way - measured with the type coming from httpfs and with it coming from hf. At request time hf also asks
+  the client to run the load, since a loaded extension carries its own copy of the loader and compares
+  footers against the version compiled into *itself*. And the refusal quotes what the loader answered, which
+  had to be asked for: `TryAutoLoadExtension` answers a bool and returns false for everything it catches, so
+  the reason comes from a direct `LoadExternalExtension`, is unwrapped from duckdb's JSON envelope and folded
+  onto one line.
+
+  ```
+  python duckdb 2.0.0, arm64, fresh home and fresh extension directory per row, HF_TOKEN set,
+  hf loaded by path; the count is `glob('hf://datasets/wikimedia/wikipedia/*/*.parquet')`
+
+  settings   httpfs on     main                                       this commit
+             disk
+  on         yes           555                                        555
+  on         no            555                                        555
+  off        yes           read refused, and the recommended         555
+                            `LOAD httpfs` throws the secret-type
+                            error
+  off        no            read refused, with advice that cannot      read refused, naming the settings that
+                            work                                       block it and what the attempt reported
+  ```
+
+  What this does not fix: a build whose compiled-in DuckDB identifier is a staged label - `v2.0.0-alpha…`,
+  which is what CI artifacts and 0.0.3 carry - still cannot load the released httpfs, and installs one under
+  `~/.duckdb/extensions/v2.0.0-alpha…/`, a directory the client never reads. The comparison is made against
+  the identifier compiled into the caller, and a loaded hf carries its own copy of it, so hf reports "The
+  file was built specifically for DuckDB version 'v2.0.0' ... (this version of DuckDB is
+  'v2.0.0-alpha49307')" from inside a process whose own `PRAGMA version` is `v2.0.0`. That is a build-side
+  label rather than a load-order problem; the refusal now says so in those words instead of hiding it.
+
 ## 0.0.3 for Hugging Face Datasets — published 2026-11-02, built for DuckDB `v2.0.0` on all eight platforms
 
 * **`hf_dataset('namespace/name')` answers a query with the rows of a Hugging Face dataset**, and
