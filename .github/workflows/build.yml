@@ -12,7 +12,9 @@ jobs:
   # into ./duckdb itself (the Makefile prefers that over the ../vendor checkout used locally), and the
   # root vcpkg.json satisfies the manifest its CI images point VCPKG_MANIFEST_DIR at.
   distribution:
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@4a5752ce7689b547344a91067bddb2b2b5395fac
+    # Upstream's file, vendored as a copy for one env line (it exposes no input for it). Same sha, same
+    # inputs; see the header of .github/workflows/_extension_distribution.yml.
+    uses: ./.github/workflows/_extension_distribution.yml
     with:
       extension_name: hf
       # Pinned, exactly the tree vendored in ../vendor/extension-ci-tools

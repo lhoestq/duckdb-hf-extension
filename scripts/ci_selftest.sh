@@ -41,6 +41,25 @@ got_version=$(run "SELECT hf_version FROM hf_status();")
 [[ "$got_version" == "$WANT_VERSION" ]] || { echo "FAIL: hf_version reports '$got_version', the source says '$WANT_VERSION'" >&2; exit 1; }
 
 # the write route, on by default: content goes to Xet, with the LFS upload as its fallback
+# The identifier compiled into the binary has to equal the one its footer names. The two are written by
+# different hands: the footer comes from DUCKDB_VERSION, while DuckDB::LibraryVersion() is statically linked
+# from whatever DuckDB the job built - and when the phase downloads DuckDB's staged static-libs archive
+# instead of compiling it, that string is the label the archive was staged under rather than the tag
+# (`v2.0.0-alpha49307` for the commit tagged `v2.0.0`). Nothing else in this file can see it: the client this
+# script tests with carries the footer's identifier, so the artifact loads and every check passes. It is
+# visible from SQL, and it decides two things in the field - the loader statically linked into the extension
+# compares an httpfs footer against its own identifier, so a mismatched artifact cannot load a released
+# httpfs, and it installs one under ~/.duckdb/extensions/v2.0.0-alpha49307/, which no client ever reads.
+got_duckdb_version=$(run "SELECT duckdb_version FROM hf_status();")
+footer_version=$(python3 scripts/ext_footer.py --version "$EXT_ABS")
+[[ "$got_duckdb_version" == "$footer_version" ]] || {
+  echo "FAIL: the artifact reports DuckDB '$got_duckdb_version' while its footer says '$footer_version' -" \
+       "it was linked against a staged DuckDB, and it will refuse every released extension (issue #5)." >&2
+  echo "      build DuckDB instead of downloading the staged archive; see CI_FETCH_PREBUILT_DUCKDB." >&2
+  exit 1
+}
+echo "   compiled-in identifier matches the footer: $footer_version"
+
 got_xet_write=$(run "SELECT current_setting('hf_xet_write');")
 [[ "$got_xet_write" == "true" ]] || { echo "FAIL: hf_xet_write defaults to '$got_xet_write', it is meant to default to true" >&2; exit 1; }
 
