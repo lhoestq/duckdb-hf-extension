@@ -5,7 +5,12 @@ Two independent version numbers: **this project's** (what the extension can do, 
 one DuckDB identifier, so a release is one binary per identifier per platform, and rebuilding for a newer
 pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
 
-## Unreleased
+## 0.0.4 — published 2026-11-20, built for DuckDB `v2.0.0` on all eight platforms
+
+Fixes both reports about a path-loaded extension: #4 (the secret-type collision that made `LOAD httpfs` impossible) and #5 (no https
+transport). #5 needed a CI change as well - see the second entry - and the artifacts of this release are the
+first this repository built with DuckDB compiled rather than downloaded, so hf can load a released httpfs and
+installs one where a client looks.
 
 * **A scan over enough files could abort the process inside `malloc()`**
   ([issue #2](https://github.com/lhoestq/duckdb-hf-extension/issues/2), reported by `@davanstrien` over 850
