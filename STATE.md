@@ -5,6 +5,42 @@ story is `README.md`, the per-release story is `CHANGELOG.md`, the protocol stor
 long form of every decision — the failed attempts and the measurements behind it — is in `git log` bodies.
 This file only holds what is true right now and what to do next.
 
+## Position — 2026-11-23, `main` (0.0.5 published for `v2.0.1`)
+
+**`0.0.5` is published and live for DuckDB `v2.0.1`, eight platforms.** Annotated tag `v0.0.5` → `a2d8b73`,
+CI run `45265367173` dispatched with `gh workflow run "Build extension" --ref refs/tags/v0.0.5` (`headBranch`
+`v0.0.5`, `headSha` the tagged commit, which is what the footer's `git describe` reads), all eight matrix jobs
+plus the artifact reference-check job green, every binary's footer `v2.0.1` / `ext_version=v0.0.5` /
+`signed=yes`. Trees assembled into `dist/repo-0.0.5{,-signed}` — the per-release pattern from 0.0.3, both from
+`dist/ci-artifacts/45265367173/`. `scripts/verify_published.py` on exactly those two trees fetched **33 served
+files, 0 problems**; `scripts/test_install.py` installed from a fresh home over the unsigned tree and over the
+signed one (pinning `sha256:f007c8016bc2…`), and the recipe the publish script prints was run verbatim against
+the short `hf.co` prefix with the released 2.0.1 CLI on a fresh home: `hf_version 0.0.5, duckdb_version
+v2.0.1`. The same prefix on a released **2.0.0** client answers `0.0.4 / v2.0.0` and lists a repo — two live
+identifiers in one repository, each serving its own client, because publishing never deletes. (0.0.4 never got
+its own Position paragraph, so the one below is two releases old; its story is in `CHANGELOG.md` and in the
+`33e895e` / `3506695` commit bodies.)
+
+**A DuckDB *patch* release is a source change, not a rebuild.** 2.0.1 turned `FileOpenerInfo` from
+`{string file_path}` into `{OpenFileInfo file}` and the ten setting lookups that assigned it stopped
+compiling, which is the good outcome: the build refused instead of shipping, and nothing in the toolchain
+compares the vendored checkout with the six places a version is pinned. Those assignments are one helper now
+(`HFFileOpenerInfo()`, `src/include/hf_common.hpp`), and DEVELOPMENT.md gained *Moving to a new DuckDB
+release* — the six pins, who reads each, and what a missed one costs.
+
+**A matrix job the runner cancelled is `gh run rerun <run> --failed`, not a re-dispatch.** `osx_arm64` came
+back `cancelled` with `steps: 0` and no log on the first pass — the runner-scheduling failure DEVELOPMENT.md
+describes, which `diagnostic.yml` measures — and re-running just the failed job cost one macOS build instead
+of the eight a tag re-dispatch would have. The earlier advice (cancel through the API, re-dispatch the tag)
+is for a job that *hangs*, and for a matrix where nothing can schedule a runner at all.
+
+**`LOAD hf` after `INSTALL hf FROM hf_repo` says the extension is not found**, with a candidate list that does
+not mention `hf`. A repository install lands in `~/.duckdb/extensions/<v>/<platform>/repositories/<name>/` and
+a bare `LOAD` searches the plain platform directory; measured with the released 2.0.0 *and* 2.0.1 clients on
+fresh homes. The README's own lines pair the two statements and always did, and nothing in the suites covers
+the unpaired spelling — every check either loads by path or names the repository. README now says so beside
+the install block, because the error reads like a missing binary.
+
 ## Position — 2026-11-02, `main` (0.0.3 published for `v2.0.0`)
 
 **`0.0.3` is published and live for DuckDB `v2.0.0`, eight platforms.** Annotated tag `v0.0.3` → `79247da`,
@@ -59,7 +95,9 @@ follow-up: that refusal should carry the nested error the way every other refusa
 
 Unchanged and still true below: the parked iceberg/upload work in `stash@{0}`, the untracked `docs/ICEBERG.md`,
 `docs/UPLOAD.md`, `tools/faceberg-0.4.0.patch`, `tools/hf_iceberg_rest_shim.py`, and `hf_status()` answering
-`v2.0.0-alpha49307` on a released 2.0.0 client (README documents why: it is the archive label, not the footer).
+`v2.0.0-alpha49307` on a released 2.0.0 client **for the 0.0.3-and-older trees only** — since 0.0.4 CI compiles
+DuckDB, so the published artifacts answer the identifier their footer names (measured: 0.0.4 under `v2.0.0/`
+says `v2.0.0`, 0.0.5 under `v2.0.1/` says `v2.0.1`).
 
 ## Position — 2026-10-29, `main` (0.0.3)
 
@@ -155,6 +193,11 @@ every offline check (1090/0, 14 functions) in a released 2.0.0 client. Decision,
 workflow's `env` — or shadow `DuckDB::LibraryVersion()` (ODR violation). Un-pin path if it ever matters: upstream PR
 adding `fetch_prebuilt_duckdb` as an input, then `ci_tools_version` moves off `4a5752ce…`.
 
+*(The second route was taken two releases later, without waiting on that PR: `_extension_distribution.yml` is
+vendored in `.github/workflows/` and its workflow-level `env:` says `CI_FETCH_PREBUILT_DUCKDB: false`, so every
+job compiles DuckDB and the label is gone from anything built since 0.0.4 — see the 2026-11-23 position and
+`3506695`.)*
+
 **CI now tests artifacts with a client that exists.** The 0.0.2 selftest job was red because the `duckdb` inside
 `test-support.tar.gz` carries the staged label and refuses a footer that says `v2.0.0` — a labelling difference in
 DuckDB's pipeline rendered as a red job on a green artifact. `scripts/pick_test_client.sh` reads the footer, fetches
@@ -233,26 +276,32 @@ lagging-tag trap; it only has to differ from what was built.
 
 ## Next, in order
 
-1. **The release recipe, proven end to end twice (pre8, 0.0.2) and unchanged for the next identifier.** Bump
+1. **The release recipe, proven end to end three times (pre8, 0.0.2, 0.0.5) and unchanged for the next
+   identifier.** Bump
    `HF_EXTENSION_VERSION` (`src/include/hf_common.hpp`) and the `scripts/smoke_write.sql` assertion *together* —
    hand-moved, and pre8 proved what happens when only the tag moves — commit with `[skip ci]`, annotate the tag on
    *that* commit, push both, then `gh workflow run "Build extension" --ref refs/tags/<tag>`: dispatch on the tag,
    never on HEAD, because the footer version is `git describe` at the built commit. Once green —
-   `RUN=<run> DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" scripts/make_extension_repo_from_ci.sh dist/repo-signed`,
-   the same tree unsigned into `dist/repo`, then
-   `HF_BUCKET=duckdb-extensions/builds scripts/publish_extension_repo.py dist/repo-signed --unsigned-tree dist/repo`,
+   `RUN=<run> DUCKDB_EXTENSION_SIGNING_PK="$(cat ~/.config/duckdb-hf/signing.pem)" scripts/make_extension_repo_from_ci.sh dist/repo-<version>-signed`,
+   the same tree unsigned into `dist/repo-<version>`, then
+   `HF_BUCKET=duckdb-extensions/builds scripts/publish_extension_repo.py dist/repo-<version>-signed --unsigned-tree dist/repo-<version>`,
    then `scripts/verify_published.py` with the same two arguments, then `scripts/test_install.py` on the served
    urls. A hung job is cancelled through the API and the tag re-dispatched; a job that dies inside DuckDB's own
-   docker/toolchain steps (an EPEL cert flake) gets `gh run rerun <run> --failed`. Two traps this run added: the
+   docker/toolchain steps (an EPEL cert flake), or one the runner cancels with `steps: 0`, gets
+   `gh run rerun <run> --failed` — 0.0.5's `osx_arm64` was that, and one job re-run replaced an eight-job rebuild.
+   Two traps this run added: the
    tree you publish must hold one directory per identifier (`publish_extension_repo.py` refuses stale ones, which
    is what caught `v2.0.0-alpha47600` leftovers sitting in `dist/` here), and `dist/` is not cleared between runs
    for that reason.
-2. **The `v2.0.0-alpha49307` label, if it ever has to go.** Documented in README Limitations and accepted for
-   0.0.2; it changes no byte and no load. To make `hf_status()` match: get `duckdb/extension-ci-tools` to accept
-   `fetch_prebuilt_duckdb` as an input to `_extension_distribution.yml` (today `CI_FETCH_PREBUILT_DUCKDB: true` is
-   hard-coded at line 247 of the pinned sha *and* of `main`, and a caller cannot set a called workflow's `env`),
-   then point `ci_tools_version` at it and the artifacts come out labelled like official ones. Re-measure the
-   wall clock when doing it — the prebuilt archive did not make a run faster (26m48s vs pre8's 23m39s from source).
+2. **The `v2.0.0-alpha49307` label: settled, for anything still buildable.** It was the label of the static-libs
+   archive DuckDB's CI handed to extension builds, and it only ever showed in `DuckDB::LibraryVersion()` — the
+   footer the loader compares always said the truth. Since 0.0.4 the vendored `_extension_distribution.yml` sets
+   `CI_FETCH_PREBUILT_DUCKDB: false`, every job compiles DuckDB, and the published artifacts answer `v2.0.0` /
+   `v2.0.1` as their footer names (measured on released clients). Nothing left to do: the trees that still carry
+   the label are 0.0.3 and older, and rebuilding those would move their bytes out from under clients that load
+   them today. README's Limitations keeps the footnote with its release range attached. Re-measure the wall clock
+   if anyone ever re-enables the archive: the prebuilt download did not make a run faster (26m48s vs pre8's
+   23m39s from source).
 3. **A live A/B for the dedup flag.** What is covered today: with `hf_xet_upload_dedup = false` the *offline*
    byte-identity vectors still pass (that is how `docs/XET.md` describes the suite, and the oracle generator has no
    dedup path, so it is a real no-dedup baseline), and live the flag is covered only by counters
@@ -273,21 +322,21 @@ lagging-tag trap; it only has to differ from what was built.
 |---|---|
 | host | DGX Spark, `aarch64` / `linux_arm64`, Debian 12, gcc 12.2, 20 cores |
 | repo | `/home/quentin/hf/hf-duckdb-extension` (private remote `lhoestq/duckdb-hf-extension`) |
-| venv | `. .venv/bin/activate` — has `cmake`, `ninja`, `huggingface_hub`, `duckdb` 2.0.0 released (reports `v2.0.0`, no `numpy`) |
-| duckdb | `v2.0.0`, source `d54cbbe3df17e8e5ce68312f483b4155836112aa`, *Cyanoptera*, vendored at `/home/quentin/hf/vendor/duckdb` |
+| venv | `. .venv/bin/activate` — has `cmake`, `ninja`, `huggingface_hub`, `duckdb` 2.0.1 released (reports `v2.0.1`, no `numpy`) |
+| duckdb | `v2.0.1`, source `8d78114e90a53823803660bf821f6073ac87da8c`, *Cyanoptera*, vendored at `/home/quentin/hf/vendor/duckdb` |
 | xet-core | `/home/quentin/hf/xet-core` at `e922f74`; `cargo` is at `~/.cargo/bin` and **not on PATH**; the probe binary is `tools/xet_probe/target/release/xet-probe` |
 | token | `~/.cache/huggingface/token` (user `lhoestq`); `gh` authenticated as `lhoestq` |
 | signing key | `~/.config/duckdb-hf/signing.pem`, fingerprint `sha256:f007c8016bc2f3a2…dbfce` |
 
 ```bash
-make release                                    # defaults DUCKDB_VERSION=v2.0.0 (see the traps below)
+make release                                    # defaults DUCKDB_VERSION=v2.0.1 (see the traps below)
 cp build/release/extension/hf/hf.duckdb_extension dist/    # run_all.sh does this; a smoke_*.sh on its own does not
 python3 scripts/try.py < scripts/smoke_xet.sql  # prints the artifact it loads; there is no `duckdb` CLI in the venv
 bash scripts/run_all.sh --build            # every live suite; or one smoke_*.sh
 bash scripts/smoke_xet.sh                  # the offline reference checks, no token needed
 python3 scripts/xet_oracle.py --check      # drift check against xet-core (needs cargo on PATH)
 scripts/ci_selftest.sh build/release/extension/hf/hf.duckdb_extension   # what CI runs on an artifact
-scripts/pick_test_client.sh dist/repo-signed/v2.0.0/linux_arm64/hf.duckdb_extension dist/repo-signed
+scripts/pick_test_client.sh dist/repo-0.0.5-signed/v2.0.1/linux_arm64/hf.duckdb_extension dist/repo-0.0.5-signed
                                                 # fetches the released duckdb that artifact's footer names,
                                                 # prints DUCKDB=<path>; the same script CI's selftest uses
 ```

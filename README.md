@@ -50,6 +50,13 @@ CREATE OR REPLACE EXTENSION REPOSITORY hf_repo
 INSTALL hf FROM hf_repo;
 ```
 
+`LOAD` has to name the repository too — `LOAD hf FROM hf_repo`, not `LOAD hf`. An install from a repository
+lands in `~/.duckdb/extensions/<version>/<platform>/repositories/<name>/hf.duckdb_extension` and a bare `LOAD`
+searches the plain platform directory, where it reports `Extension "…/linux_arm64/hf.duckdb_extension" not
+found` with a candidate list that does not include `hf` (measured with the released 2.0.0 and 2.0.1 clients on
+a fresh home). The one-line setup at the top of this file has always spelled both; the failure looks like a
+missing binary and is a lookup in the wrong directory.
+
 * in Python:
 
 ```python

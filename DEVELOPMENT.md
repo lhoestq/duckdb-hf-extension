@@ -210,23 +210,24 @@ A binary is tied to exactly one version identifier, so the alpha this project wa
 including 0.0.2-pre8 (`v2.0.0-alpha47600`, what a pre-2.0 client reports) is a different artifact, not the
 same one relabelled. [Installation](#installation) says which client to pin against which identifier.
 
-Built for **DuckDB 2.0.0** (`v2.0.0`) on all eight DuckDB client platforms, and the
-first release published to a **bucket**:
+Built for **DuckDB 2.0.1** (`v2.0.1`) on all eight DuckDB client platforms, and published to a **bucket**:
 `https://hf.co/buckets/duckdb-extensions/builds/resolve`. It carries cross-repository dedup (`COPY TO` an
 upload can point at content another repository already stored: 0 bytes and 1.4 s to re-upload 237 MB you
-already have). The last build for the pre-2.0 identifier is **0.0.2-pre8** (`v2.0.0-alpha47600`), which keeps
-serving every `v2.0.0-alpha…` client from the dataset tree. HEAD may carry fixes beyond either.
-Suites: 212 passed / 13 expected failures / 0 failed, plus 1090 offline reference checks. Release notes in
-[CHANGELOG.md](CHANGELOG.md); the Xet protocol port and its measurements in [docs/XET.md](docs/XET.md).
+already have). 2.0.0's build — **0.0.4** — stays live under `v2.0.0/` for the clients that have not moved, and
+the last build for the pre-2.0 identifier is **0.0.2-pre8** (`v2.0.0-alpha47600`), which keeps serving every
+`v2.0.0-alpha…` client from the dataset tree. HEAD may carry fixes beyond either.
+Suites for 0.0.5: 253 passed / 25 expected failures / 0 failed, plus 1090 offline reference checks. Release
+notes in [CHANGELOG.md](CHANGELOG.md); the Xet protocol port and its measurements in [docs/XET.md](docs/XET.md).
 
 All eight platforms are published under each identifier, signed at the root and unsigned under `unsigned/`.
-`v2.0.0` — from 0.0.2 — lives in a bucket, `https://hf.co/buckets/duckdb-extensions/builds/resolve`: object
-storage, no revision in the url. Every `v2.0.0-alpha…` identifier before it lives in a dataset repo,
+Every identifier since 2.0 — `v2.0.1` from 0.0.5, `v2.0.0` from 0.0.2 — lives in a bucket,
+`https://hf.co/buckets/duckdb-extensions/builds/resolve`: object storage, no revision in the url. Every
+`v2.0.0-alpha…` identifier before it lives in a dataset repo,
 `https://huggingface.co/datasets/lhoestq/duckdb-hf-extension/resolve/main`, which is where pre1–pre8 went and
-what those clients still fetch. The bucket tree was checked by fetching every served path and re-reading each
-binary's footer against the directory serving it (33 files, `scripts/verify_published.py`), and installed over
-https from the long and the short host and from the unsigned tree (`scripts/test_install.py`); the dataset tree
-went through the same two checks when pre8 was published. Take the signed
+what those clients still fetch. Each release's tree is checked by fetching every served path and re-reading
+each binary's footer against the directory serving it (33 files, `scripts/verify_published.py`), and installed
+over https from the long and the short host and from the unsigned tree (`scripts/test_install.py`); the
+dataset tree went through the same two checks when pre8 was published. Take the signed
 one — `INSTALL` then checks bytes against a key instead of trusting the CDN.
 `windows_amd64` vs `windows_amd64_mingw` is not about which Windows you run: DuckDB composes that name
 itself, and `_mingw` appears only when DuckDB was *compiled* with mingw (`#ifdef __MINGW32__`).

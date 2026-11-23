@@ -5,6 +5,62 @@ Two independent version numbers: **this project's** (what the extension can do, 
 one DuckDB identifier, so a release is one binary per identifier per platform, and rebuilding for a newer
 pre-release is a rebuild rather than a version bump. `hf_status()` reports both.
 
+## 0.0.5 — published 2026-11-23, built for DuckDB `v2.0.1` on all eight platforms
+
+A rebuild for the next patch of the same minor line, which here is a release rather than a relabel: an
+artifact carries exactly one version identifier and `LOAD` compares it as an exact string, so a 2.0.1 client
+refuses what 0.0.4 published and no footer edit changes that. The bucket now serves two live identifiers side
+by side — `v2.0.1/` for this release, `v2.0.0/` still answering 2.0.0 clients with 0.0.4, because publishing
+never deletes. `DEVELOPMENT.md` gains the checklist this move needs (*Moving to a new DuckDB release*),
+including the six places a version is named and which consumer reads each.
+
+* **2.0.1 renamed a field this extension assigned in ten places, and the build stopped there.**
+  `FileOpenerInfo` was `{string file_path}` in 2.0.0 and is `{OpenFileInfo file}` in 2.0.1 — the path plus the
+  options the file was opened with, so a secret can be chosen per open option:
+
+  ```
+  src/hf_http.cpp:604:14: error: 'struct duckdb::FileOpenerInfo' has no member named 'file_path'
+  ```
+
+  Every one of the ten was a setting lookup or a secret resolve, so the path still reaches the transport the
+  same way; what changed is that the assignment is now one helper, `HFFileOpenerInfo()`, in
+  `src/include/hf_common.hpp`. Ten compile errors for one field rename inside a *patch* release is the
+  argument for spelling it once — the next move costs one line instead of ten, and `make` failing loudly is
+  the good outcome here, since nothing else in the toolchain cross-checks the checkout against the pin.
+
+* **`hf_status().duckdb_version` now answers the identifier, on a released client.** The 0.0.3-and-older
+  footnote in README's Limitations — `v2.0.0-alpha49307`, the label of the static-libs archive DuckDB's CI
+  staged for the `v2.0.0` commit — belongs to those trees now: since 0.0.4 CI compiles DuckDB, and the
+  published 0.0.5 artifacts answer `v2.0.1` where a client asks. Measured below on the released client, which
+  is where the old footnote lived. README now says which releases it covers.
+
+Measured, in this order:
+
+* a clean build tree (`rm -rf build/release`, the checkout pinned to `v2.0.1` = `8d78114e90`, the venv's
+  `duckdb` at `2.0.1`): **253 passed / 25 expected failures / 0 failed** over the seven suites — `xet` 12+3,
+  `xet_upload` 42+2, `datasets` 31+12, `read` 65+0, `write` 57+6, `models` 24+0, `buckets` 22+2 (passed +
+  expected). `scripts/ci_selftest.sh` then loads the built file with the *released* 2.0.1 client and answers
+  `0.0.5 | v2.0.1`, identifier matching the footer, **1090 reference checks passing**.
+* CI run [`45265367173`](https://github.com/lhoestq/duckdb-hf-extension/actions/runs/45265367173), dispatched
+  with `gh workflow run "Build extension" --ref refs/tags/v0.0.5` (`headBranch v0.0.5`, `headSha a2d8b73`):
+  eight platform artifacts, every footer `v2.0.1 / ext_version=v0.0.5`, plus the artifact reference-check job.
+  One caveat worth keeping: `osx_arm64` came back `cancelled` with `steps: 0` and no log on the first pass —
+  the runner-scheduling failure DEVELOPMENT.md describes — and `gh run rerun <run> --failed` re-ran that job
+  alone and turned the run green in one macOS build instead of eight. The published bytes are from this run.
+* Trees assembled per release rather than into the shared `dist/repo`: `dist/repo-0.0.5-signed` (eight
+  platforms, signed at the root, key `sha256:f007c8016bc2…`) and `dist/repo-0.0.5` (published under
+  `unsigned/`). Both from the same cached artifacts of the run, `dist/ci-artifacts/45265367173/`.
+* `scripts/verify_published.py` on exactly those two trees: **33 served files fetched, 0 problems** — each
+  binary's sha256 matching the tree it was built from, and each footer naming the directory that serves it.
+* `scripts/test_install.py` over https from a fresh home: the unsigned tree and the signed tree (the
+  repository pinning `sha256:f007c8016bc2…`), both installing, loading and answering
+  `hf_ls('hf://datasets/lhoestq/demo1')`.
+* The recipe the publish script prints, executed with a released client on a fresh home: the three statements
+  against the short `hf.co` prefix, verbatim, give `hf_version 0.0.5, duckdb_version v2.0.1` on DuckDB
+  `v2.0.1 (Cyanoptera) 8d78114e90`. Same prefix on a `v2.0.0 (Cyanoptera) d54cbbe3df` client gives
+  `hf_version 0.0.4, duckdb_version v2.0.0` and a working `hf_ls` — the two identifiers, both live, each
+  serving its own client from the same repository.
+
 ## 0.0.4 — published 2026-11-20, built for DuckDB `v2.0.0` on all eight platforms
 
 Fixes both reports about a path-loaded extension: #4 (the secret-type collision that made `LOAD httpfs` impossible) and #5 (no https
