@@ -27,10 +27,10 @@ on:
         required: true
         type: string
       duckdb_version:
-        description: "the DuckDB identifier that run built for, e.g. v2.0.0 - names the artifact"
+        description: "the DuckDB identifier that run built for, e.g. v2.0.1 - names the artifact"
         required: true
         type: string
-        default: "v2.0.0"
+        default: "v2.0.1"
 
 permissions:
   contents: read

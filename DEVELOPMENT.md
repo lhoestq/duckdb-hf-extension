@@ -66,17 +66,18 @@ it. `LOAD` compares the footer against its own version and platform as exact str
 `OVERRIDE_GIT_DESCRIBE` sets a string, and a string is all it sets: duckdb's `CMakeLists.txt` turns it into
 `DUCKDB_EXPLICIT_VERSION` → `DUCKDB_VERSION` → `DUCKDB_NORMALIZED_VERSION`, and `DUCKDB_NORMALIZED_VERSION` is
 what the footer records. Nothing in that chain looks at the sources being compiled. A checkout that has drifted
-past the tag therefore builds an artifact every released 2.0.0 client will *accept* — and then run as another
+past the tag therefore builds an artifact every released 2.0.1 client will *accept* — and then run as another
 commit's code, since a `CPP`-ABI extension is compiled against those headers. `make` succeeds. So:
 
 ```bash
 git -C ../vendor/duckdb fetch --tags
-git -C ../vendor/duckdb checkout v2.0.0
-git -C ../vendor/duckdb describe --tags --exact-match   # v2.0.0 — a -3-gabc1234 suffix IS the drift
+git -C ../vendor/duckdb checkout v2.0.1
+git -C ../vendor/duckdb describe --tags --exact-match   # v2.0.1 — a -3-gabc1234 suffix IS the drift
 git -C ../vendor/duckdb status --short                  # empty; edits to duckdb are invisible to the footer too
 ```
 
-`v2.0.0` is `d54cbbe3df17e8e5ce68312f483b4155836112aa` and has no submodules, so a checkout is the whole thing.
+`v2.0.1` is `8d78114e90a53823803660bf821f6073ac87da8c` (`v2.0.0` was `d54cbbe3df17e8e5ce68312f483b4155836112aa`),
+and neither has submodules, so a checkout is the whole thing.
 The two inputs are found by layout: `DUCKDB_SRCDIR` is `./duckdb` when one exists beside the Makefile (what CI
 gets) and `../vendor/duckdb` otherwise, `extension-ci-tools` likewise beside or `../vendor/extension-ci-tools`,
 pinned to `4a5752ce7689b547344a91067bddb2b2b5395fac` — the same sha `build.yml` dispatches. Either path can be
@@ -94,29 +95,30 @@ version of DuckDB. (this version of DuckDB is 'vd4355d01c593...')
 ```
 
 which is exactly what the first release run of this repository shipped — a green matrix, and no client that
-could load it. The Makefile sets `DUCKDB_VERSION=v2.0.0` when neither variable is passed, so a bare
-`make release` is stamped correctly.
+could load it. The Makefile sets `DUCKDB_VERSION=v2.0.1` when neither variable is passed, so a bare
+`make release` is stamped correctly — and that line is one of the five a new DuckDB patch release moves, see
+[Moving to a new DuckDB release](#moving-to-a-new-duckdb-release).
 
 ### On a machine that has never built it — nothing the build reads comes from this repository
 
 ```bash
 # the two trees the build reads, in the layout local development expects beside this repository
-git clone --branch v2.0.0 https://github.com/duckdb/duckdb ../vendor/duckdb
+git clone --branch v2.0.1 https://github.com/duckdb/duckdb ../vendor/duckdb
 git clone https://github.com/duckdb/extension-ci-tools ../vendor/extension-ci-tools
 git -C ../vendor/extension-ci-tools checkout 4a5752ce7689b547344a91067bddb2b2b5395fac
 
 python3 -m venv .venv && . .venv/bin/activate
-pip install cmake ninja duckdb==2.0.0     # build + suites; add huggingface_hub for the tools/ that call the Hub
+pip install cmake ninja duckdb==2.0.1     # build + suites; add huggingface_hub for the tools/ that call the Hub
 ```
 
-`--branch v2.0.0` is what makes the first rule hold by construction: HEAD lands on the tag, so the sources and
+`--branch v2.0.1` is what makes the first rule hold by construction: HEAD lands on the tag, so the sources and
 the pin say the same thing. Not `--depth 1`: the version duckdb derives *without* a pin counts commits with
 `git rev-list --count HEAD`, and a shallow clone counts wrong — a mistake that surfaces as a footer carrying a
 sha. A missing `../vendor/duckdb` fails early and legibly — `CMake Error: The source directory "…/vendor/duckdb"
 does not exist.` — the one to fear is the checkout that exists and sits elsewhere.
 
 The suites load `dist/` into the venv's duckdb, so that package has to agree with the pin too. `python -c
-'import duckdb; print(duckdb.sql("PRAGMA version").fetchall())'` answers `('v2.0.0', 'd54cbbe3df',
+'import duckdb; print(duckdb.sql("PRAGMA version").fetchall())'` answers `('v2.0.1', '8d78114e90',
 'Cyanoptera')` — the same commit the checkout sits on. Out of step, a suite fails as a crash instead of as a
 version error, which is the least useful way to be told.
 
@@ -133,7 +135,7 @@ cp build/release/extension/hf/hf.duckdb_extension dist/hf.duckdb_extension   # m
 ```
 
 Taking the pin from the running duckdb keeps artifact and client agreeing by construction; `scripts/run_all.sh
---build` takes it from `DUCKDB_VERSION` (default `v2.0.0`) instead, copies to `dist/` itself, and refuses to
+--build` takes it from `DUCKDB_VERSION` (default `v2.0.1`) instead, copies to `dist/` itself, and refuses to
 test a `dist/` older than the build tree — `make release` does not copy, and a stale `dist/` is how a suite
 reports a verdict that belongs to a binary nobody built.
 
@@ -248,7 +250,7 @@ Three rules the scripts enforce, each because breaking it once failed silently:
   `strings | grep '^v[0-9]'`; in a mingw artifact the first match is `v0.1H`, which filed a 73 MB binary
   where no client would ever look — green run, happy script.)
 * **The version identifier must match the running DuckDB** or `LOAD` refuses the binary. For a released
-  DuckDB, build against its tag — which since 2.0.0 is the whole story: `duckdb_version: v2.0.0`, the default
+  DuckDB, build against its tag — which since 2.0.0 is the whole story: `duckdb_version: v2.0.1`, the default
   clone of `duckdb/duckdb`, nothing else. For a dev pre-release it was not: the identifier is generated by
   DuckDB's release CI and tagged nowhere upstream, while extension-ci-tools exports `DUCKDB_VERSION` into the
   build (the Makefile prefers it over `OVERRIDE_GIT_DESCRIBE`, and `duckdb_tag` does not help — nothing
@@ -333,6 +335,52 @@ repos/lhoestq/duckdb-hf-extension/actions/runs/<run>/cancel`; `gh run cancel` ha
 tag. If *every* job dies in seconds with `steps: 0` and no log, that is not this repo: `gh workflow run 389744541`
 (`.github/workflows/diagnostic.yml`, two steps) answers whether Actions can schedule a runner at all, in seconds
 instead of a metered matrix run's ~25 minutes.
+
+### Moving to a new DuckDB release
+
+A DuckDB patch release (2.0.0 → 2.0.1) forces a full re-release: a binary is stamped with exactly one
+identifier, and `LOAD` compares it as an exact string, so a 2.0.0 artifact is not loadable by a 2.0.1 client and
+no amount of relabelling changes that. Nothing in the tree is shared between the two, except that the old
+directory keeps being served — a publish never deletes, so `v2.0.0/` goes on answering 2.0.0 clients while
+`v2.0.1/` is added beside it.
+
+Six places name the version, and the interesting failure is that a run stays green when one of them is missed,
+because each is read by a different consumer:
+
+| where | what reads it |
+| --- | --- |
+| `../vendor/duckdb`, checked out at the tag | the *headers a `CPP`-ABI extension is compiled against* — nothing checks this one |
+| `.venv`'s `duckdb` package (`pip install duckdb==2.0.1`) | the client every smoke suite loads `dist/` into |
+| `Makefile`: `DUCKDB_VERSION = v2.0.1` | the footer of a *local* build, when no pin is passed |
+| `scripts/run_all.sh`: `DUCKDB_VERSION:-v2.0.1` | the `OVERRIDE_GIT_DESCRIBE` a `--build` passes to `make` |
+| `build.yml`: `duckdb_version: v2.0.1` | the footer of every *CI* artifact, and the artifact *name* |
+| `selftest_artifact.yml`: `default: "v2.0.1"` | which artifact a re-check run downloads (its identifier still comes from the footer it loads) |
+
+The checkout is the only one of the six that nothing cross-checks, which is why
+[*Point the checkout at the version*](#point-the-checkout-at-the-version-then-say-it-out-loud) exists; the rest
+fail as a refusal someone can read. Then:
+
+```bash
+# 1. move the inputs, and check them rather than trusting the tag name
+git -C ../vendor/duckdb fetch --tags && git -C ../vendor/duckdb checkout v2.0.1
+git -C ../vendor/duckdb describe --tags --exact-match && git -C ../vendor/duckdb status --short
+.venv/bin/pip install duckdb==2.0.1
+.venv/bin/python -c 'import duckdb;print(duckdb.sql("PRAGMA version").fetchall())'  # ('v2.0.1','8d78114e90',…)
+git -C ../vendor/extension-ci-tools merge-base --is-ancestor <pin> origin/v2.0-cyanoptera && echo pin ok
+rm -rf build/release          # the release target never cleans; a stale tree builds the old client's code
+
+# 2. bump the extension's own number, build, and run every suite (see Testing)
+scripts/run_all.sh --build    # DUCKDB_VERSION defaults to the pin above
+
+# 3. release it, exactly as the previous section describes: tag, push the tag, dispatch the tag ref,
+#    then assemble / publish / verify with the versioned tree names (dist/repo-<version>{,-signed})
+```
+
+Two things checked themselves, which is worth knowing before trusting them for the next one:
+`scripts/pick_test_client.sh` needs the new release's `duckdb-cli-<platform>.tar.gz` asset to exist (a release
+asset does; a pre-release identifier does not, and the script then falls back to `test-support.tar.gz`), and
+`make_extension_repo.sh` takes the version *directory* from the artifact's footer, so the tree a CI run assembles
+is filed under the identifier the binaries actually carry rather than under anything this repository states.
 
 
 ## Layout

@@ -23,8 +23,7 @@ static idx_t GetSizeSetting(optional_ptr<FileOpener> opener, const string &path,
                             idx_t default_value) {
 	if (opener) {
 		Value value;
-		FileOpenerInfo info;
-		info.file_path = path;
+		FileOpenerInfo info = HFFileOpenerInfo(path);
 		if (FileOpener::TryGetCurrentSetting(opener, Identifier(name), value, info) && !value.IsNull()) {
 			auto configured = value.GetValue<idx_t>();
 			if (configured > 0) {

@@ -7,7 +7,8 @@ A native C++ DuckDB extension to read/write to `hf://` buckets, datasets, etc.
 
 * **Read**: using the Hub's `/resolve/` endpoints (range requests + a shared read-ahead cache);
 * **Write**: using the Hub's commit API (same as `huggingface_hub`) and [Xet](https://huggingface.co/docs/hub/en/xet/index) for efficient uploads via deduplication.
-* Targets **DuckDB 2.0.0** (`v2.0.0`, *Cyanoptera*).
+* Targets **DuckDB 2.0.1** (`v2.0.1`, *Cyanoptera*). Binaries are published per DuckDB identifier, so the
+  repository also still serves `v2.0.0` (the 0.0.4 build) to clients that have not moved.
 * Published at [hf.co/duckdb-extensions](https://hf.co/duckdb-extensions).
 
 ```sql
@@ -23,12 +24,16 @@ COPY (SELECT * FROM read_parquet('hf://datasets/me/demo/*.parquet'))
 
 ## Installation
 
-Make sure you are using DuckDB 2.0:
+Make sure you are using DuckDB 2.0 (2.0.0 or 2.0.1 — each gets its own directory, see below):
 
 ```sql
-SELECT version();   -- v2.0.0        <- the identifier, and the directory name a repository serves;
-                                     --   a pre-2.0 client answers v2.0.0-alpha47600 instead, and wants
-                                     --   a different binary: one directory per identifier is the mapping
+SELECT version();   -- v2.0.1        <- the identifier, and the directory name a repository serves;
+                                     --   a binary is built for exactly one of them, and LOAD compares this
+                                     --   string as an exact match; a pre-2.0 client answers
+                                     --   v2.0.0-alpha47600 instead, and wants a different binary again:
+                                     --   one directory per identifier is the mapping.
+                                     --   Served today: v2.0.1 (0.0.5 and later), v2.0.0 (0.0.4),
+                                     --   v2.0.0-alpha… (0.0.2-pre8, in the dataset tree)
 PRAGMA platform;    -- linux_arm64         <- one of linux_amd64, linux_arm64, osx_amd64, osx_arm64,
                                             --   windows_amd64, windows_amd64_mingw,
                                             --   linux_amd64_musl, linux_arm64_musl
@@ -170,18 +175,19 @@ by file (the commit API has no folder delete), and a missing path is an error un
 
 ## Limitations
 
-* **On a released 2.0.0 client, `hf_status().duckdb_version` answers `v2.0.0-alpha49307`.** The binary is built
-  for and loads only in DuckDB `v2.0.0` — the footer `INSTALL` and `LOAD` check says `v2.0.0`, and that is the
-  only version string the loader compares. What differs is a *second* string, compiled in from the static-libs
-  archive DuckDB's CI hands to extension builds: the commit tagged `v2.0.0` was staged for packaging as
-  `v2.0.0-alpha49307`, and `DuckDB::LibraryVersion()` — which `hf_status()` reports — carries that label. Same
-  commit (`d54cbbe3df`), same code, different name written down. Official DuckDB extensions do not carry it, so
-  this is ours to explain rather than a house convention. Read the other strings with this in mind: `version()`
-  and `pragma_version().library_version` answer about *your client* and are correct, and the version of *this
+* **On a released 2.0.0 client, `hf_status().duckdb_version` answers `v2.0.0-alpha49307` — for the 0.0.3 build
+  and earlier.** The binary is built for and loads only in DuckDB `v2.0.0` — the footer `INSTALL` and `LOAD`
+  check says `v2.0.0`, and that is the only version string the loader compares. What differs is a *second*
+  string, compiled in from the static-libs archive DuckDB's CI used to hand to extension builds: the commit
+  tagged `v2.0.0` was staged for packaging as `v2.0.0-alpha49307`, and `DuckDB::LibraryVersion()` — which
+  `hf_status()` reports — carries that label. Same commit (`d54cbbe3df`), same code, different name written
+  down. From **0.0.4** the CI build compiles DuckDB instead of linking that archive, and the published
+  artifacts answer `v2.0.0` (measured: the 0.0.4 `v2.0.0/linux_arm64` binary in the released 2.0.0 client
+  reports `hf_version=0.0.4, duckdb_version=v2.0.0`), so this footnote belongs to `0.0.3` and older trees
+  only. Read the strings with the distinction in mind either way: `version()` and
+  `pragma_version().library_version` answer about *your client* and are correct, and the version of *this
   build* is the footer the loader just checked — the directory it is served from, or `scripts/ext_footer.py`
-  against the file. `hf_status().duckdb_version` is the one string that reports the archive label, because
-  `DuckDB::LibraryVersion()` here resolves to a copy compiled into the extension rather than to the process
-  that loaded it.
+  against the file.
 * **Writes buffer to a local temp file first** (the commit API needs sha256 + size up front; a bucket write
   needs the file on disk to chunk it), and upload + commit — or the Xet publish — happen on `Close()`. One
   commit per file, serialized per repository in a process; concurrent writers rely on the Hub's conflict

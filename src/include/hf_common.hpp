@@ -2,19 +2,32 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_opener.hpp"
 #include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
 class DatabaseInstance;
 class FileOpener;
-struct FileOpenerInfo;
+
+//! The `FileOpenerInfo` that names the path a setting lookup, secret resolve or transport session is for.
+//!
+//! Spelled once because 2.0.1 took the field away: the struct was `{string file_path}` in 2.0.0 and is
+//! `{OpenFileInfo file}` there — the path plus the options the file was opened with, so a secret can be picked
+//! per open option. Ten call sites assigned `info.file_path`, and a DuckDB *patch* release then shows up as ten
+//! compile errors (`error: 'struct duckdb::FileOpenerInfo' has no member named 'file_path'`), which is the whole
+//! reason this helper exists rather than a field assignment in ten files.
+inline FileOpenerInfo HFFileOpenerInfo(const string &path = string()) {
+	FileOpenerInfo info;
+	info.file = OpenFileInfo(path);
+	return info;
+}
 
 //! The release of this extension itself, reported by hf_status() and named in CHANGELOG.md - independent of
 //! the DuckDB version identifier the binary is built for, which has to match the running DuckDB exactly.
 //! Hand-moved per release, together with the assertion in scripts/smoke_write.sql: nothing derives it, so
 //! a release that forgets ships an artifact reporting the previous release's number.
-static constexpr const char *HF_EXTENSION_VERSION = "0.0.4";
+static constexpr const char *HF_EXTENSION_VERSION = "0.0.5";
 
 //! Default endpoint. Overridable through the `hf_endpoint` setting, the `HF_ENDPOINT` env var or a secret.
 static constexpr const char *HF_DEFAULT_ENDPOINT = "https://huggingface.co";

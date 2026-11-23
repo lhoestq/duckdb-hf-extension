@@ -27,8 +27,7 @@ namespace duckdb {
 string HFDatasetServerEndpoint(optional_ptr<FileOpener> opener) {
 	if (opener) {
 		Value value;
-		FileOpenerInfo info;
-		info.file_path = "hf://datasets/";
+		FileOpenerInfo info = HFFileOpenerInfo("hf://datasets/");
 		if (FileOpener::TryGetCurrentSetting(opener, Identifier("hf_datasets_server_endpoint"), value, info) &&
 		    !value.IsNull() && !StringValue::Get(value).empty()) {
 			return StringValue::Get(value);

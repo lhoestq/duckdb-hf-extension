@@ -600,8 +600,7 @@ HFClient::HFClient(DatabaseInstance &db_p, optional_ptr<FileOpener> opener_p, HF
 		}
 	}
 	http_util = &HTTPUtil::Get(db);
-	FileOpenerInfo info;
-	info.file_path = path;
+	FileOpenerInfo info = HFFileOpenerInfo(path);
 	// Lease connections through a transport session: one https connection is then reused for every range
 	// request of a scan instead of being renegotiated each time.
 	try {

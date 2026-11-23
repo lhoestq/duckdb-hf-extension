@@ -13,8 +13,7 @@ static string SettingAsString(optional_ptr<FileOpener> opener, const char *key, 
 		return "";
 	}
 	Value value;
-	FileOpenerInfo info;
-	info.file_path = path;
+	FileOpenerInfo info = HFFileOpenerInfo(path);
 	if (!FileOpener::TryGetCurrentSetting(opener, Identifier(key), value, info) || value.IsNull()) {
 		return "";
 	}

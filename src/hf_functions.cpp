@@ -645,8 +645,7 @@ static unique_ptr<FunctionData> HFUploadBind(ClientContext &context, TableFuncti
 	bind_data->target = HFResolveTarget(StringValue::Get(input.inputs[1]), &file_opener, DatabaseInstance::GetDatabase(context));
 	auto message = NamedArgumentAsString(input, "message");
 	if (message.empty()) {
-		FileOpenerInfo info;
-		info.file_path = bind_data->target.url.ToString();
+		FileOpenerInfo info = HFFileOpenerInfo(bind_data->target.url.ToString());
 		Value configured;
 		if (FileOpener::TryGetCurrentSetting(&file_opener, Identifier("hf_commit_message"), configured, info) &&
 		    !configured.IsNull()) {

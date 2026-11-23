@@ -231,8 +231,7 @@ string HFMakeTempPath(DatabaseInstance &db, optional_ptr<FileOpener> opener, con
 	string dir;
 	if (opener) {
 		Value cache_dir;
-		FileOpenerInfo info;
-		info.file_path = "hf://";
+		FileOpenerInfo info = HFFileOpenerInfo("hf://");
 		if (FileOpener::TryGetCurrentSetting(opener, Identifier("hf_cache_dir"), cache_dir, info) &&
 		    !cache_dir.IsNull()) {
 			dir = StringValue::Get(cache_dir);

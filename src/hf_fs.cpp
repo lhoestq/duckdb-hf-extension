@@ -39,8 +39,7 @@ HFTarget HFResolveTarget(const string &path, optional_ptr<FileOpener> opener, Da
 	HFTarget target;
 	target.url = HFUrl::Parse(path, HFSecrets::ResolveEndpoint(opener, &db));
 
-	FileOpenerInfo info;
-	info.file_path = path;
+	FileOpenerInfo info = HFFileOpenerInfo(path);
 	target.connection = HFSecrets::Resolve(opener, &info, SecretScope(target.url), &db);
 	target.url.endpoint = target.connection.endpoint;
 	return target;
@@ -90,8 +89,7 @@ void HFListEntries(DatabaseInstance &db, optional_ptr<FileOpener> opener, const 
 	idx_t limit = HF_DEFAULT_LIST_PAGE_SIZE;
 	if (opener) {
 		Value page_size;
-		FileOpenerInfo info;
-		info.file_path = dir.url.ToString();
+		FileOpenerInfo info = HFFileOpenerInfo(dir.url.ToString());
 		if (FileOpener::TryGetCurrentSetting(opener, Identifier("hf_max_per_page"), page_size, info) &&
 		    !page_size.IsNull()) {
 			auto configured = page_size.GetValue<idx_t>();

@@ -311,8 +311,7 @@ private:
 idx_t ParallelUploads(optional_ptr<FileOpener> opener, const string &path) {
 	if (opener) {
 		Value value;
-		FileOpenerInfo info;
-		info.file_path = path;
+		FileOpenerInfo info = HFFileOpenerInfo(path);
 		if (FileOpener::TryGetCurrentSetting(opener, Identifier("hf_write_max_parallel_uploads"), value, info) &&
 		    !value.IsNull()) {
 			auto configured = value.GetValue<idx_t>();
@@ -330,8 +329,7 @@ idx_t ParallelUploads(optional_ptr<FileOpener> opener, const string &path) {
 HFXetCompressionScheme ChunkCompression(optional_ptr<FileOpener> opener, const string &path) {
 	if (opener) {
 		Value value;
-		FileOpenerInfo info;
-		info.file_path = path;
+		FileOpenerInfo info = HFFileOpenerInfo(path);
 		if (FileOpener::TryGetCurrentSetting(opener, Identifier("hf_xet_compression"), value, info) && !value.IsNull()) {
 			auto configured = StringUtil::Lower(value.ToString());
 			if (configured == "none") {
@@ -358,8 +356,7 @@ HFXetCompressionScheme ChunkCompression(optional_ptr<FileOpener> opener, const s
 bool DedupQueries(optional_ptr<FileOpener> opener, const string &path) {
 	if (opener) {
 		Value value;
-		FileOpenerInfo info;
-		info.file_path = path;
+		FileOpenerInfo info = HFFileOpenerInfo(path);
 		if (FileOpener::TryGetCurrentSetting(opener, Identifier("hf_xet_upload_dedup"), value, info) &&
 		    !value.IsNull()) {
 			return value.GetValue<bool>();

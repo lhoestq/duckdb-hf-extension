@@ -50,8 +50,18 @@ jobs:
       # commit, and does not for d54cbbe3df (it answers v2.0.0-alpha49307). So a 2.0.0 job downloads DuckDB
       # instead of compiling it. On a private repository that bills macOS minutes at 10x, that is the
       # difference worth noticing in a build log: "Using prebuilt DuckDB archive: ..." versus 7 minutes of
-      # compiling before a single line of this extension is built.
-      duckdb_version: v2.0.0
+      # compiling before a single line of this extension is built. (That last sentence is history for this
+      # repository: the vendored workflow sets CI_FETCH_PREBUILT_DUCKDB: false, so every job compiles — which
+      # is what stopped the archive's staged label from reaching a published artifact, see the comment on
+      # CI_FETCH_PREBUILT_DUCKDB below and the three-versions section of DEVELOPMENT.md.)
+      #
+      # 2.0.1 (8d78114e90a53823803660bf821f6073ac87da8c, also a lightweight tag, also no submodules) is the
+      # same story one patch later: the tag exists upstream, so extension-ci-tools' clone checks it out and
+      # the footer says `v2.0.1`. What does not carry over is the *artifact*: a binary stamped `v2.0.0` is
+      # refused by a 2.0.1 client, so a DuckDB patch release is a full eight-platform rebuild published under
+      # a new directory, not a relabel - and the bucket keeps serving the `v2.0.0` tree to 2.0.0 clients
+      # because a publish never deletes.
+      duckdb_version: v2.0.1
       # The matrix is shaped by the event, because GitHub bills macOS minutes at 10x against a monthly
       # quota in a private repository and every job here compiles DuckDB from source (the prebuilt DuckDB
       # archives only exist for released versions). A push therefore builds the three architectures that

@@ -15,7 +15,7 @@ bool HFSettingAsBool(optional_ptr<FileOpener> opener, const char *key, bool fall
 	// settings have to be read while the opener is still alive: see HFWriteHandle, which caches them for the same
 	// reason, and HFCommit/HFUploadLocalFile, which take the resolved flag rather than looking it up later
 	Value result;
-	FileOpenerInfo info;
+	FileOpenerInfo info = HFFileOpenerInfo();
 	if (!FileOpener::TryGetCurrentSetting(opener, Identifier(key), result, info) || result.IsNull()) {
 		return fallback;
 	}
