@@ -55,6 +55,9 @@ Measured, in this order:
 * `scripts/test_install.py` over https from a fresh home: the unsigned tree and the signed tree (the
   repository pinning `sha256:f007c8016bc2…`), both installing, loading and answering
   `hf_ls('hf://datasets/lhoestq/demo1')`.
+* `Reference checks for a past run's artifact` re-dispatched against that same run (`45279679198`), with no
+  `duckdb_version` passed so the workflow's new default is what resolved the artifact name — run on the tag ref,
+  and it answers `0.0.5 | v2.0.1`, identifier matching the footer, 1090/1090, 16 table functions.
 * The recipe the publish script prints, executed with a released client on a fresh home: the three statements
   against the short `hf.co` prefix, verbatim, give `hf_version 0.0.5, duckdb_version v2.0.1` on DuckDB
   `v2.0.1 (Cyanoptera) 8d78114e90`. Same prefix on a `v2.0.0 (Cyanoptera) d54cbbe3df` client gives
